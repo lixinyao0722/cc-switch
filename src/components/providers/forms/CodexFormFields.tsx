@@ -39,11 +39,13 @@ import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesFie
 import { cn } from "@/lib/utils";
 import type {
   ClaudeApiKeyField,
+  CodexSessionHeaderAdapter,
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
   PromptCacheRoutingMode,
   ProviderCategory,
+  Retry429Config,
 } from "@/types";
 import type { AppId } from "@/lib/api";
 
@@ -116,6 +118,12 @@ interface CodexFormFieldsProps {
   onLocalProxyHeadersOverrideChange: (value: string) => void;
   localProxyBodyOverride: string;
   onLocalProxyBodyOverrideChange: (value: string) => void;
+  codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
+  onCodexSessionHeaderAdapterChange?: (
+    value: CodexSessionHeaderAdapter | undefined,
+  ) => void;
+  retry429?: Retry429Config;
+  onRetry429Change?: (value: Retry429Config | undefined) => void;
 }
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
@@ -210,6 +218,10 @@ export function CodexFormFields({
   onLocalProxyHeadersOverrideChange,
   localProxyBodyOverride,
   onLocalProxyBodyOverrideChange,
+  codexSessionHeaderAdapter,
+  onCodexSessionHeaderAdapterChange,
+  retry429,
+  onRetry429Change,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
@@ -246,7 +258,10 @@ export function CodexFormFields({
   // 高级区在有任何可见配置时自动展开（仅折叠→展开，不会自动折叠）：自定义 UA /
   // 请求覆盖 / 已填模型映射 / 原生 Responses（需维护 catalog）/ 已配置思考能力。
   const hasRequestOverrides = Boolean(
-    localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
+    localProxyHeadersOverride.trim() ||
+      localProxyBodyOverride.trim() ||
+      codexSessionHeaderAdapter ||
+      retry429,
   );
   const hasAnyAdvancedValue =
     !!customUserAgent ||
@@ -1079,6 +1094,13 @@ export function CodexFormFields({
                   bodyJson={localProxyBodyOverride}
                   onHeadersJsonChange={onLocalProxyHeadersOverrideChange}
                   onBodyJsonChange={onLocalProxyBodyOverrideChange}
+                  showModelHubControls={appId === "codex"}
+                  codexSessionHeaderAdapter={codexSessionHeaderAdapter}
+                  retry429={retry429}
+                  onCodexSessionHeaderAdapterChange={
+                    onCodexSessionHeaderAdapterChange
+                  }
+                  onRetry429Change={onRetry429Change}
                 />
               </div>
             </div>

@@ -1,4 +1,14 @@
-import type { LocalProxyRequestOverrides } from "@/types";
+import type {
+  CodexSessionHeaderAdapter,
+  LocalProxyRequestOverrides,
+  Retry429Config,
+} from "@/types";
+
+export interface LocalProxyPolicyOptions {
+  appId: "claude" | "codex";
+  codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
+  retry429?: Retry429Config;
+}
 
 export interface RequestOverrideJsonResult {
   value?: Record<string, unknown>;
@@ -159,6 +169,7 @@ export function formatRequestOverrideObject(
 export function buildLocalProxyRequestOverrides(
   headersJson: string,
   bodyJson: string,
+  options?: LocalProxyPolicyOptions,
 ): { overrides?: LocalProxyRequestOverrides; error?: string } {
   const headerResult = parseHeaderOverrideJson(headersJson);
   if (headerResult.error) {
@@ -177,6 +188,48 @@ export function buildLocalProxyRequestOverrides(
   if (bodyResult.value && Object.keys(bodyResult.value).length > 0) {
     overrides.body = bodyResult.value;
   }
+  if (options?.appId === "codex") {
+    if (options.retry429 && !options.codexSessionHeaderAdapter) {
+      return {
+        error: "HTTP 429 retry requires a Codex session header adapter",
+      };
+    }
+    if (options.codexSessionHeaderAdapter) {
+      overrides.codexSessionHeaderAdapter = options.codexSessionHeaderAdapter;
+    }
+    if (options.retry429) {
+      const retryError = validateRetry429(options.retry429);
+      if (retryError) {
+        return { error: retryError };
+      }
+      overrides.retry429 = { ...options.retry429 };
+    }
+  }
 
   return Object.keys(overrides).length > 0 ? { overrides } : {};
+}
+
+function validateRetry429(config: Retry429Config): string | undefined {
+  if (
+    !Number.isInteger(config.maxRetries) ||
+    config.maxRetries < 0 ||
+    config.maxRetries > 10
+  ) {
+    return "HTTP 429 max retries must be an integer between 0 and 10";
+  }
+  if (
+    !Number.isInteger(config.baseDelayMs) ||
+    config.baseDelayMs < 100 ||
+    config.baseDelayMs > 60_000
+  ) {
+    return "HTTP 429 base delay must be an integer between 100 and 60000 ms";
+  }
+  if (
+    !Number.isInteger(config.maxDelayMs) ||
+    config.maxDelayMs < config.baseDelayMs ||
+    config.maxDelayMs > 60_000
+  ) {
+    return "HTTP 429 max delay must be an integer between base delay and 60000 ms";
+  }
+  return undefined;
 }

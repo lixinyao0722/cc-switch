@@ -21,7 +21,9 @@ import type {
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
+  CodexSessionHeaderAdapter,
   PromptCacheRoutingMode,
+  Retry429Config,
   ClaudeApiKeyField,
 } from "@/types";
 import {
@@ -375,6 +377,17 @@ function ProviderFormFull({
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
     );
+    setCodexSessionHeaderAdapter(
+      appId === "codex"
+        ? initialData?.meta?.localProxyRequestOverrides
+            ?.codexSessionHeaderAdapter
+        : undefined,
+    );
+    setRetry429(
+      appId === "codex"
+        ? initialData?.meta?.localProxyRequestOverrides?.retry429
+        : undefined,
+    );
   }, [appId, initialData, supportsFullUrl]);
 
   const defaultValues: ProviderFormData = useMemo(
@@ -566,6 +579,18 @@ function ProviderFormFull({
       formatRequestOverrideObject(
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
+  );
+  const [codexSessionHeaderAdapter, setCodexSessionHeaderAdapter] = useState<
+    CodexSessionHeaderAdapter | undefined
+  >(() =>
+    appId === "codex"
+      ? initialData?.meta?.localProxyRequestOverrides?.codexSessionHeaderAdapter
+      : undefined,
+  );
+  const [retry429, setRetry429] = useState<Retry429Config | undefined>(() =>
+    appId === "codex"
+      ? initialData?.meta?.localProxyRequestOverrides?.retry429
+      : undefined,
   );
 
   const {
@@ -1024,6 +1049,13 @@ function ProviderFormFull({
       ? buildLocalProxyRequestOverrides(
           localProxyHeadersOverride,
           localProxyBodyOverride,
+          appId === "codex"
+            ? {
+                appId: "codex",
+                codexSessionHeaderAdapter,
+                retry429,
+              }
+            : { appId: "claude" },
         )
       : {};
     if (overridesResult.error) {
@@ -2328,6 +2360,10 @@ function ProviderFormFull({
               onLocalProxyHeadersOverrideChange={setLocalProxyHeadersOverride}
               localProxyBodyOverride={localProxyBodyOverride}
               onLocalProxyBodyOverrideChange={setLocalProxyBodyOverride}
+              codexSessionHeaderAdapter={codexSessionHeaderAdapter}
+              onCodexSessionHeaderAdapterChange={setCodexSessionHeaderAdapter}
+              retry429={retry429}
+              onRetry429Change={setRetry429}
             />
           )}
 

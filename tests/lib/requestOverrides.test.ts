@@ -10,6 +10,17 @@ import {
 } from "@/lib/requestOverrides";
 
 describe("requestOverrides", () => {
+  const modelhubPolicy = {
+    appId: "codex" as const,
+    codexSessionHeaderAdapter: "modelhub" as const,
+    retry429: {
+      maxRetries: 10,
+      baseDelayMs: 1000,
+      maxDelayMs: 30000,
+      honorRetryAfter: true,
+    },
+  };
+
   it("treats empty JSON fields as unset", () => {
     expect(buildLocalProxyRequestOverrides("", "   ")).toEqual({});
   });
@@ -71,5 +82,68 @@ describe("requestOverrides", () => {
     expect(
       buildLocalProxyRequestOverrides("", '{ "stream": false }').error,
     ).toBeTruthy();
+  });
+
+  it("builds complete ModelHub proxy policy", () => {
+    expect(
+      buildLocalProxyRequestOverrides(
+        "",
+        '{ "max_output_tokens": 128000 }',
+        modelhubPolicy,
+      ),
+    ).toEqual({
+      overrides: {
+        body: { max_output_tokens: 128000 },
+        codexSessionHeaderAdapter: "modelhub",
+        retry429: {
+          maxRetries: 10,
+          baseDelayMs: 1000,
+          maxDelayMs: 30000,
+          honorRetryAfter: true,
+        },
+      },
+    });
+  });
+
+  it("rejects retry count above ten", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        ...modelhubPolicy,
+        retry429: { ...modelhubPolicy.retry429, maxRetries: 11 },
+      }).error,
+    ).toBeTruthy();
+  });
+
+  it("rejects max delay below base delay", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        ...modelhubPolicy,
+        retry429: {
+          ...modelhubPolicy.retry429,
+          baseDelayMs: 2000,
+          maxDelayMs: 1000,
+        },
+      }).error,
+    ).toBeTruthy();
+  });
+
+  it("removes ModelHub-only fields for non-Codex providers", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", '{ "temperature": 0.2 }', {
+        ...modelhubPolicy,
+        appId: "claude",
+      }),
+    ).toEqual({ overrides: { body: { temperature: 0.2 } } });
+  });
+
+  it("preserves body max_output_tokens as a number", () => {
+    const result = buildLocalProxyRequestOverrides(
+      "",
+      '{ "max_output_tokens": 128000 }',
+      modelhubPolicy,
+    );
+
+    expect(result.overrides?.body?.max_output_tokens).toBe(128000);
+    expect(typeof result.overrides?.body?.max_output_tokens).toBe("number");
   });
 });
