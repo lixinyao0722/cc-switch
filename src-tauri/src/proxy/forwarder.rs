@@ -3778,6 +3778,7 @@ mod tests {
                 },
                 "messages": []
             })),
+            ..LocalProxyRequestOverrides::default()
         };
 
         assert!(apply_local_proxy_body_overrides(&mut body, &overrides));
@@ -3815,6 +3816,7 @@ mod tests {
                 ("X-Bad".to_string(), "bad\nvalue".to_string()),
             ]),
             body: None,
+            ..LocalProxyRequestOverrides::default()
         };
 
         apply_local_proxy_header_overrides(&mut headers, Some(&overrides), false);
@@ -3854,6 +3856,7 @@ mod tests {
         let overrides = LocalProxyRequestOverrides {
             headers: HashMap::from([("User-Agent".to_string(), "custom".to_string())]),
             body: None,
+            ..LocalProxyRequestOverrides::default()
         };
 
         apply_local_proxy_header_overrides(&mut headers, Some(&overrides), true);

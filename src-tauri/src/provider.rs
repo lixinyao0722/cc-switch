@@ -380,18 +380,45 @@ pub struct CodexChatReasoningConfig {
     pub output_format: Option<String>,
 }
 
+/// Provider-scoped adapter for Codex session headers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSessionHeaderAdapter {
+    Modelhub,
+}
+
+/// Same-provider retry policy for upstream HTTP 429 responses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Retry429Config {
+    pub max_retries: u8,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub honor_retry_after: bool,
+}
+
 /// Local proxy request overrides applied after route/protocol transforms.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct LocalProxyRequestOverrides {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
+    #[serde(
+        rename = "codexSessionHeaderAdapter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_session_header_adapter: Option<CodexSessionHeaderAdapter>,
+    #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
+    pub retry_429: Option<Retry429Config>,
 }
 
 impl LocalProxyRequestOverrides {
     pub fn is_empty(&self) -> bool {
-        self.headers.is_empty() && self.body.is_none()
+        self.headers.is_empty()
+            && self.body.is_none()
+            && self.codex_session_header_adapter.is_none()
+            && self.retry_429.is_none()
     }
 }
 
@@ -972,8 +999,9 @@ pub struct OpenCodeModelLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeModelConfig, CodexModelConfig, GeminiModelConfig, LocalProxyRequestOverrides,
-        OpenCodeProviderConfig, Provider, ProviderManager, ProviderMeta, UniversalProvider,
+        ClaudeModelConfig, CodexModelConfig, CodexSessionHeaderAdapter, GeminiModelConfig,
+        LocalProxyRequestOverrides, OpenCodeProviderConfig, Provider, ProviderManager,
+        ProviderMeta, Retry429Config, UniversalProvider,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1034,6 +1062,7 @@ mod tests {
             local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
                 headers: HashMap::from([("X-Test".to_string(), "yes".to_string())]),
                 body: Some(json!({ "temperature": 0.2 })),
+                ..LocalProxyRequestOverrides::default()
             }),
             ..ProviderMeta::default()
         };
@@ -1053,6 +1082,52 @@ mod tests {
         let overrides = decoded.local_proxy_request_overrides.unwrap();
         assert_eq!(overrides.headers.get("X-Test"), Some(&"yes".to_string()));
         assert_eq!(overrides.body.unwrap()["temperature"], 0.2);
+    }
+
+    #[test]
+    fn provider_meta_roundtrips_modelhub_proxy_compat() {
+        let overrides = LocalProxyRequestOverrides {
+            headers: HashMap::new(),
+            body: Some(json!({ "max_output_tokens": 128000 })),
+            codex_session_header_adapter: Some(CodexSessionHeaderAdapter::Modelhub),
+            retry_429: Some(Retry429Config {
+                max_retries: 10,
+                base_delay_ms: 1_000,
+                max_delay_ms: 30_000,
+                honor_retry_after: true,
+            }),
+        };
+        let meta = ProviderMeta {
+            local_proxy_request_overrides: Some(overrides.clone()),
+            ..ProviderMeta::default()
+        };
+
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert_eq!(
+            value["localProxyRequestOverrides"],
+            json!({
+                "codexSessionHeaderAdapter": "modelhub",
+                "body": { "max_output_tokens": 128000 },
+                "retry429": {
+                    "maxRetries": 10,
+                    "baseDelayMs": 1000,
+                    "maxDelayMs": 30000,
+                    "honorRetryAfter": true
+                }
+            })
+        );
+
+        let decoded: ProviderMeta =
+            serde_json::from_value(value).expect("deserialize ProviderMeta");
+        assert_eq!(decoded.local_proxy_request_overrides, Some(overrides));
+    }
+
+    #[test]
+    fn provider_meta_omits_modelhub_proxy_compat_when_disabled() {
+        let value = serde_json::to_value(ProviderMeta::default()).expect("serialize ProviderMeta");
+
+        assert!(value.get("localProxyRequestOverrides").is_none());
+        assert!(LocalProxyRequestOverrides::default().is_empty());
     }
 
     #[test]

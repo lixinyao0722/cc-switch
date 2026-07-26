@@ -163,9 +163,20 @@ export interface CodexChatReasoning {
 
 export type PromptCacheRoutingMode = "auto" | "enabled" | "disabled";
 
+export type CodexSessionHeaderAdapter = "modelhub";
+
+export interface Retry429Config {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  honorRetryAfter: boolean;
+}
+
 export interface LocalProxyRequestOverrides {
   headers?: Record<string, string>;
   body?: Record<string, unknown>;
+  codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
+  retry429?: Retry429Config;
 }
 
 // 供应商元数据（字段名与后端一致，保持 snake_case）
