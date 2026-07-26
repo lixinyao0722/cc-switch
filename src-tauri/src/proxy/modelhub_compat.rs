@@ -40,6 +40,40 @@ pub(crate) fn apply_modelhub_codex_headers(
     Ok(())
 }
 
+pub(crate) fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError {
+        status: 400,
+        body: Some(body),
+    } = error
+    else {
+        return false;
+    };
+
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("invalid_encrypted_content")
+}
+
+pub(crate) fn remove_encrypted_reasoning_items(body: &mut Value) -> usize {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+
+    let before = input.len();
+    input.retain(|item| {
+        item.get("type").and_then(Value::as_str) != Some("reasoning")
+            || item.get("encrypted_content").is_none()
+    });
+    before.saturating_sub(input.len())
+}
+
 fn required_identity(
     headers: &HeaderMap,
     names: &[&str],
@@ -78,7 +112,10 @@ fn parse_extra_object(headers: &HeaderMap) -> Result<Map<String, Value>, ProxyEr
 
 #[cfg(test)]
 mod tests {
-    use super::apply_modelhub_codex_headers;
+    use super::{
+        apply_modelhub_codex_headers, is_invalid_encrypted_content_error,
+        remove_encrypted_reasoning_items,
+    };
     use crate::proxy::ProxyError;
     use http::HeaderMap;
     use serde_json::json;
@@ -186,5 +223,68 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("codex_"));
+    }
+
+    #[test]
+    fn invalid_encrypted_content_detection_requires_exact_400_error_code() {
+        let exact = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"code":"invalid_encrypted_content","message":"could not verify"}}"#
+                    .to_string(),
+            ),
+        };
+        let wrong_status = ProxyError::UpstreamError {
+            status: 422,
+            body: Some(
+                r#"{"error":{"code":"invalid_encrypted_content","message":"could not verify"}}"#
+                    .to_string(),
+            ),
+        };
+        let message_only = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"code":"invalid_request","message":"invalid_encrypted_content"}}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(is_invalid_encrypted_content_error(&exact));
+        assert!(!is_invalid_encrypted_content_error(&wrong_status));
+        assert!(!is_invalid_encrypted_content_error(&message_only));
+        assert!(!is_invalid_encrypted_content_error(
+            &ProxyError::UpstreamError {
+                status: 400,
+                body: Some("not-json".to_string()),
+            }
+        ));
+    }
+
+    #[test]
+    fn encrypted_reasoning_cleanup_preserves_visible_and_unencrypted_items() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_parent",
+                    "encrypted_content": "parent-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_summary_only",
+                    "summary": [{"type": "summary_text", "text": "visible summary"}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}]
+                }
+            ]
+        });
+
+        assert_eq!(remove_encrypted_reasoning_items(&mut body), 1);
+        assert_eq!(body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(body["input"][0]["id"], "rs_summary_only");
+        assert_eq!(body["input"][1]["content"][0]["text"], "continue");
     }
 }

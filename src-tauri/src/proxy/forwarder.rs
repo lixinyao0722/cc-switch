@@ -601,6 +601,110 @@ impl RequestForwarder {
                     );
                     let mut signature_rectifier_non_retryable_client_error = false;
 
+                    if should_apply_modelhub_header_adapter(app_type, endpoint, provider, false)
+                        && super::modelhub_compat::is_invalid_encrypted_content_error(&e)
+                    {
+                        let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
+                            &mut provider_body,
+                        );
+                        if removed > 0 {
+                            log::warn!(
+                                "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after removing {removed} encrypted reasoning item(s)",
+                                provider.id
+                            );
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &provider_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format, outbound_model)) => {
+                                    log::info!(
+                                        "[{app_type_str}] [ModelHubCompat] encrypted reasoning fallback succeeded"
+                                    );
+                                    self.record_success_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+
+                                    {
+                                        let mut current_providers =
+                                            self.current_providers.write().await;
+                                        current_providers.insert(
+                                            app_type_str.to_string(),
+                                            (provider.id.clone(), provider.name.clone()),
+                                        );
+                                    }
+
+                                    {
+                                        let mut status = self.status.write().await;
+                                        status.success_requests += 1;
+                                        status.last_error = None;
+                                        let should_switch =
+                                            self.current_provider_id_at_start.as_str()
+                                                != provider.id.as_str();
+                                        if should_switch {
+                                            status.failover_count += 1;
+                                            let fm = self.failover_manager.clone();
+                                            let ah = self.app_handle.clone();
+                                            let pid = provider.id.clone();
+                                            let pname = provider.name.clone();
+                                            let at = app_type_str.to_string();
+                                            tokio::spawn(async move {
+                                                let _ = fm
+                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
+                                                    .await;
+                                            });
+                                        }
+                                        if status.total_requests > 0 {
+                                            status.success_rate = (status.success_requests as f32
+                                                / status.total_requests as f32)
+                                                * 100.0;
+                                        }
+                                    }
+
+                                    return Ok(ForwardResult {
+                                        response,
+                                        provider: provider.clone(),
+                                        claude_api_format,
+                                        outbound_model,
+                                        connection_guard: None,
+                                    });
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] [ModelHubCompat] encrypted reasoning fallback failed: {retry_err}"
+                                    );
+                                    if let Some(err) = self
+                                        .handle_rectifier_retry_failure(
+                                            retry_err,
+                                            provider,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                            "ModelHub encrypted reasoning fallback",
+                                            &mut last_error,
+                                            &mut last_provider,
+                                        )
+                                        .await
+                                    {
+                                        return Err(err);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     if self.media_retry_should_trigger(
                         adapter.name(),
                         media_rectifier_retried,
@@ -3640,10 +3744,13 @@ mod tests {
     use crate::provider::LocalProxyRequestOverrides;
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
     use bytes::Bytes;
     use http::StatusCode;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     fn test_provider_with_type(provider_type: Option<&str>) -> Provider {
@@ -3783,6 +3890,151 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn modelhub_invalid_encrypted_content_retries_without_inherited_reasoning_items() {
+        let received_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received_bodies_for_route = received_bodies.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_bodies = received_bodies_for_route.clone();
+                async move {
+                    let attempt = {
+                        let mut bodies = received_bodies.lock().expect("request body lock");
+                        bodies.push(body);
+                        bodies.len()
+                    };
+                    if attempt == 1 {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "code": "invalid_encrypted_content",
+                                    "message": "The encrypted content for item rs_parent_1 could not be verified."
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "id": "resp_child",
+                                "object": "response",
+                                "status": "completed",
+                                "output": []
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_parent_1",
+                    "summary": [{"type": "summary_text", "text": "parent reasoning"}],
+                    "encrypted_content": "parent-ciphertext-1"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "parent answer"}]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_parent_2",
+                    "summary": [],
+                    "encrypted_content": "parent-ciphertext-2"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_parent",
+                    "name": "read_file",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_parent",
+                    "output": "file contents"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue in the fork"}]
+                }
+            ]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "child-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "child-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "sanitized retry should recover the fork request: {}",
+                error.error
+            ),
+        };
+        assert_eq!(result.response.status(), StatusCode::OK);
+        let bodies = received_bodies.lock().expect("request body lock");
+        assert_eq!(bodies.len(), 2, "exactly one sanitized retry is expected");
+        assert_eq!(
+            bodies[0]["input"]
+                .as_array()
+                .expect("first request input")
+                .len(),
+            6
+        );
+        let retry_input = bodies[1]["input"].as_array().expect("retry input");
+        assert_eq!(retry_input.len(), 4);
+        assert_eq!(retry_input[0]["content"][0]["text"], "parent answer");
+        assert_eq!(retry_input[1]["call_id"], "call_parent");
+        assert_eq!(retry_input[2]["output"], "file contents");
+        assert_eq!(retry_input[3]["content"][0]["text"], "continue in the fork");
+        assert!(retry_input
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
     }
 
     #[test]
