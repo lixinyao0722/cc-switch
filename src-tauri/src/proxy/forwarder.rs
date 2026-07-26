@@ -3911,8 +3911,9 @@ mod tests {
                             StatusCode::BAD_REQUEST,
                             Json(json!({
                                 "error": {
-                                    "code": "invalid_encrypted_content",
-                                    "message": "The encrypted content for item rs_parent_1 could not be verified."
+                                    "message": "code: invalid_encrypted_content; message: The encrypted content for item rs_parent_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+                                    "type": "invalid_request_error",
+                                    "code": "-4003"
                                 }
                             })),
                         )

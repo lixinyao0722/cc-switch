@@ -49,16 +49,21 @@ pub(crate) fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
         return false;
     };
 
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/code")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    if value.pointer("/error/code").and_then(Value::as_str) == Some("invalid_encrypted_content") {
+        return true;
+    }
+
+    value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .and_then(|message| message.split(';').next())
+        .and_then(|field| field.split_once(':'))
+        .is_some_and(|(label, code)| {
+            label.trim().eq_ignore_ascii_case("code") && code.trim() == "invalid_encrypted_content"
         })
-        .as_deref()
-        == Some("invalid_encrypted_content")
 }
 
 pub(crate) fn remove_encrypted_reasoning_items(body: &mut Value) -> usize {
@@ -226,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_encrypted_content_detection_requires_exact_400_error_code() {
+    fn invalid_encrypted_content_detection_recognizes_supported_400_error_shapes() {
         let exact = ProxyError::UpstreamError {
             status: 400,
             body: Some(
@@ -258,6 +263,15 @@ mod tests {
                 body: Some("not-json".to_string()),
             }
         ));
+
+        let modelhub_actual = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"code: invalid_encrypted_content; message: The encrypted content for item rs_parent could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"-4003"}}"#
+                    .to_string(),
+            ),
+        };
+        assert!(is_invalid_encrypted_content_error(&modelhub_actual));
     }
 
     #[test]
