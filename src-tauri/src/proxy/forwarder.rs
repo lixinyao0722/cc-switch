@@ -74,6 +74,22 @@ fn should_apply_modelhub_header_adapter(
             == Some(crate::provider::CodexSessionHeaderAdapter::Modelhub)
 }
 
+fn modelhub_retry_429_config<'a>(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &'a Provider,
+    is_copilot: bool,
+) -> Option<&'a crate::provider::Retry429Config> {
+    if !should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+        return None;
+    }
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+        .and_then(|overrides| overrides.retry_429.as_ref())
+}
+
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -2249,63 +2265,78 @@ impl RequestForwarder {
             is_copilot,
         );
 
-        // 发送请求
-        let response = if is_socks_proxy || !preserve_exact_header_case {
-            // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
-            // 连接池，避免 raw TCP/TLS path 每次请求都重新握手。SOCKS5 也只能走 reqwest。
-            log::debug!(
-                "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
-            );
-            let client = super::http_client::get();
-            let mut request = client.request(method.clone(), &url);
-            if request_is_streaming {
-                // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
-                // 的首包/静默期超时控制，避免长流被总时长误杀。
-                request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
-            } else if !self.non_streaming_timeout.is_zero() {
-                request = request.timeout(self.non_streaming_timeout);
-            }
-            for (key, value) in &ordered_headers {
-                request = request.header(key, value);
-            }
-            let send = request.body(body_bytes).send();
-            let send_result = if request_is_streaming {
-                let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
-                    timeout
+        // 发送请求；ModelHub 的 429 重试包裹单个 Provider attempt，不参与故障转移。
+        let retry_429_config = modelhub_retry_429_config(app_type, endpoint, provider, is_copilot);
+        let response = super::retry_429::send_with_retry_429(retry_429_config, || {
+            let method = method.clone();
+            let url = url.clone();
+            let ordered_headers = ordered_headers.clone();
+            let extensions = extensions.clone();
+            let body_bytes = body_bytes.clone();
+            let upstream_proxy_url = upstream_proxy_url.clone();
+            let target_for_log = target_for_log.clone();
+            async move {
+                if is_socks_proxy || !preserve_exact_header_case {
+                    // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
+                    // 连接池，避免 raw TCP/TLS path 每次请求都重新握手。SOCKS5 也只能走 reqwest。
+                    log::debug!(
+                        "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
+                    );
+                    let client = super::http_client::get();
+                    let mut request = client.request(method, &url);
+                    if request_is_streaming {
+                        // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
+                        // 的首包/静默期超时控制，避免长流被总时长误杀。
+                        request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
+                    } else if !self.non_streaming_timeout.is_zero() {
+                        request = request.timeout(self.non_streaming_timeout);
+                    }
+                    for (key, value) in &ordered_headers {
+                        request = request.header(key, value);
+                    }
+                    let send = request.body(body_bytes).send();
+                    let send_result = if request_is_streaming {
+                        let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
+                            timeout
+                        } else {
+                            self.streaming_first_byte_timeout
+                        };
+                        tokio::time::timeout(header_timeout, send)
+                            .await
+                            .map_err(|_| {
+                                ProxyError::Timeout(format!(
+                                    "流式响应首包超时: {}s（上游未返回响应头）",
+                                    header_timeout.as_secs()
+                                ))
+                            })?
+                    } else {
+                        send.await
+                    };
+                    let reqwest_resp = send_result.map_err(map_reqwest_send_error)?;
+                    Ok(ProxyResponse::Reqwest(reqwest_resp))
                 } else {
-                    self.streaming_first_byte_timeout
-                };
-                tokio::time::timeout(header_timeout, send)
-                    .await
-                    .map_err(|_| {
-                        ProxyError::Timeout(format!(
-                            "流式响应首包超时: {}s（上游未返回响应头）",
-                            header_timeout.as_secs()
+                    // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
+                    // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
+                    let uri: http::Uri = url.parse().map_err(|e| {
+                        ProxyError::ForwardFailed(format!(
+                            "Invalid upstream URL ({target_for_log}): {e}"
                         ))
-                    })?
-            } else {
-                send.await
-            };
-            let reqwest_resp = send_result.map_err(map_reqwest_send_error)?;
-            ProxyResponse::Reqwest(reqwest_resp)
-        } else {
-            // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
-            // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
-            let uri: http::Uri = url.parse().map_err(|e| {
-                ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
-            })?;
-            super::hyper_client::send_request(
-                uri,
-                &target_for_log,
-                method.clone(),
-                ordered_headers,
-                extensions.clone(),
-                body_bytes,
-                timeout,
-                upstream_proxy_url.as_deref(),
-            )
-            .await?
-        };
+                    })?;
+                    super::hyper_client::send_request(
+                        uri,
+                        &target_for_log,
+                        method,
+                        ordered_headers,
+                        extensions,
+                        body_bytes,
+                        timeout,
+                        upstream_proxy_url.as_deref(),
+                    )
+                    .await
+                }
+            }
+        })
+        .await?;
 
         // 检查响应状态
         let status = response.status();
@@ -3668,6 +3699,12 @@ mod tests {
                 codex_session_header_adapter: Some(
                     crate::provider::CodexSessionHeaderAdapter::Modelhub,
                 ),
+                retry_429: Some(crate::provider::Retry429Config {
+                    max_retries: 10,
+                    base_delay_ms: 1_000,
+                    max_delay_ms: 30_000,
+                    honor_retry_after: true,
+                }),
                 ..LocalProxyRequestOverrides::default()
             }),
             ..crate::provider::ProviderMeta::default()
@@ -3729,6 +3766,23 @@ mod tests {
             &official,
             false,
         ));
+    }
+
+    #[test]
+    fn same_provider_429_policy_is_scoped_to_modelhub_codex_response_routes() {
+        let provider = provider_with_modelhub_header_adapter();
+
+        let config =
+            modelhub_retry_429_config(&AppType::Codex, "/responses", &provider, false).unwrap();
+        assert_eq!(config.max_retries, 10);
+        assert!(modelhub_retry_429_config(&AppType::Codex, "/models", &provider, false,).is_none());
+        assert!(modelhub_retry_429_config(
+            &AppType::GrokBuild,
+            "/grokbuild/v1/responses",
+            &provider,
+            false,
+        )
+        .is_none());
     }
 
     #[test]
