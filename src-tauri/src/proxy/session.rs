@@ -224,7 +224,7 @@ pub struct SessionIdResult {
 /// 3. 生成新 UUID
 ///
 /// ### Codex 请求
-/// 1. Headers: `session_id` 或 `x-session-id`
+/// 1. Headers: `session-id`、`session_id` 或 `x-session-id`
 /// 2. `metadata.session_id`
 /// 3. 生成新 UUID
 ///
@@ -286,7 +286,7 @@ fn extract_claude_session(
 /// 提取 Codex Session ID
 fn extract_codex_session(headers: &HeaderMap, body: &serde_json::Value) -> Option<SessionIdResult> {
     // 1. 从 headers 提取
-    for header_name in &["session_id", "x-session-id"] {
+    for header_name in &["session-id", "session_id", "x-session-id"] {
         if let Some(value) = headers.get(*header_name) {
             if let Ok(session_id) = value.to_str() {
                 // Codex Session ID 通常较长（UUID 格式）
@@ -587,6 +587,24 @@ mod tests {
         assert!(!result.session_id.is_empty());
         assert_eq!(result.source, SessionIdSource::Generated);
         assert!(!result.client_provided);
+    }
+
+    #[test]
+    fn codex_official_session_id_header_is_client_provided() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "session-id",
+            "67e55044-10b1-426f-9247-bb680e5fe0c7".parse().unwrap(),
+        );
+
+        let result = extract_session_id(&headers, &json!({}), "codex");
+
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
+        assert_eq!(
+            result.session_id,
+            "codex_67e55044-10b1-426f-9247-bb680e5fe0c7"
+        );
     }
 
     #[test]

@@ -40,6 +40,40 @@ use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
+fn should_apply_modelhub_header_adapter(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &Provider,
+    is_copilot: bool,
+) -> bool {
+    if !matches!(app_type, AppType::Codex)
+        || is_copilot
+        || super::providers::is_codex_official_provider(provider)
+    {
+        return false;
+    }
+
+    let path = endpoint.split('?').next().unwrap_or(endpoint);
+    let is_responses_path = matches!(
+        path,
+        "/responses"
+            | "/v1/responses"
+            | "/v1/v1/responses"
+            | "/codex/v1/responses"
+            | "/responses/compact"
+            | "/v1/responses/compact"
+            | "/v1/v1/responses/compact"
+            | "/codex/v1/responses/compact"
+    );
+    is_responses_path
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+            .and_then(|overrides| overrides.codex_session_header_adapter)
+            == Some(crate::provider::CodexSessionHeaderAdapter::Modelhub)
+}
+
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -2162,6 +2196,9 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             is_copilot,
         );
+        if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+            super::modelhub_compat::apply_modelhub_codex_headers(headers, &mut ordered_headers)?;
+        }
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
@@ -3622,6 +3659,76 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    fn provider_with_modelhub_header_adapter() -> Provider {
+        let mut provider = test_provider_with_type(None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..LocalProxyRequestOverrides::default()
+            }),
+            ..crate::provider::ProviderMeta::default()
+        });
+        provider
+    }
+
+    #[test]
+    fn modelhub_header_adapter_is_enabled_for_codex_response_routes() {
+        let provider = provider_with_modelhub_header_adapter();
+
+        for endpoint in [
+            "/responses",
+            "/v1/responses",
+            "/v1/v1/responses",
+            "/codex/v1/responses",
+            "/responses/compact",
+            "/v1/responses/compact",
+            "/v1/v1/responses/compact",
+            "/codex/v1/responses/compact",
+        ] {
+            assert!(should_apply_modelhub_header_adapter(
+                &AppType::Codex,
+                endpoint,
+                &provider,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn modelhub_header_adapter_is_skipped_outside_custom_codex_response_routes() {
+        let provider = provider_with_modelhub_header_adapter();
+        let mut official = provider.clone();
+        official.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        official.category = Some("official".to_string());
+
+        assert!(!should_apply_modelhub_header_adapter(
+            &AppType::Codex,
+            "/models",
+            &provider,
+            false,
+        ));
+        assert!(!should_apply_modelhub_header_adapter(
+            &AppType::GrokBuild,
+            "/grokbuild/v1/responses",
+            &provider,
+            false,
+        ));
+        assert!(!should_apply_modelhub_header_adapter(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            true,
+        ));
+        assert!(!should_apply_modelhub_header_adapter(
+            &AppType::Codex,
+            "/responses",
+            &official,
+            false,
+        ));
     }
 
     #[test]
