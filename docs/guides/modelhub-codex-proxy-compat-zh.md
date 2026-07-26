@@ -1,0 +1,186 @@
+# ModelHub Codex 代理兼容说明
+
+本文记录 OpenAI 官方签名 Codex CLI 经 CC Switch 本地路由访问 Bytedance ModelHub 原生 Responses API 时的兼容契约、验证方法与回滚边界。
+
+## 目标架构
+
+```text
+ChatGPT App
+  -> /Applications/ChatGPT.app/Contents/Resources/codex
+  -> CC Switch http://127.0.0.1:15721/v1
+  -> https://aidp.bytedance.net/api/modelhub/online/responses
+```
+
+官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
+
+## Provider 配置
+
+目标 Provider 使用原生 Responses API：
+
+```toml
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_provider = "modelhub"
+service_tier = "priority"
+model_reasoning_effort = "max"
+model_auto_compact_token_limit = 829_674
+model_context_window = 921_860
+model_catalog_json = "/Users/shopee/.codex/models-modelhub-1m.json"
+
+[model_providers.modelhub]
+name = "modelhub"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://aidp.bytedance.net/api/modelhub/online"
+env_key = "MODELHUB_AK"
+stream_idle_timeout_ms = 600_000
+request_max_retries = 10
+stream_max_retries = 10
+```
+
+官方 CLI 的 live `config.toml` 不保留以下私有字段：
+
+```toml
+model_max_output_tokens = 128_000
+retry_429 = true
+```
+
+这些能力由 Provider 元数据承接：
+
+```json
+{
+  "localProxyRequestOverrides": {
+    "codexSessionHeaderAdapter": "modelhub",
+    "body": {
+      "max_output_tokens": 128000
+    },
+    "retry429": {
+      "maxRetries": 10,
+      "baseDelayMs": 1000,
+      "maxDelayMs": 30000,
+      "honorRetryAfter": true
+    }
+  }
+}
+```
+
+## Header 映射
+
+官方 CLI 入站：
+
+```text
+session-id: <wire session id>
+thread-id: <current thread id>
+x-client-request-id: <current thread id>
+```
+
+ModelHub 出站：
+
+```text
+session_id: <wire session id>
+thread_id: <current thread id>
+extra: {"session_id":"<wire session id>"}
+x-client-request-id: <current thread id>
+```
+
+规则：
+
+- 只在 Codex 的 `/responses` 与 `/responses/compact` 路由族生效。
+- OpenAI Official、Copilot、Grok Build、`/models` 和其他 Provider 不应用该映射。
+- 同时兼容私有 CLI 的 `session_id`、`thread_id`、`x-session-id` 输入，便于紧急回滚。
+- `extra` 已存在时必须是 JSON object；保留其他静态字段，并用当前真实 session 覆盖 `session_id`。
+- 缺少 session/thread、值为空、超过 256 字节或 `extra` 非法时拒绝请求，不生成随机上游身份。
+- 日志只记录字段是否存在和是否合并，不记录真实 ID 或完整 `extra`。
+
+## Body 覆盖
+
+`localProxyRequestOverrides.body` 在协议转换完成后、最终序列化前深度合并：
+
+```json
+{
+  "max_output_tokens": 128000
+}
+```
+
+顶层 `stream` 属于受保护协议字段，不能通过 Body override 修改。Header、Body 和 adapter 均为 Provider 级配置，不得设置成全局默认。
+
+## HTTP 429 重试
+
+429 policy 位于单个 ModelHub Provider attempt 内，与跨 Provider 故障转移分离：
+
+- 初始请求之外最多重试 10 次。
+- 所有尝试复用相同 method、URL、最终 Header 和序列化 body。
+- 优先解析 `Retry-After` 的秒数或 HTTP-date，并限制在 30 秒以内。
+- 无有效 `Retry-After` 时按 1、2、4、8、16、30 秒退避，后续保持 30 秒。
+- 中间 429 先排空响应体，不更新 Provider 熔断状态。
+- 重试耗尽后把最终 429 交给原有错误处理。
+- 自动故障转移保持关闭，不因 429 切换 Provider。
+
+## 验证
+
+源码验证：
+
+```zsh
+pnpm typecheck
+pnpm format:check
+pnpm test:unit
+
+cd src-tauri
+LZMA_API_STATIC=1 cargo fmt --check
+LZMA_API_STATIC=1 cargo clippy --all-targets -- -D warnings
+LZMA_API_STATIC=1 cargo test
+```
+
+本机 Intel Homebrew 可能把 `/usr/local/Cellar/xz/5.2.7/lib` 注入 arm64 链接；使用 `LZMA_API_STATIC=1` 从 vendored xz 构建静态 arm64 liblzma，避免错误动态库进入测试或发布产物。
+
+上线后验证：
+
+- ChatGPT 主 `app-server` 和 `node_repl` 子 `app-server` 均运行 App 内置官方 CLI。
+- CC Switch 全局代理与 Codex takeover 开启，监听 `127.0.0.1:15721`。
+- 自动故障转移关闭。
+- 新会话、恢复会话和子代理均能调用 ModelHub。
+- 电脑、内置浏览器和 Chrome 插件均无签名拒绝。
+- `/usr/local/bin/codex` 保持原 hash，作为快速回滚入口。
+
+## 敏感信息
+
+禁止在提交、测试 fixture、命令输出或日志中记录：
+
+- `auth.json` 完整内容；
+- `MODELHUB_AK`；
+- bearer token、API Key；
+- 真实 `session_id`、`thread_id` 或完整 `extra`；
+- 带凭证的完整上游 URL。
+
+测试使用固定虚构 UUID 和本地 mock response。
+
+## 升级
+
+ChatGPT App 更新后重新核对：
+
+- 内置 CLI 路径和 Team ID `2DC432GLL2`；
+- `session-id`、`thread-id` 和 `x-client-request-id` 行为；
+- `node_repl` 中 App 版本、trusted browser client hashes 与 Computer Use bundle 路径。
+
+CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验证：
+
+1. Provider 元数据类型；
+2. ModelHub session header adapter；
+3. 同 Provider 429 retry loop；
+4. Provider UI 与四语文案。
+
+在重新验证完成前，不使用上游 updater 覆盖定制 App。
+
+## 回滚
+
+快速回滚只把 ChatGPT 主进程和 `node_repl` 的 `CODEX_CLI_PATH` 恢复为 `/usr/local/bin/codex`；ModelHub adapter 兼容私有 CLI 的下划线头，但电脑、浏览器和 Chrome 的旧签名失败会重新出现。
+
+完整回滚必须先退出 ChatGPT 和 CC Switch，再恢复：
+
+- 原 `/Applications/CC Switch.app`；
+- `~/.cc-switch/cc-switch.db` 与 `settings.json`；
+- `~/.codex/config.toml` 与 `auth.json`；
+- LaunchAgent 和 `launchctl CODEX_CLI_PATH`；
+- 迁移前 Provider、代理与 takeover 状态。
+
+完整操作顺序见 Codex 仓库中的 `docs/superpowers/plans/2026-07-26-official-cli-cc-switch-migration.md`。
