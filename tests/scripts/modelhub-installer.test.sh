@@ -566,6 +566,310 @@ test_settings_merge_creates_missing_file() {
   assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
 }
 
+write_executable_stub() {
+  local path="$1"
+  shift
+  printf '%s\n' '#!/bin/bash' 'set -euo pipefail' "$@" >"$path"
+  chmod +x "$path"
+}
+
+create_transaction_stubs() {
+  local case_dir="$1"
+  local stub_dir="$case_dir/stubs"
+  mkdir -p "$stub_dir"
+
+  write_executable_stub "$stub_dir/codesign" \
+    'if [[ "${1:-}" == "-dv" ]]; then echo "TeamIdentifier=2DC432GLL2" >&2; fi' \
+    'exit 0'
+  write_executable_stub "$stub_dir/security" \
+    'case "${1:-}" in' \
+    '  find-generic-password)' \
+    '    [[ -f "$FAKE_KEYCHAIN_STATE" ]] || exit 44' \
+    '    printf "fake-modelhub-ak\n"' \
+    '    ;;' \
+    '  add-generic-password)' \
+    '    [[ "${FAKE_SECURITY_MODE:-success}" != "cancel" ]] || exit 1' \
+    '    : >"$FAKE_KEYCHAIN_STATE"' \
+    '    ;;' \
+    '  delete-generic-password)' \
+    '    rm -f "$FAKE_KEYCHAIN_STATE"' \
+    '    ;;' \
+    'esac'
+  write_executable_stub "$stub_dir/launchctl" \
+    'mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"' \
+    'case "${1:-}" in' \
+    '  setenv) : >"$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
+    '  unsetenv) rm -f "$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
+    '  bootstrap) : >"$FAKE_LAUNCHCTL_STATE_DIR/job" ;;' \
+    '  bootout) rm -f "$FAKE_LAUNCHCTL_STATE_DIR/job" ;;' \
+    'esac'
+  write_executable_stub "$stub_dir/osascript" 'exit 0'
+  write_executable_stub "$stub_dir/open" 'exit 0'
+  write_executable_stub "$stub_dir/xattr" 'exit 0'
+  write_executable_stub "$stub_dir/sleep" 'exit 0'
+  write_executable_stub "$stub_dir/curl" \
+    'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '  printf "{\"status\":\"healthy\",\"timestamp\":\"test\"}\n"' \
+    '  exit 0' \
+    'fi' \
+    'exit 22'
+
+  export CC_SWITCH_CODESIGN_BIN="$stub_dir/codesign"
+  export CC_SWITCH_SECURITY_BIN="$stub_dir/security"
+  export CC_SWITCH_LAUNCHCTL_BIN="$stub_dir/launchctl"
+  export CC_SWITCH_OSASCRIPT_BIN="$stub_dir/osascript"
+  export CC_SWITCH_OPEN_BIN="$stub_dir/open"
+  export CC_SWITCH_XATTR_BIN="$stub_dir/xattr"
+  export CC_SWITCH_SLEEP_BIN="$stub_dir/sleep"
+  export CC_SWITCH_CURL_BIN="$stub_dir/curl"
+}
+
+create_fake_app_zip() {
+  local case_dir="$1"
+  local app_dir="$case_dir/app-build/CC Switch.app"
+  mkdir -p "$app_dir/Contents/MacOS"
+  printf 'new-app\n' >"$app_dir/Contents/MacOS/cc-switch"
+  chmod +x "$app_dir/Contents/MacOS/cc-switch"
+  COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "$app_dir" "$case_dir/assets/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
+}
+
+create_transaction_assets() {
+  local case_dir="$1"
+  local asset_dir="$case_dir/assets"
+  local resource_root="$case_dir/resource-build/modelhub-installer"
+  mkdir -p "$asset_dir" "$resource_root/assets" "$resource_root/templates"
+  cp "$INSTALLER" "$asset_dir/install.sh"
+  create_fake_app_zip "$case_dir"
+  printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
+  cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
+  cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
+    "$resource_root/templates/com.ccswitch.modelhub-env.plist"
+  cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
+    "$resource_root/templates/load-modelhub-env.sh"
+  COPYFILE_DISABLE=1 tar -czf "$asset_dir/modelhub-installer-resources.tar.gz" \
+    -C "$case_dir/resource-build" modelhub-installer
+  (
+    cd "$asset_dir"
+    shasum -a 256 \
+      install.sh \
+      CC-Switch-ModelHub-3.18.0-arm64.app.zip \
+      modelhub-installer-resources.tar.gz \
+      >SHA256SUMS.txt
+  )
+}
+
+create_transaction_state() {
+  local case_dir="$1"
+  local user_home="$case_dir/home"
+  local applications_dir="$case_dir/Applications"
+  mkdir -p \
+    "$user_home/.codex" \
+    "$user_home/.cc-switch" \
+    "$applications_dir/CC Switch.app/Contents/MacOS" \
+    "$applications_dir/ChatGPT.app/Contents/Resources"
+  printf '%s\n' \
+    'approval_policy = "on-request"' \
+    '[plugins."browser@openai-bundled"]' \
+    'enabled = true' \
+    >"$user_home/.codex/config.toml"
+  printf '{"auth_mode":"chatgpt","tokens":{"access_token":"user-owned"}}\n' \
+    >"$user_home/.codex/auth.json"
+  create_provider_database "$user_home/.cc-switch/cc-switch.db"
+  printf '%s\n' \
+    '{' \
+    '  "language": "zh",' \
+    '  "showInTray": false' \
+    '}' \
+    >"$user_home/.cc-switch/settings.json"
+  printf 'old-app\n' >"$applications_dir/CC Switch.app/Contents/MacOS/cc-switch"
+  printf 'official-codex\n' >"$applications_dir/ChatGPT.app/Contents/Resources/codex"
+  chmod +x "$applications_dir/ChatGPT.app/Contents/Resources/codex"
+}
+
+managed_state_manifest() {
+  local case_dir="$1"
+  local user_home="$case_dir/home"
+  local applications_dir="$case_dir/Applications"
+  local path
+  local relative
+  local paths=(
+    "$applications_dir/CC Switch.app"
+    "$user_home/.codex/config.toml"
+    "$user_home/.codex/auth.json"
+    "$user_home/.codex/models-modelhub-1m.json"
+    "$user_home/.cc-switch/cc-switch.db"
+    "$user_home/.cc-switch/settings.json"
+    "$user_home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
+    "$user_home/.local/share/cc-switch-modelhub/load-modelhub-env.sh"
+    "$user_home/.local/share/cc-switch-modelhub/install.sh"
+  )
+
+  for path in "${paths[@]}"; do
+    printf 'PATH %s\n' "$path"
+    if [[ -f "$path" ]]; then
+      shasum -a 256 "$path"
+    elif [[ -d "$path" ]]; then
+      while IFS= read -r relative; do
+        printf 'FILE %s\n' "$relative"
+        shasum -a 256 "$path/$relative"
+      done < <(cd "$path" && find . -type f -print | LC_ALL=C sort)
+    else
+      printf 'ABSENT\n'
+    fi
+  done
+}
+
+managed_state_digest() {
+  managed_state_manifest "$1" | shasum -a 256 | awk '{print $1}'
+}
+
+prepare_transaction_case() {
+  local case_dir="$1"
+  create_transaction_state "$case_dir"
+  create_transaction_stubs "$case_dir"
+  create_transaction_assets "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
+  export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
+  export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
+  export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
+  export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
+  export FAKE_SECURITY_MODE=success
+  export FAKE_HEALTH_MODE=healthy
+}
+
+test_transaction_keychain_cancel_rolls_back_all_files() {
+  local case_dir="$TEST_TMP/transaction-keychain-cancel"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_SECURITY_MODE=cancel
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'cancelled keychain prompt left a keychain item'
+}
+
+test_transaction_health_timeout_rolls_back_all_files() {
+  local case_dir="$TEST_TMP/transaction-health-timeout"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'failed installation left a new keychain item'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'failed installation left MODELHUB_AK in launchd'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'failed installation left CODEX_CLI_PATH in launchd'
+}
+
+test_transaction_success_and_repeat_are_idempotent() {
+  local case_dir="$TEST_TMP/transaction success"
+  local database
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+
+  /bin/bash -s <"$INSTALLER"
+  export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120001Z'
+  /bin/bash "$INSTALLER"
+
+  assert_contains "$case_dir/home/.codex/config.toml" 'model_provider = "modelhub"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/Applications/CC Switch.app/Contents/MacOS/cc-switch" 'new-app'
+  assert_contains "$case_dir/home/.codex/auth.json" 'user-owned'
+  assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
+  [[ -f "$case_dir/home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist" ]] || fail 'LaunchAgent was not installed'
+  assert_equals \
+    "$(plutil -extract ProgramArguments.0 raw -o - "$case_dir/home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist")" \
+    "$case_dir/home/.local/share/cc-switch-modelhub/load-modelhub-env.sh"
+  [[ -f "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'local installer was not saved'
+  [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'MODELHUB_AK was not loaded into launchd'
+  [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'CODEX_CLI_PATH was not loaded into launchd'
+}
+
+test_transaction_rollback_latest_restores_and_removes_files() {
+  local case_dir="$TEST_TMP/transaction-explicit-rollback"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+
+  perform_install
+  rollback_latest
+  rollback_latest
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$case_dir/home/.codex/models-modelhub-1m.json" ]] || fail 'rollback kept a newly created model catalog'
+  [[ ! -e "$case_dir/home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist" ]] || fail 'rollback kept a newly created LaunchAgent'
+  [[ ! -e "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'rollback kept a newly created installer'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'rollback kept MODELHUB_AK in launchd'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'rollback kept CODEX_CLI_PATH in launchd'
+}
+
+test_transaction_rollback_without_backup_reports_clear_error() {
+  local case_dir="$TEST_TMP/transaction-no-backup"
+  local output
+  local status
+  mkdir -p "$case_dir"
+  create_transaction_state "$case_dir"
+  create_transaction_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
+  export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
+
+  set +e
+  output="$(/bin/bash "$INSTALLER" --rollback latest 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'rollback without a backup unexpectedly succeeded'
+  [[ "$output" == *'no completed ModelHub installer backup is available'* ]] \
+    || fail "rollback error was not actionable: $output"
+}
+
+test_transaction_cli_help_and_argument_validation() {
+  local help_output
+  help_output="$(/bin/bash "$INSTALLER" --help)"
+  [[ "$help_output" == *'--rollback latest'* ]] || fail 'help output omits rollback usage'
+  help_output="$(/bin/bash -s -- --help <"$INSTALLER")"
+  [[ "$help_output" == *'--rollback latest'* ]] || fail 'stdin bootstrap did not execute main'
+  assert_command_fails /bin/bash "$INSTALLER" --unknown
+  assert_command_fails /bin/bash "$INSTALLER" --help extra
+}
+
+test_transaction_corrupt_backup_fails_before_restore_writes() {
+  local case_dir="$TEST_TMP/transaction-corrupt-backup"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  perform_install
+  before="$(managed_state_digest "$case_dir")"
+  rm "$ACTIVE_BACKUP_DIR/files/settings.json"
+
+  assert_command_fails restore_backup "$ACTIVE_BACKUP_DIR"
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+}
+
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -586,6 +890,13 @@ run_test "database schema initializes missing database with hidden app" test_dat
 run_test "settings merge changes only managed keys" test_settings_merge_changes_only_managed_keys
 run_test "settings merge rejects invalid JSON without overwrite" test_settings_merge_rejects_invalid_json_without_overwrite
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
+run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
+run_test "transaction health timeout rolls back all files" test_transaction_health_timeout_rolls_back_all_files
+run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
+run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
+run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
+run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
+run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2
