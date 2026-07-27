@@ -38,6 +38,8 @@ KEYCHAIN_CREATED_BY_RUN=0
 TRANSACTION_GUARD_ACTIVE=0
 TRANSACTION_ROLLBACK_RUNNING=0
 TRANSACTION_STAGE_DIR=''
+LAUNCHER_FAILURE_SNAPSHOT_READY=0
+LAUNCHER_REPLACED_BY_RUN=0
 
 die() {
   echo "error: $*" >&2
@@ -1480,6 +1482,111 @@ install_runtime_files() {
   update_settings_json "$CC_SWITCH_SETTINGS_PATH" "$provider_id" || return 1
 }
 
+prepare_launcher_failure_snapshot() {
+  local backup_dir="$1"
+  local snapshot_dir="$backup_dir/launcher-failure"
+  local existed_file="$snapshot_dir/existed"
+  local payload="$snapshot_dir/install.sh"
+
+  LAUNCHER_FAILURE_SNAPSHOT_READY=0
+  LAUNCHER_REPLACED_BY_RUN=0
+  if [[ -L "$LOCAL_INSTALLER_PATH" || -d "$LOCAL_INSTALLER_PATH" ]]; then
+    die "refusing to snapshot an unsafe local installer path: $LOCAL_INSTALLER_PATH"
+    return 1
+  fi
+  if [[ -e "$LOCAL_INSTALLER_PATH" && ! -f "$LOCAL_INSTALLER_PATH" ]]; then
+    die "local installer path is not a regular file: $LOCAL_INSTALLER_PATH"
+    return 1
+  fi
+  if ! /bin/mkdir -p "$snapshot_dir" || ! /bin/chmod 700 "$snapshot_dir"; then
+    die "failed to create the failure-only launcher snapshot directory"
+    return 1
+  fi
+  if [[ -f "$LOCAL_INSTALLER_PATH" ]]; then
+    if ! /bin/cp -p "$LOCAL_INSTALLER_PATH" "$payload" \
+      || ! printf '1\n' >"$existed_file"; then
+      die "failed to snapshot the previous local installer"
+      return 1
+    fi
+  elif ! printf '0\n' >"$existed_file"; then
+    die "failed to record the absent local installer"
+    return 1
+  fi
+  LAUNCHER_FAILURE_SNAPSHOT_READY=1
+}
+
+restore_launcher_after_failed_install() {
+  local backup_dir="$1"
+  local snapshot_dir="$backup_dir/launcher-failure"
+  local existed
+  local payload="$snapshot_dir/install.sh"
+  local launcher_parent
+  local work_dir
+  local staged_launcher
+
+  if [[ "$LAUNCHER_FAILURE_SNAPSHOT_READY" != "1" \
+    || "$LAUNCHER_REPLACED_BY_RUN" != "1" ]]; then
+    return 0
+  fi
+  if ! existed="$(/bin/cat "$snapshot_dir/existed" 2>/dev/null)"; then
+    die "failure-only launcher snapshot metadata is missing"
+    return 1
+  fi
+  case "$existed" in
+    0)
+      if [[ -L "$LOCAL_INSTALLER_PATH" || -d "$LOCAL_INSTALLER_PATH" ]]; then
+        die "refusing to remove an unsafe failed-install launcher path"
+        return 1
+      fi
+      if ! /bin/rm -f -- "$LOCAL_INSTALLER_PATH"; then
+        die "failed to remove the launcher created by the failed install"
+        return 1
+      fi
+      ;;
+    1)
+      if [[ ! -f "$payload" || -L "$payload" ]]; then
+        die "failure-only launcher snapshot payload is missing or unsafe"
+        return 1
+      fi
+      if [[ -L "$LOCAL_INSTALLER_PATH" || -d "$LOCAL_INSTALLER_PATH" ]]; then
+        die "refusing to overwrite an unsafe failed-install launcher path"
+        return 1
+      fi
+      launcher_parent="$(dirname "$LOCAL_INSTALLER_PATH")"
+      if ! /bin/mkdir -p "$launcher_parent" \
+        || ! work_dir="$(mktemp -d "$launcher_parent/.launcher-restore.XXXXXX")"; then
+        die "failed to create the launcher recovery staging directory"
+        return 1
+      fi
+      staged_launcher="$work_dir/install.sh"
+      if ! /bin/cp -p "$payload" "$staged_launcher" \
+        || ! /bin/mv -f "$staged_launcher" "$LOCAL_INSTALLER_PATH"; then
+        /bin/rm -rf "$work_dir" || true
+        die "failed to restore the previous local installer"
+        return 1
+      fi
+      if ! /bin/rmdir "$work_dir"; then
+        die "failed to remove the launcher recovery staging directory"
+        return 1
+      fi
+      ;;
+    *)
+      die "failure-only launcher snapshot metadata is invalid"
+      return 1
+      ;;
+  esac
+  LAUNCHER_REPLACED_BY_RUN=0
+}
+
+cleanup_launcher_failure_snapshot() {
+  local backup_dir="$1"
+  if ! /bin/rm -rf "$backup_dir/launcher-failure"; then
+    return 1
+  fi
+  LAUNCHER_FAILURE_SNAPSHOT_READY=0
+  LAUNCHER_REPLACED_BY_RUN=0
+}
+
 install_durable_launcher() {
   local verified_installer="$1"
   local launcher_parent
@@ -1514,6 +1621,7 @@ install_durable_launcher() {
     die "failed to install the durable rollback launcher"
     return 1
   fi
+  LAUNCHER_REPLACED_BY_RUN=1
   if ! /bin/rmdir "$work_dir"; then
     die "failed to remove the local installer staging directory"
     return 1
@@ -1725,6 +1833,9 @@ rollback_failed_install() {
   if [[ -n "$ACTIVE_BACKUP_DIR" && "$restore_allowed" == "1" ]]; then
     restore_backup "$ACTIVE_BACKUP_DIR" || rollback_status=1
   fi
+  if [[ -n "$ACTIVE_BACKUP_DIR" && "$LAUNCHER_REPLACED_BY_RUN" == "1" ]]; then
+    restore_launcher_after_failed_install "$ACTIVE_BACKUP_DIR" || rollback_status=1
+  fi
   TRANSACTION_ROLLBACK_RUNNING=0
   return "$rollback_status"
 }
@@ -1790,6 +1901,9 @@ perform_install() {
   local resources_dir
   local rollback_status
 
+  LAUNCHER_FAILURE_SNAPSHOT_READY=0
+  LAUNCHER_REPLACED_BY_RUN=0
+
   configure_install_paths || return 1
   operating_system="${CC_SWITCH_INSTALLER_TEST_OS:-$(/usr/bin/uname -s)}"
   architecture="${CC_SWITCH_INSTALLER_TEST_ARCH:-$(/usr/bin/uname -m)}"
@@ -1847,6 +1961,10 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
+  prepare_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
   MUTATION_STARTED=1
   INSTALL_COMPLETED=0
   KEYCHAIN_CREATED_BY_RUN=0
@@ -1884,6 +2002,7 @@ perform_install() {
   fi
   INSTALL_COMPLETED=1
   TRANSACTION_GUARD_ACTIVE=0
+  cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
 }
 

@@ -723,6 +723,7 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/sleep" 'exit 0'
   write_executable_stub "$stub_dir/curl" \
     'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '  if [[ -n "${FAKE_COMPLETION_MARKER_DIR:-}" ]]; then chmod 500 "$FAKE_COMPLETION_MARKER_DIR"; fi' \
     '  printf "{\"status\":\"healthy\",\"timestamp\":\"test\"}\n"' \
     '  exit 0' \
     'fi' \
@@ -865,6 +866,7 @@ prepare_transaction_case() {
   export FAKE_SECURITY_MODE=success
   export FAKE_SECURITY_FIND_STATUS=''
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_COMPLETION_MARKER_DIR=''
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
   export FAKE_PGREP_MODE=stopped
 }
@@ -1049,6 +1051,37 @@ test_transaction_health_timeout_rolls_back_all_files() {
   [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'failed installation left MODELHUB_AK in launchd'
   [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'failed installation left CODEX_CLI_PATH in launchd'
   assert_contains "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" 'old-local-installer'
+}
+
+test_transaction_post_launcher_failure_restores_previous_launcher() {
+  local case_dir="$TEST_TMP/transaction-post-launcher-failure"
+  local launcher="$case_dir/home/.local/share/cc-switch-modelhub/install.sh"
+  local launcher_before
+  local launcher_after
+  local before
+  local after
+  local result
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  launcher_before="$(shasum -a 256 "$launcher" | awk '{print $1}')"
+  export FAKE_COMPLETION_MARKER_DIR="$case_dir/home/.cc-switch/backups/modelhub-installer/$CC_SWITCH_INSTALLER_TIMESTAMP"
+
+  set +e
+  perform_install
+  result=$?
+  set -e
+  if [[ -n "$ACTIVE_BACKUP_DIR" && -d "$ACTIVE_BACKUP_DIR" ]]; then
+    chmod 700 "$ACTIVE_BACKUP_DIR"
+  fi
+
+  [[ "$result" -ne 0 ]] || fail 'completion-marker fault unexpectedly succeeded'
+  after="$(managed_state_digest "$case_dir")"
+  launcher_after="$(shasum -a 256 "$launcher" | awk '{print $1}')"
+  assert_equals "$after" "$before"
+  assert_equals "$launcher_after" "$launcher_before"
+  assert_contains "$launcher" 'old-local-installer'
+  [[ ! -e "$ACTIVE_BACKUP_DIR/install-completed" ]] || fail 'failed install left a completion marker'
 }
 
 test_transaction_keychain_acl_error_aborts_without_write() {
@@ -1395,6 +1428,7 @@ run_test "settings merge creates missing file" test_settings_merge_creates_missi
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
 run_test "transaction keychain ACL error aborts without write" test_transaction_keychain_acl_error_aborts_without_write
 run_test "transaction health timeout rolls back all files" test_transaction_health_timeout_rolls_back_all_files
+run_test "transaction post-launcher failure restores previous launcher" test_transaction_post_launcher_failure_restores_previous_launcher
 run_test "transaction backup copy failure is fail closed" test_transaction_backup_copy_failure_is_fail_closed
 run_test "transaction real write failure stops before keychain" test_transaction_real_write_failure_stops_before_keychain
 run_test "transaction signal cancellation rolls back" test_transaction_signal_cancellation_rolls_back
