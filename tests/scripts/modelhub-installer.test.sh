@@ -668,6 +668,74 @@ test_settings_merge_creates_missing_file() {
   assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
 }
 
+test_existing_nonwritable_app_requires_privilege() {
+  local case_dir="$TEST_TMP/existing-nonwritable-app"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  local removal_status
+  local needs_sudo
+  mkdir -p "$applications_dir/CC Switch.app/Contents"
+  chmod 0775 "$applications_dir"
+  chmod -R 0555 "$applications_dir/CC Switch.app"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
+    'chmod -R u+w "$FAKE_SUDO_APP_PATH"' \
+    '"$@"'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_SUDO_BIN="$sudo_bin"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  export FAKE_SUDO_APP_PATH="$applications_dir/CC Switch.app"
+  configure_install_paths
+
+  prepare_application_permissions
+  needs_sudo="$NEEDS_SUDO"
+  set +e
+  remove_managed_target "$CC_SWITCH_APP_PATH"
+  removal_status=$?
+  set -e
+  if [[ -d "$CC_SWITCH_APP_PATH" ]]; then
+    chmod -R u+w "$CC_SWITCH_APP_PATH"
+  fi
+
+  assert_equals "$needs_sudo" '1'
+  assert_equals "$removal_status" '0'
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+  assert_contains "$FAKE_SUDO_LOG" "/bin/rm -rf -- $CC_SWITCH_APP_PATH"
+}
+
+test_rejects_root_execution_validation_contract() {
+  assert_command_fails validate_non_root 0
+  validate_non_root 501
+}
+
+test_rejects_root_execution_before_install_work() {
+  local case_dir="$TEST_TMP/reject-root-execution"
+  local output
+  local status
+  mkdir -p "$case_dir/tmp"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_EUID=0
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
+  export TMPDIR="$case_dir/tmp"
+
+  set +e
+  output="$(perform_install 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'root execution unexpectedly succeeded'
+  [[ "$output" == *'do not run the entire installer with sudo'* ]] \
+    || fail "root rejection was not explicit: $output"
+  [[ ! -e "$case_dir/Applications" ]] || fail 'root execution wrote to Applications before rejection'
+  [[ -z "$(find "$case_dir/tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'root execution created a staging directory before rejection'
+}
+
 write_executable_stub() {
   local path="$1"
   shift
@@ -1425,6 +1493,9 @@ run_test "database schema initializes missing database with hidden app" test_dat
 run_test "settings merge changes only managed keys" test_settings_merge_changes_only_managed_keys
 run_test "settings merge rejects invalid JSON without overwrite" test_settings_merge_rejects_invalid_json_without_overwrite
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
+run_test "existing nonwritable app requires privilege" test_existing_nonwritable_app_requires_privilege
+run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
+run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
 run_test "transaction keychain ACL error aborts without write" test_transaction_keychain_acl_error_aborts_without_write
 run_test "transaction health timeout rolls back all files" test_transaction_health_timeout_rolls_back_all_files

@@ -46,6 +46,15 @@ die() {
   return 1
 }
 
+validate_non_root() {
+  local effective_uid="$1"
+
+  if [[ "$effective_uid" == "0" ]]; then
+    die "do not run the entire installer with sudo; run it as your login user"
+    return 1
+  fi
+}
+
 validate_platform() {
   local operating_system="$1"
   local architecture="$2"
@@ -1031,9 +1040,16 @@ managed_relative_for_target() {
   return 1
 }
 
+sudo_command() {
+  printf '%s' "${CC_SWITCH_SUDO_BIN:-/usr/bin/sudo}"
+}
+
 run_with_privilege() {
+  local sudo_bin
+
   if [[ "$NEEDS_SUDO" == "1" ]]; then
-    /usr/bin/sudo "$@"
+    sudo_bin="$(sudo_command)"
+    "$sudo_bin" "$@"
   else
     "$@"
   fi
@@ -1792,12 +1808,30 @@ wait_for_health() {
   return 1
 }
 
+path_tree_requires_privilege() {
+  local target="$1"
+  local directory
+
+  [[ -e "$target" ]] || return 1
+  [[ -w "$target" ]] || return 0
+  while IFS= read -r -d '' directory; do
+    [[ -w "$directory" ]] || return 0
+  done < <(/usr/bin/find "$target" -type d -print0)
+  return 1
+}
+
 prepare_application_permissions() {
+  local sudo_bin
+
   NEEDS_SUDO=0
   /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR" 2>/dev/null || true
-  if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; then
+  if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]] \
+    || path_tree_requires_privilege "$CC_SWITCH_APP_PATH" \
+    || { [[ ! -d "$INSTALL_APPLICATIONS_DIR/ChatGPT.app" ]] \
+      && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
     NEEDS_SUDO=1
-    if ! /usr/bin/sudo -v; then
+    sudo_bin="$(sudo_command)"
+    if ! "$sudo_bin" -v; then
       die "administrator permission is required to install CC Switch"
       return 1
     fi
@@ -1901,6 +1935,7 @@ perform_install() {
   local resources_dir
   local rollback_status
 
+  validate_non_root "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" || return 1
   LAUNCHER_FAILURE_SNAPSHOT_READY=0
   LAUNCHER_REPLACED_BY_RUN=0
 
@@ -2010,6 +2045,7 @@ rollback_latest() {
   local latest_backup
   local keychain_existed
 
+  validate_non_root "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" || return 1
   configure_install_paths || return 1
   latest_backup="$(
     { /usr/bin/find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/install-completed' \; -print \
