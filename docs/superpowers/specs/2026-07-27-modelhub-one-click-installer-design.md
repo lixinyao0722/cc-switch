@@ -52,6 +52,8 @@
 
 `install.sh` 内部固定不可变 tag `modelhub-installer-20260727`。用户虽然通过 `/releases/latest` 获取脚本，但该脚本会从自身对应的精确 tag 下载其余资产，避免安装过程中因新版 Release 发布而混用不同版本的文件。
 
+通过 stdin 执行的脚本还会从该精确 tag 重新下载一份 `install.sh`，与 App ZIP 和资源包一起使用 `SHA256SUMS.txt` 校验；校验后的副本用于本机回滚入口。
+
 ## 仓库文件
 
 本功能新增一个职责集中的安装器目录：
@@ -64,6 +66,7 @@
 - `scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist`：LaunchAgent 模板。
 - `scripts/modelhub-installer/templates/load-modelhub-env.sh`：从 Keychain 读取 AK，并把 `MODELHUB_AK` 与 `CODEX_CLI_PATH` 注入用户 launchd 域。
 - `tests/scripts/modelhub-installer.test.sh`：隔离运行的安装器回归测试。
+- `src-tauri/src/proxy/providers/codex.rs`：当 Codex Provider 没有持久化 key、但其活跃 TOML Provider 显式声明 `env_key` 时，从 CC Switch 进程环境解析凭据。
 
 Release 打包器不以旧私密配置包为输入，而是只打包上述受版本控制的白名单文件。这能避免私密包以后新增字段时绕过黑名单检查。
 
@@ -154,6 +157,8 @@ ${HOME}/.codex/models-modelhub-1m.json
 - 只新增或更新 Codex 的 `proxy_config` 行：监听 `127.0.0.1:15721`，启用代理与接管、启用日志并关闭自动故障转移。
 - 不修改请求日志、其他 Provider、价格、profiles、prompts、skills 和其他无关表。
 
+当前 CC Switch Codex 适配器只从 Provider 持久化配置提取 API key。为使空 `auth` 的公开模板可用，适配器增加以下窄范围回退：只有活跃 `[model_providers.<model_provider>]` 显式声明 `env_key`、且现有持久化 key 为空时，才读取同名进程环境变量。它不读取非活跃 Provider 的 `env_key`，不把解析结果写回数据库，也不改变已有持久化 key 的优先级。
+
 安装器只更新 `~/.cc-switch/settings.json` 中的以下字段，其他字段保持不变：
 
 - `currentProviderCodex`
@@ -173,7 +178,7 @@ security add-generic-password \
   -U -w </dev/tty
 ```
 
-`-w` 是最后一个参数，因此 `security` 会通过 `/dev/tty` 提示输入。AK 不进入 shell 变量、命令参数、配置文件、plist、输出或日志。
+`-w` 是最后一个参数，因此 `security` 会通过 `/dev/tty` 提示输入。录入阶段 AK 不进入 shell 变量或命令参数，也不会写入配置文件、plist、输出或日志。登录时环境加载脚本必须把从 Keychain 读出的值短暂传给 `launchctl setenv NAME VALUE`；该值只存在于进程内存和瞬时参数中，不持久化到脚本、plist 或日志。
 
 环境加载脚本在用户登录时读取该 Keychain 条目，并通过 `launchctl setenv` 设置：
 
@@ -204,6 +209,7 @@ security add-generic-password \
 - 增量合并既有 Codex 配置并保留无关章节。
 - 更新现有 ModelHub Provider 且不产生重复项。
 - 保留无关 CC Switch Provider、设置和数据库行。
+- Codex Provider 在无持久化 key 时从活跃 Provider 的 `env_key` 读取 AK，并忽略非活跃 Provider 或空环境值。
 - 当用户主目录包含空格时正确替换 `__USER_HOME__`。
 - 取消 Keychain 输入后自动恢复备份。
 - 健康检查超时后自动回滚。
