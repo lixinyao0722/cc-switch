@@ -584,6 +584,25 @@ fn extract_codex_base_url_from_toml(config_text: &str) -> Option<String> {
     crate::codex_config::extract_codex_base_url(config_text)
 }
 
+fn extract_codex_env_key(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<TomlValue>().ok()?;
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(|value| value.as_str())?
+        .trim();
+    if active_provider.is_empty() {
+        return None;
+    }
+
+    doc.get("model_providers")
+        .and_then(|providers| providers.get(active_provider))
+        .and_then(|provider| provider.get("env_key"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|env_key| !env_key.is_empty())
+        .map(ToString::to_string)
+}
+
 impl CodexAdapter {
     pub fn new() -> Self {
         Self
@@ -650,6 +669,13 @@ impl CodexAdapter {
                     crate::codex_config::extract_codex_experimental_bearer_token(config_str)
                 {
                     return Some(key);
+                }
+                if let Some(value) = extract_codex_env_key(config_str)
+                    .and_then(|env_key| std::env::var(env_key).ok())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                {
+                    return Some(value);
                 }
             }
         }
@@ -821,6 +847,35 @@ impl ProviderAdapter for CodexAdapter {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
+
+    struct TestEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for TestEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     fn create_provider(config: serde_json::Value) -> Provider {
         Provider {
@@ -1030,6 +1085,86 @@ experimental_bearer_token = "sk-config-key"
         let auth = adapter.extract_auth(&provider).unwrap();
         assert_eq!(auth.api_key, "sk-config-key");
         assert_eq!(auth.strategy, AuthStrategy::Bearer);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_without_stored_key_reads_active_env_key() {
+        const ENV_NAME: &str = "CC_SWITCH_TEST_MODELHUB_AK";
+        let _env = TestEnvVar::set(ENV_NAME, "ak-from-environment");
+        let provider = create_provider(json!({
+            "auth": {},
+            "config": format!(
+                "model_provider = \"modelhub\"\n\
+                 [model_providers.modelhub]\n\
+                 base_url = \"https://aidp.bytedance.net/api/modelhub/online\"\n\
+                 env_key = \"{ENV_NAME}\"\n"
+            )
+        }));
+
+        let auth = CodexAdapter::new()
+            .extract_auth(&provider)
+            .expect("env_key should supply bearer auth");
+
+        assert_eq!(auth.api_key, "ak-from-environment");
+        assert_eq!(auth.strategy, AuthStrategy::Bearer);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_env_key_returns_none_when_variable_is_missing() {
+        const ENV_NAME: &str = "CC_SWITCH_TEST_MISSING_MODELHUB_AK";
+        let _env = TestEnvVar::remove(ENV_NAME);
+        let provider = create_provider(json!({
+            "auth": {},
+            "config": format!(
+                "model_provider = \"modelhub\"\n\
+                 [model_providers.modelhub]\n\
+                 env_key = \"{ENV_NAME}\"\n"
+            )
+        }));
+
+        assert!(CodexAdapter::new().extract_auth(&provider).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_ignores_env_key_from_inactive_provider_section() {
+        const ENV_NAME: &str = "CC_SWITCH_TEST_INACTIVE_MODELHUB_AK";
+        let _env = TestEnvVar::set(ENV_NAME, "must-not-be-used");
+        let provider = create_provider(json!({
+            "auth": {},
+            "config": format!(
+                "model_provider = \"active\"\n\
+                 [model_providers.active]\n\
+                 base_url = \"https://active.example/v1\"\n\
+                 [model_providers.inactive]\n\
+                 env_key = \"{ENV_NAME}\"\n"
+            )
+        }));
+
+        assert!(CodexAdapter::new().extract_auth(&provider).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stored_provider_key_takes_priority_over_env_key() {
+        const ENV_NAME: &str = "CC_SWITCH_TEST_LOWER_PRIORITY_MODELHUB_AK";
+        let _env = TestEnvVar::set(ENV_NAME, "environment-key");
+        let provider = create_provider(json!({
+            "auth": { "OPENAI_API_KEY": "stored-key" },
+            "config": format!(
+                "model_provider = \"modelhub\"\n\
+                 [model_providers.modelhub]\n\
+                 env_key = \"{ENV_NAME}\"\n"
+            )
+        }));
+
+        let auth = CodexAdapter::new()
+            .extract_auth(&provider)
+            .expect("stored key should remain available");
+
+        assert_eq!(auth.api_key, "stored-key");
     }
 
     #[test]

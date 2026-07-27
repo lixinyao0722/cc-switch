@@ -13,6 +13,22 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
+## 一键安装
+
+安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前需安装并登录正式 ChatGPT App，并从管理员处获取 `MODELHUB_AK`。
+
+```zsh
+curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
+```
+
+安装器会先下载并校验固定 Release 资产，再备份和增量合并现有 CC Switch/Codex 配置。最后一步由 macOS Keychain 提示输入 `MODELHUB_AK`；公开 Release、脚本、plist 和配置文件均不包含该密钥或 Codex OAuth 信息。
+
+回滚到本次安装前状态：
+
+```zsh
+~/.local/share/cc-switch-modelhub/install.sh --rollback latest
+```
+
 ## Provider 配置
 
 目标 Provider 使用原生 Responses API：
