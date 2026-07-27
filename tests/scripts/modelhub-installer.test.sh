@@ -317,6 +317,7 @@ create_chatgpt_validation_stubs() {
     'target="${@: -1}"' \
     'if [[ "$1" == "--verify" ]]; then' \
     '  [[ "$2" == "--deep" && "$3" == "--strict" && "$#" == "4" ]]' \
+    '  if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app && "${FAKE_TEMP_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
     '  [[ "${FAKE_APP_STRICT:-pass}" == "pass" ]]' \
     'elif [[ "$1" == "-dv" ]]; then' \
     '  if [[ "$target" == */Contents/Resources/codex ]]; then' \
@@ -422,6 +423,10 @@ test_blocks_invalid_existing_chatgpt_without_mutation() {
   mkdir -p "$case_dir/Applications"
   create_chatgpt_app_fixture "$app_path"
   create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  configure_install_paths
   before_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
 
   set +e
@@ -429,7 +434,7 @@ test_blocks_invalid_existing_chatgpt_without_mutation() {
     CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
     CC_SWITCH_FILE_BIN="$case_dir/file" CC_SWITCH_CURL_BIN="$case_dir/curl" \
     CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil" \
-    ensure_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex' 2>"$stderr_file"
+    ensure_chatgpt_app "$case_dir/stage" 2>"$stderr_file"
   status=$?
   set -e
 
@@ -439,6 +444,197 @@ test_blocks_invalid_existing_chatgpt_without_mutation() {
   [[ ! -e "$mutation_log" ]] || fail 'invalid existing ChatGPT app triggered curl or hdiutil'
   after_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
   assert_equals "$after_digest" "$before_digest"
+}
+
+test_blocks_invalid_existing_chatgpt_symlink_without_download() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-symlink"
+  local mutation_log="$case_dir/mutations.log"
+  local status
+  mkdir -p "$case_dir/Applications" "$case_dir/stage"
+  ln -s "$case_dir/missing-ChatGPT.app" "$case_dir/Applications/ChatGPT.app"
+  create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  configure_install_paths
+
+  set +e
+  FAKE_MUTATION_LOG="$mutation_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" CC_SWITCH_CURL_BIN="$case_dir/curl" \
+    CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil" \
+    ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid ChatGPT symlink was accepted'
+  [[ -L "$CHATGPT_APP_PATH" ]] || fail 'invalid ChatGPT symlink was replaced'
+  [[ ! -e "$mutation_log" ]] || fail 'invalid ChatGPT symlink triggered curl or hdiutil'
+}
+
+create_chatgpt_bootstrap_stubs() {
+  local case_dir="$1"
+
+  create_chatgpt_validation_stubs "$case_dir"
+  write_executable_stub "$case_dir/curl" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_CURL_LOG"' \
+    'if [[ "$*" != *"--output"* ]]; then' \
+    '  if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then printf "{\"status\":\"healthy\"}\n"; exit 0; fi' \
+    '  exit 22' \
+    'fi' \
+    '[[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "download-fail" ]] || exit 81' \
+    'output_path=""' \
+    'while [[ "$#" -gt 0 ]]; do' \
+    '  if [[ "$1" == "--output" ]]; then output_path="$2"; shift 2; else shift; fi' \
+    'done' \
+    '[[ -n "$output_path" ]] || exit 64' \
+    'printf "fake-dmg\n" >"$output_path"'
+  write_executable_stub "$case_dir/hdiutil" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_HDIUTIL_LOG"' \
+    'case "$1" in' \
+    '  attach)' \
+    '    [[ "$2" == "-nobrowse" && "$3" == "-readonly" && "$4" == "-mountpoint" && "$#" == "6" ]]' \
+    '    [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "attach-fail" ]] || exit 82' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "app-missing" ]]; then' \
+    '      /usr/bin/ditto "$FAKE_CHATGPT_DMG_SOURCE" "$5/ChatGPT.app"' \
+    '    fi' \
+    '    ;;' \
+    '  detach)' \
+    '    [[ "$#" == "2" ]]' \
+    '    ;;' \
+    '  *) exit 64 ;;' \
+    'esac'
+  write_executable_stub "$case_dir/ditto" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_DITTO_LOG"' \
+    'exec /usr/bin/ditto "$@"'
+  write_executable_stub "$case_dir/sudo" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_SUDO_LOG"' \
+    'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
+    'if [[ "${1:-}" == "/bin/mv" && -n "${FAKE_RACE_TARGET:-}" && ! -e "$FAKE_RACE_TARGET" ]]; then' \
+    '  mkdir -p "$FAKE_RACE_TARGET"' \
+    '  printf "competitor\n" >"$FAKE_RACE_TARGET/owner"' \
+    'fi' \
+    'exec "$@"'
+
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/file"
+  export CC_SWITCH_CURL_BIN="$case_dir/curl"
+  export CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil"
+  export CC_SWITCH_DITTO_BIN="$case_dir/ditto"
+  export CC_SWITCH_SUDO_BIN="$case_dir/sudo"
+  export FAKE_CHATGPT_CURL_LOG="$case_dir/curl.log"
+  export FAKE_CHATGPT_HDIUTIL_LOG="$case_dir/hdiutil.log"
+  export FAKE_CHATGPT_DITTO_LOG="$case_dir/ditto.log"
+  export FAKE_CHATGPT_SUDO_LOG="$case_dir/sudo.log"
+}
+
+prepare_chatgpt_bootstrap_case() {
+  local case_dir="$1"
+
+  mkdir -p "$case_dir/Applications" "$case_dir/stage" "$case_dir/dmg-source"
+  create_chatgpt_app_fixture "$case_dir/dmg-source/ChatGPT.app"
+  printf 'installed-from-official-dmg\n' \
+    >"$case_dir/dmg-source/ChatGPT.app/Contents/Resources/bootstrap-marker"
+  create_chatgpt_bootstrap_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export FAKE_CHATGPT_DMG_SOURCE="$case_dir/dmg-source/ChatGPT.app"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  export FAKE_APP_TEAM_ID=2DC432GLL2
+  export FAKE_APP_STRICT=pass
+  export FAKE_TEMP_APP_STRICT=pass
+  export FAKE_RACE_TARGET=''
+  configure_install_paths
+  NEEDS_SUDO=1
+}
+
+assert_chatgpt_bootstrap_scratch_clean() {
+  local case_dir="$1"
+
+  [[ -z "$(find "$case_dir/stage" -mindepth 1 -maxdepth 1 -type d -name 'chatgpt-mount.*' -print -quit)" ]] \
+    || fail 'ChatGPT mount directory was not cleaned'
+  [[ -z "$(find "$case_dir/Applications" -mindepth 1 -maxdepth 1 -type d -name '.chatgpt-modelhub.*' -print -quit)" ]] \
+    || fail 'ChatGPT same-volume temporary directory was not cleaned'
+}
+
+test_bootstraps_missing_chatgpt_from_official_dmg() {
+  local case_dir="$TEST_TMP/chatgpt-bootstrap-success"
+  local curl_count
+  local attach_count
+  prepare_chatgpt_bootstrap_case "$case_dir"
+
+  ensure_chatgpt_app "$case_dir/stage"
+
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'ChatGPT was not installed'
+  assert_equals "$CHATGPT_INSTALLED_BY_RUN" '1'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  assert_contains "$FAKE_CHATGPT_CURL_LOG" '--fail --location --silent --show-error --retry 3 --retry-all-errors'
+  assert_contains "$FAKE_CHATGPT_CURL_LOG" "--output $case_dir/stage/ChatGPT.dmg $CHATGPT_DMG_URL"
+  assert_occurrences "$FAKE_CHATGPT_CURL_LOG" "$CHATGPT_DMG_URL" 1
+  assert_contains "$FAKE_CHATGPT_HDIUTIL_LOG" "attach -nobrowse -readonly -mountpoint $case_dir/stage/chatgpt-mount."
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'attach -nobrowse -readonly -mountpoint' 1
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+  assert_contains "$FAKE_CHATGPT_DITTO_LOG" "/ChatGPT.app $case_dir/Applications/.chatgpt-modelhub."
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d $case_dir/Applications/.chatgpt-modelhub.XXXXXX"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/mv -n"
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+
+  curl_count="$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')"
+  attach_count="$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")"
+  ensure_chatgpt_app "$case_dir/stage"
+  assert_equals "$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')" "$curl_count"
+  assert_equals "$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")" "$attach_count"
+}
+
+test_bootstraps_missing_chatgpt_cleans_all_failure_paths() {
+  local mode
+  local case_dir
+  local status
+
+  for mode in download-fail attach-fail app-missing signature-fail temp-signature-fail; do
+    case_dir="$TEST_TMP/chatgpt-bootstrap-$mode"
+    prepare_chatgpt_bootstrap_case "$case_dir"
+    export FAKE_CHATGPT_BOOTSTRAP_MODE="$mode"
+    if [[ "$mode" == "signature-fail" ]]; then
+      export FAKE_APP_TEAM_ID=WRONGTEAM
+    elif [[ "$mode" == "temp-signature-fail" ]]; then
+      export FAKE_TEMP_APP_STRICT=fail
+    fi
+
+    set +e
+    ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]] || fail "ChatGPT bootstrap unexpectedly succeeded for $mode"
+    [[ ! -e "$CHATGPT_APP_PATH" ]] || fail "ChatGPT target exists after $mode"
+    assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+    if [[ "$mode" == "download-fail" ]]; then
+      [[ ! -e "$FAKE_CHATGPT_HDIUTIL_LOG" ]] || fail 'download failure unexpectedly invoked hdiutil'
+    else
+      assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+    fi
+  done
+}
+
+test_bootstraps_missing_chatgpt_rejects_final_target_race() {
+  local case_dir="$TEST_TMP/chatgpt-bootstrap-race"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_RACE_TARGET="$CHATGPT_APP_PATH"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'ChatGPT bootstrap overwrote a concurrent target'
+  assert_contains "$CHATGPT_APP_PATH/owner" 'competitor'
+  [[ ! -e "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" ]] \
+    || fail 'concurrent ChatGPT target was overwritten'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
 }
 
 create_expected_resource_tree() {
@@ -1104,6 +1300,52 @@ prepare_transaction_case() {
   export FAKE_PGREP_MODE=stopped
 }
 
+prepare_missing_chatgpt_transaction_case() {
+  local case_dir="$1"
+
+  prepare_transaction_case "$case_dir"
+  rm -rf "$case_dir/Applications/ChatGPT.app"
+  mkdir -p "$case_dir/dmg-source"
+  create_chatgpt_app_fixture "$case_dir/dmg-source/ChatGPT.app"
+  printf 'installed-from-official-dmg\n' \
+    >"$case_dir/dmg-source/ChatGPT.app/Contents/Resources/bootstrap-marker"
+  create_chatgpt_bootstrap_stubs "$case_dir"
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/stubs/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/stubs/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/stubs/file"
+  export FAKE_CHATGPT_DMG_SOURCE="$case_dir/dmg-source/ChatGPT.app"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  export FAKE_APP_TEAM_ID=2DC432GLL2
+  export FAKE_APP_STRICT=pass
+  export FAKE_TEMP_APP_STRICT=pass
+  export FAKE_RACE_TARGET=''
+}
+
+test_keeps_bootstrapped_chatgpt_after_failure_and_explicit_rollback() {
+  local failed_case_dir="$TEST_TMP/chatgpt-bootstrap-transaction-failure"
+  local rollback_case_dir="$TEST_TMP/chatgpt-bootstrap-explicit-rollback"
+
+  mkdir -p "$failed_case_dir"
+  prepare_missing_chatgpt_transaction_case "$failed_case_dir"
+  export FAKE_HEALTH_MODE=unhealthy
+  assert_command_fails perform_install
+  assert_contains \
+    "$failed_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
+
+  mkdir -p "$rollback_case_dir"
+  prepare_missing_chatgpt_transaction_case "$rollback_case_dir"
+  export FAKE_HEALTH_MODE=healthy
+  perform_install
+  assert_contains \
+    "$rollback_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
+  rollback_latest
+  assert_contains \
+    "$rollback_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
+}
+
 test_transaction_backup_copy_failure_is_fail_closed() {
   local case_dir="$TEST_TMP/transaction-backup-copy-failure"
   mkdir -p "$case_dir"
@@ -1645,6 +1887,11 @@ run_test "preflight rejects unsupported platforms" test_preflight_rejects_unsupp
 run_test "preflight validates ChatGPT Codex Team ID" test_preflight_validates_chatgpt_codex_team_id
 run_test "validates existing ChatGPT" test_validates_existing_chatgpt_app
 run_test "blocks invalid existing ChatGPT" test_blocks_invalid_existing_chatgpt_without_mutation
+run_test "blocks invalid existing ChatGPT symlink" test_blocks_invalid_existing_chatgpt_symlink_without_download
+run_test "bootstraps missing ChatGPT from official DMG" test_bootstraps_missing_chatgpt_from_official_dmg
+run_test "bootstraps missing ChatGPT cleans all failure paths" test_bootstraps_missing_chatgpt_cleans_all_failure_paths
+run_test "bootstraps missing ChatGPT rejects final target race" test_bootstraps_missing_chatgpt_rejects_final_target_race
+run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_keeps_bootstrapped_chatgpt_after_failure_and_explicit_rollback
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive

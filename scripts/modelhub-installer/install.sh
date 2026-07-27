@@ -44,6 +44,10 @@ TRANSACTION_ROLLBACK_RUNNING=0
 TRANSACTION_STAGE_DIR=''
 LAUNCHER_FAILURE_SNAPSHOT_READY=0
 LAUNCHER_REPLACED_BY_RUN=0
+CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+CHATGPT_BOOTSTRAP_TEMP_DIR=''
+CHATGPT_BOOTSTRAP_STAGE_DIR=''
+CHATGPT_INSTALLED_BY_RUN=0
 
 die() {
   echo "error: $*" >&2
@@ -191,16 +195,187 @@ validate_chatgpt_app() {
   validate_chatgpt_codex "$app_path/Contents/Resources/codex" "$expected_team_id"
 }
 
-ensure_chatgpt_app() {
-  local app_path="$1"
-  local expected_team_id="$2"
-  local expected_bundle_id="$3"
+download_chatgpt_dmg() {
+  local output_path="$1"
+  local curl_bin="${CC_SWITCH_CURL_BIN:-/usr/bin/curl}"
 
-  if validate_chatgpt_app "$app_path" "$expected_team_id" "$expected_bundle_id"; then
-    return 0
+  if [[ ! -x "$curl_bin" ]]; then
+    die "curl command not found: $curl_bin"
+    return 1
   fi
-  die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
-  return 1
+  if ! "$curl_bin" \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    --retry 3 \
+    --retry-all-errors \
+    --output "$output_path" \
+    "$CHATGPT_DMG_URL"; then
+    die "failed to download ChatGPT from the official OpenAI URL"
+    return 1
+  fi
+}
+
+attach_chatgpt_dmg() {
+  local dmg_path="$1"
+  local mount_dir="$2"
+  local hdiutil_bin="${CC_SWITCH_HDIUTIL_BIN:-/usr/bin/hdiutil}"
+
+  if [[ ! -x "$hdiutil_bin" ]]; then
+    die "hdiutil command not found: $hdiutil_bin"
+    return 1
+  fi
+  if ! "$hdiutil_bin" attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path"; then
+    die "failed to attach the official ChatGPT disk image"
+    return 1
+  fi
+}
+
+detach_chatgpt_dmg() {
+  local mount_dir="$1"
+  local hdiutil_bin="${CC_SWITCH_HDIUTIL_BIN:-/usr/bin/hdiutil}"
+
+  if [[ ! -x "$hdiutil_bin" ]]; then
+    die "hdiutil command not found: $hdiutil_bin"
+    return 1
+  fi
+  if ! "$hdiutil_bin" detach "$mount_dir"; then
+    die "failed to detach the ChatGPT disk image"
+    return 1
+  fi
+}
+
+cleanup_chatgpt_bootstrap() {
+  local cleanup_status=0
+  local mount_dir="$CHATGPT_BOOTSTRAP_MOUNT_DIR"
+  local temp_dir="$CHATGPT_BOOTSTRAP_TEMP_DIR"
+  local stage_dir="$CHATGPT_BOOTSTRAP_STAGE_DIR"
+
+  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  CHATGPT_BOOTSTRAP_STAGE_DIR=''
+  if [[ -n "$mount_dir" ]]; then
+    detach_chatgpt_dmg "$mount_dir" || cleanup_status=1
+    case "$mount_dir" in
+      "$stage_dir"/chatgpt-mount.*)
+        /bin/rm -rf -- "$mount_dir" || cleanup_status=1
+        ;;
+      *)
+        die "refusing to remove an unsafe ChatGPT mount directory: $mount_dir"
+        cleanup_status=1
+        ;;
+    esac
+  fi
+  if [[ -n "$temp_dir" ]]; then
+    case "$temp_dir" in
+      "$INSTALL_APPLICATIONS_DIR"/.chatgpt-modelhub.*)
+        run_with_privilege /bin/rm -rf -- "$temp_dir" || cleanup_status=1
+        ;;
+      *)
+        die "refusing to remove an unsafe ChatGPT install directory: $temp_dir"
+        cleanup_status=1
+        ;;
+    esac
+  fi
+  return "$cleanup_status"
+}
+
+install_verified_chatgpt_app() {
+  local source_app="$1"
+  local target_app="$2"
+  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local temp_dir
+  local temp_app
+
+  if [[ "$target_app" != "$CHATGPT_APP_PATH" ]]; then
+    die "refusing to install ChatGPT at an unexpected path: $target_app"
+    return 1
+  fi
+  if [[ -e "$target_app" || -L "$target_app" ]]; then
+    die "ChatGPT appeared while preparing the official app install"
+    return 1
+  fi
+  if [[ ! -x "$ditto_bin" ]]; then
+    die "ditto command not found: $ditto_bin"
+    return 1
+  fi
+  if ! temp_dir="$(run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-modelhub.XXXXXX")"; then
+    die "failed to create a same-volume ChatGPT install directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_TEMP_DIR="$temp_dir"
+  temp_app="$temp_dir/ChatGPT.app"
+  if ! run_with_privilege "$ditto_bin" "$source_app" "$temp_app"; then
+    die "failed to copy the verified ChatGPT app"
+    return 1
+  fi
+  validate_chatgpt_app "$temp_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
+  if [[ -e "$target_app" || -L "$target_app" ]]; then
+    die "ChatGPT appeared before the official app could be installed"
+    return 1
+  fi
+
+  # On macOS, mv -n performs a no-clobber rename. Passing the destination
+  # directory keeps an existing ChatGPT.app collision at the sibling boundary.
+  if ! run_with_privilege /bin/mv -n "$temp_app" "$INSTALL_APPLICATIONS_DIR"; then
+    die "failed to atomically install the verified ChatGPT app"
+    return 1
+  fi
+  if [[ -e "$temp_app" || -L "$temp_app" ]]; then
+    die "ChatGPT appeared during the official app install"
+    return 1
+  fi
+  validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
+  if ! run_with_privilege /bin/rm -rf -- "$temp_dir"; then
+    die "failed to remove the ChatGPT install directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+}
+
+ensure_chatgpt_app() {
+  local stage_dir="$1"
+  local dmg_path="$stage_dir/ChatGPT.dmg"
+  local mount_dir
+  local cleanup_status
+
+  CHATGPT_INSTALLED_BY_RUN=0
+  if [[ -e "$CHATGPT_APP_PATH" || -L "$CHATGPT_APP_PATH" ]]; then
+    if validate_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
+      return 0
+    fi
+    die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
+    return 1
+  fi
+  if [[ ! -d "$stage_dir" ]]; then
+    die "ChatGPT bootstrap staging directory is missing: $stage_dir"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$stage_dir"
+  download_chatgpt_dmg "$dmg_path" || {
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  }
+  if ! mount_dir="$(/usr/bin/mktemp -d "$stage_dir/chatgpt-mount.XXXXXX")"; then
+    cleanup_chatgpt_bootstrap || true
+    die "failed to create the ChatGPT disk image mount directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  if ! attach_chatgpt_dmg "$dmg_path" "$mount_dir" \
+    || ! validate_chatgpt_app "$mount_dir/ChatGPT.app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" \
+    || ! install_verified_chatgpt_app "$mount_dir/ChatGPT.app" "$CHATGPT_APP_PATH"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  cleanup_status=0
+  cleanup_chatgpt_bootstrap || cleanup_status=$?
+  if [[ "$cleanup_status" != "0" ]]; then
+    return 1
+  fi
+  validate_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
+  CHATGPT_INSTALLED_BY_RUN=1
 }
 
 download_release_assets() {
@@ -1090,7 +1265,7 @@ configure_install_paths() {
 
   CC_SWITCH_APP_PATH="$INSTALL_APPLICATIONS_DIR/CC Switch.app"
   CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
-  CHATGPT_CODEX_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app/Contents/Resources/codex"
+  CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
@@ -1992,6 +2167,7 @@ transaction_exit_guard() {
     && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
     rollback_failed_install || exit_status=1
   fi
+  cleanup_chatgpt_bootstrap || exit_status=1
   cleanup_transaction_stage || exit_status=1
   exit "$exit_status"
 }
@@ -2006,6 +2182,7 @@ transaction_signal_guard() {
     && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
     rollback_failed_install || exit_status=1
   fi
+  cleanup_chatgpt_bootstrap || exit_status=1
   cleanup_transaction_stage || exit_status=1
   exit "$exit_status"
 }
@@ -2042,13 +2219,24 @@ perform_install() {
   architecture="${CC_SWITCH_INSTALLER_TEST_ARCH:-$(/usr/bin/uname -m)}"
   major_version="${CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR:-$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)}"
   validate_platform "$operating_system" "$architecture" "$major_version" || return 1
-  ensure_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
 
   if ! stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-modelhub-install.XXXXXX")"; then
     die "failed to create the installer staging directory"
     return 1
   fi
   TRANSACTION_STAGE_DIR="$stage_dir"
+  prepare_application_permissions || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  ensure_chatgpt_app "$stage_dir" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -2082,10 +2270,6 @@ perform_install() {
   }
   resources_dir="$resources_parent/modelhub-installer"
 
-  prepare_application_permissions || {
-    cleanup_transaction_stage || true
-    return 1
-  }
   quit_apps || {
     cleanup_transaction_stage || true
     return 1
