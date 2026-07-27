@@ -18,6 +18,19 @@ TESTS_RUN=0
 TESTS_FAILED=0
 
 cleanup() {
+  local state_file
+  local trusted_dir
+  while IFS= read -r state_file; do
+    trusted_dir="$(/bin/cat "$state_file" 2>/dev/null || true)"
+    case "$trusted_dir" in
+      /private/var/tmp/.cc-switch-modelhub-helper.*)
+        if [[ -e "$trusted_dir" ]]; then
+          /bin/chmod -R u+w "$trusted_dir" 2>/dev/null || true
+          /bin/rm -rf -- "$trusted_dir" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done < <(find "$TEST_TMP" -type f -name 'trusted-dir.state' 2>/dev/null)
   rm -rf "$TEST_TMP"
 }
 trap cleanup EXIT
@@ -616,6 +629,12 @@ create_chatgpt_bootstrap_stubs() {
   write_executable_stub "$case_dir/sudo" \
     'printf "%s\n" "$*" >>"$FAKE_CHATGPT_SUDO_LOG"' \
     'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
+    'if [[ "${1:-}" == "/usr/bin/mktemp" && "${2:-}" == "-d" && "${3:-}" == "/private/var/tmp/.cc-switch-modelhub-helper.XXXXXX" ]]; then' \
+    '  trusted_dir="$("$@")"' \
+    '  printf "%s\n" "$trusted_dir" >"$FAKE_TRUSTED_DIR_STATE"' \
+    '  printf "%s\n" "$trusted_dir"' \
+    '  exit 0' \
+    'fi' \
     'if [[ "${1:-}" == */rename-exclusive ]]; then' \
     '  printf "publish\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
     'fi' \
@@ -631,6 +650,32 @@ create_chatgpt_bootstrap_stubs() {
     'fi' \
     'if [[ "${1:-}" == "/bin/rm" && "${@: -1}" == */.chatgpt-helper.* ]]; then' \
     '  /bin/chmod -R u+w "${@: -1}"' \
+    'fi' \
+    'if [[ "${1:-}" == "/bin/rm" && "${@: -1}" == /private/var/tmp/.cc-switch-modelhub-helper.* ]]; then' \
+    '  /bin/chmod -R u+w "${@: -1}"' \
+    'fi' \
+    'if [[ "${1:-}" == "/usr/bin/stat" && "${2:-}" == "-f" && "${3:-}" == "%u:%Lp" && "${4:-}" == /private/var/tmp/.cc-switch-modelhub-helper.* ]]; then' \
+    '  printf "0:%s\n" "$(/usr/bin/stat -f %Lp "$4")"' \
+    '  exit 0' \
+    'fi' \
+    'if [[ "${1:-}" == "/usr/bin/shasum" && "${FAKE_TRUSTED_PARENT_ATTACK:-0}" == "1" ]]; then' \
+    '  hash_output="$("$@")"' \
+    '  hash_status=$?' \
+    '  trusted_helper="${@: -1}"' \
+    '  trusted_dir="$(dirname "$trusted_helper")"' \
+    '  printf "attack-attempt\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  if [[ "$trusted_dir" == /private/var/tmp/.cc-switch-modelhub-helper.* && "$(/usr/bin/stat -f %u /private/var/tmp)" == "0" && "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]]; then' \
+    '    printf "attack-blocked\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  else' \
+    '    /bin/mv "$trusted_dir" "$trusted_dir.attacker-old"' \
+    '    /bin/chmod -R u+w "$trusted_dir.attacker-old"' \
+    '    /bin/mkdir "$trusted_dir"' \
+    '    /bin/cp /usr/bin/false "$trusted_helper"' \
+    '    /bin/chmod 0500 "$trusted_helper" "$trusted_dir"' \
+    '    printf "attacker-executed\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  fi' \
+    '  printf "%s\n" "$hash_output"' \
+    '  exit "$hash_status"' \
     'fi' \
     'set +e' \
     'FAKE_PRIVILEGED=1 "$@"' \
@@ -659,7 +704,9 @@ create_chatgpt_bootstrap_stubs() {
   export FAKE_CHATGPT_DETACH_STATE="$case_dir/detach.state"
   export FAKE_CHATGPT_RM_STATE="$case_dir/rm.state"
   export FAKE_CHATGPT_MOUNT_STATE="$case_dir/mount.state"
+  export FAKE_TRUSTED_DIR_STATE="$case_dir/trusted-dir.state"
   export FAKE_MOUNT_CHECK_FAIL=0
+  export FAKE_TRUSTED_PARENT_ATTACK=0
 }
 
 prepare_chatgpt_bootstrap_case() {
@@ -709,6 +756,10 @@ assert_chatgpt_bootstrap_scratch_clean() {
     || fail 'ChatGPT same-volume temporary directory was not cleaned'
   [[ -z "$(find "$case_dir/Applications" -mindepth 1 -maxdepth 1 -type d -name '.chatgpt-helper.*' -print -quit)" ]] \
     || fail 'trusted ChatGPT helper directory was not cleaned'
+  if [[ -e "$case_dir/trusted-dir.state" ]]; then
+    [[ ! -e "$(/bin/cat "$case_dir/trusted-dir.state")" ]] \
+      || fail 'private var tmp trusted helper directory was not cleaned'
+  fi
 }
 
 test_bootstraps_missing_chatgpt_from_official_dmg() {
@@ -730,11 +781,11 @@ test_bootstraps_missing_chatgpt_from_official_dmg() {
   assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
   assert_contains "$FAKE_CHATGPT_DITTO_LOG" "/ChatGPT.app $case_dir/Applications/.chatgpt-modelhub."
   assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d $case_dir/Applications/.chatgpt-modelhub.XXXXXX"
-  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d $case_dir/Applications/.chatgpt-helper.XXXXXX"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d /private/var/tmp/.cc-switch-modelhub-helper.XXXXXX"
   assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/cp $FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
   assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/chmod 0500"
-  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/shasum -a 256 $case_dir/Applications/.chatgpt-helper."
-  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/Applications/.chatgpt-helper."
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/shasum -a 256 /private/var/tmp/.cc-switch-modelhub-helper."
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/private/var/tmp/.cc-switch-modelhub-helper."
   assert_equals "$(sed -n '1p' "$FAKE_CHATGPT_EVENT_LOG")" 'detach'
   assert_equals "$(sed -n '2p' "$FAKE_CHATGPT_EVENT_LOG")" 'publish'
   assert_chatgpt_bootstrap_scratch_clean "$case_dir"
@@ -976,6 +1027,39 @@ test_chatgpt_bootstrap_rejects_tampered_trusted_copy_before_exec() {
   assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'publish'
   [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'tampered trusted helper installed ChatGPT'
   assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_trusted_parent_blocks_post_hash_replacement() {
+  local case_dir="$TEST_TMP/chatgpt-trusted-parent-attack"
+  local trusted_dir
+  local attack_line
+  local publish_line
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_TRUSTED_PARENT_ATTACK=1
+
+  assert_equals "$(/usr/bin/stat -f %u /private/var/tmp)" '0'
+  [[ "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]] \
+    || fail '/private/var/tmp is not sticky'
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+
+  trusted_dir="$(/bin/cat "$FAKE_TRUSTED_DIR_STATE")"
+  [[ "$trusted_dir" == /private/var/tmp/.cc-switch-modelhub-helper.* ]] \
+    || fail "trusted helper used an unsafe parent: $trusted_dir"
+  assert_contains "$FAKE_CHATGPT_EVENT_LOG" 'attack-attempt'
+  assert_contains "$FAKE_CHATGPT_EVENT_LOG" 'attack-blocked'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'attacker-executed'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  attack_line="$(grep -n '^attack-blocked$' "$FAKE_CHATGPT_EVENT_LOG" | cut -d: -f1)"
+  publish_line="$(grep -n '^publish$' "$FAKE_CHATGPT_EVENT_LOG" | cut -d: -f1)"
+  [[ "$attack_line" -lt "$publish_line" ]] || fail 'attack hook did not run before helper execution'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_requires_root_sticky_trusted_parent() {
+  validate_trusted_helper_parent
+  assert_equals "$(/usr/bin/stat -f %u /private/var/tmp)" '0'
+  [[ "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]] \
+    || fail '/private/var/tmp is not sticky'
 }
 
 test_production_mode_ignores_privileged_tool_overrides() {
@@ -2399,6 +2483,8 @@ run_test "ChatGPT bootstrap detach failure prevents publication" test_chatgpt_bo
 run_test "ChatGPT bootstrap commit point skips destructive post validation" test_chatgpt_bootstrap_commit_point_skips_destructive_post_validation
 run_test "ChatGPT bootstrap rejects modified re-signed helper by pinned hash" test_chatgpt_bootstrap_rejects_modified_resigned_helper_by_pinned_hash
 run_test "ChatGPT bootstrap rejects tampered trusted copy before exec" test_chatgpt_bootstrap_rejects_tampered_trusted_copy_before_exec
+run_test "ChatGPT bootstrap trusted parent blocks post-hash replacement" test_chatgpt_bootstrap_trusted_parent_blocks_post_hash_replacement
+run_test "ChatGPT bootstrap requires root sticky trusted parent" test_chatgpt_bootstrap_requires_root_sticky_trusted_parent
 run_test "production mode ignores privileged tool overrides" test_production_mode_ignores_privileged_tool_overrides
 run_test "ChatGPT bootstrap validates root-owned staging through privilege" test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege
 run_test "ChatGPT bootstrap rejects unverified packaged helper" test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download

@@ -17,6 +17,7 @@ readonly CHATGPT_BUNDLE_ID='com.openai.codex'
 readonly CHATGPT_DOWNLOAD_PAGE='https://openai.com/chatgpt/download/'
 readonly CHATGPT_DMG_URL='https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg'
 readonly RENAME_HELPER_SHA256='__RENAME_HELPER_SHA256__'
+readonly TRUSTED_HELPER_TEMPLATE='/private/var/tmp/.cc-switch-modelhub-helper.XXXXXX'
 readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
 readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
 readonly KEYCHAIN_SERVICE='com.ccswitch.modelhub.ak'
@@ -557,19 +558,82 @@ cleanup_trusted_rename_helper() {
     CHATGPT_TRUSTED_HELPER_PATH=''
     return 0
   fi
-  case "$CHATGPT_TRUSTED_HELPER_DIR" in
-    "$INSTALL_APPLICATIONS_DIR"/.chatgpt-helper.*) ;;
-    *)
-      die "refusing to remove an unsafe trusted helper directory"
-      return 1
-      ;;
-  esac
+  validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '500|700' || return 1
   if ! run_with_privilege /bin/rm -rf -- "$CHATGPT_TRUSTED_HELPER_DIR"; then
     die "failed to remove the trusted helper directory"
     return 1
   fi
   CHATGPT_TRUSTED_HELPER_DIR=''
   CHATGPT_TRUSTED_HELPER_PATH=''
+}
+
+validate_trusted_helper_parent() {
+  local owner
+  local permissions
+
+  if [[ ! -d '/private/var/tmp' || -L '/private/var/tmp' ]]; then
+    die "trusted helper parent must be a real directory"
+    return 1
+  fi
+  owner="$(/usr/bin/stat -f '%u' /private/var/tmp)" || return 1
+  permissions="$(/usr/bin/stat -f '%Sp' /private/var/tmp)" || return 1
+  if [[ "$owner" != '0' || "$permissions" != *t ]]; then
+    die "trusted helper parent must be root-owned and sticky"
+    return 1
+  fi
+}
+
+validate_trusted_helper_directory() {
+  local directory="$1"
+  local allowed_modes="$2"
+  local parent="${directory%/*}"
+  local name="${directory##*/}"
+  local owner_mode
+
+  if [[ "$parent" != '/private/var/tmp' ]]; then
+    die "trusted helper directory has an unsafe parent"
+    return 1
+  fi
+  case "$name" in
+    .cc-switch-modelhub-helper.?*) ;;
+    *)
+      die "trusted helper directory has an unsafe name"
+      return 1
+      ;;
+  esac
+  if run_with_privilege /bin/test -L "$directory" \
+    || ! run_with_privilege /bin/test -d "$directory"; then
+    die "trusted helper directory must be a real directory"
+    return 1
+  fi
+  owner_mode="$(run_with_privilege /usr/bin/stat -f '%u:%Lp' "$directory")" || return 1
+  case "$owner_mode" in
+    "0:${allowed_modes%%|*}") ;;
+    "0:${allowed_modes#*|}") ;;
+    *)
+      die "trusted helper directory has unsafe ownership or permissions"
+      return 1
+      ;;
+  esac
+}
+
+validate_trusted_helper_file() {
+  local helper_path="$1"
+  local expected_directory="$2"
+  local owner_mode
+
+  if [[ "$helper_path" != "$expected_directory/rename-exclusive" ]] \
+    || run_with_privilege /bin/test -L "$helper_path" \
+    || ! run_with_privilege /bin/test -f "$helper_path" \
+    || ! run_with_privilege /bin/test -x "$helper_path"; then
+    die "trusted helper file is unsafe"
+    return 1
+  fi
+  owner_mode="$(run_with_privilege /usr/bin/stat -f '%u:%Lp' "$helper_path")" || return 1
+  if [[ "$owner_mode" != '0:500' ]]; then
+    die "trusted helper file has unsafe ownership or permissions"
+    return 1
+  fi
 }
 
 privileged_file_sha256() {
@@ -588,13 +652,15 @@ prepare_trusted_rename_helper() {
   local actual_sha
 
   if [[ "$NEEDS_SUDO" == "1" ]]; then
+    validate_trusted_helper_parent || return 1
     if ! CHATGPT_TRUSTED_HELPER_DIR="$(
-      run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-helper.XXXXXX"
+      run_with_privilege /usr/bin/mktemp -d "$TRUSTED_HELPER_TEMPLATE"
     )"; then
       CHATGPT_TRUSTED_HELPER_DIR=''
       die "failed to create the trusted helper directory"
       return 1
     fi
+    validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '700|700' || return 1
     CHATGPT_TRUSTED_HELPER_PATH="$CHATGPT_TRUSTED_HELPER_DIR/rename-exclusive"
     if ! run_with_privilege /bin/cp "$source_helper" "$CHATGPT_TRUSTED_HELPER_PATH" \
       || ! run_with_privilege /bin/chmod 0500 "$CHATGPT_TRUSTED_HELPER_PATH" \
@@ -602,6 +668,11 @@ prepare_trusted_rename_helper() {
       die "failed to protect the trusted helper copy"
       return 1
     fi
+    validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '500|500' || return 1
+    validate_trusted_helper_file \
+      "$CHATGPT_TRUSTED_HELPER_PATH" \
+      "$CHATGPT_TRUSTED_HELPER_DIR" \
+      || return 1
     actual_sha="$(privileged_file_sha256 "$CHATGPT_TRUSTED_HELPER_PATH")" || return 1
   else
     CHATGPT_TRUSTED_HELPER_PATH="$source_helper"
