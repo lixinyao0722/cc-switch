@@ -1792,17 +1792,7 @@ managed_relative_for_target() {
 }
 
 sudo_command() {
-  installer_tool_path CC_SWITCH_SUDO_BIN /usr/bin/sudo
-}
-
-is_system_sudo_command() {
-  local candidate="$1"
-  local candidate_identity
-  local system_identity
-
-  candidate_identity="$(/usr/bin/stat -L -f '%d:%i' "$candidate" 2>/dev/null)" || return 1
-  system_identity="$(/usr/bin/stat -L -f '%d:%i' /usr/bin/sudo 2>/dev/null)" || return 1
-  [[ "$candidate_identity" == "$system_identity" ]]
+  printf '%s' '/usr/bin/sudo'
 }
 
 validate_privileged_command() {
@@ -1827,9 +1817,7 @@ run_with_privilege() {
 
   if [[ "$NEEDS_SUDO" == "1" ]]; then
     sudo_bin="$(sudo_command)"
-    if is_system_sudo_command "$sudo_bin"; then
-      validate_privileged_command "$1" || return 1
-    fi
+    validate_privileged_command "$1" || return 1
     "$sudo_bin" "$@"
   else
     "$@"

@@ -94,6 +94,16 @@ assert_command_fails() {
   fi
 }
 
+activate_fake_privilege_runner() {
+  TEST_FAKE_SUDO_BIN="$1"
+  sudo_command() {
+    printf '%s' "$TEST_FAKE_SUDO_BIN"
+  }
+  run_with_privilege() {
+    "$TEST_FAKE_SUDO_BIN" "$@"
+  }
+}
+
 build_test_rename_helper() {
   local output_path="$1"
 
@@ -726,7 +736,6 @@ create_chatgpt_bootstrap_stubs() {
   export CC_SWITCH_CURL_BIN="$case_dir/curl"
   export CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil"
   export CC_SWITCH_DITTO_BIN="$case_dir/ditto"
-  export CC_SWITCH_SUDO_BIN="$case_dir/sudo"
   export CC_SWITCH_RM_BIN="$case_dir/rm"
   export CC_SWITCH_MOUNT_BIN="$case_dir/mount"
   export FAKE_CHATGPT_CURL_LOG="$case_dir/curl.log"
@@ -741,6 +750,7 @@ create_chatgpt_bootstrap_stubs() {
   export FAKE_TRUSTED_DIR_STATE="$case_dir/trusted-dir.state"
   export FAKE_MOUNT_CHECK_FAIL=0
   export FAKE_TRUSTED_PARENT_ATTACK=0
+  activate_fake_privilege_runner "$case_dir/sudo"
 }
 
 prepare_chatgpt_bootstrap_case() {
@@ -1135,18 +1145,23 @@ test_production_mode_ignores_privileged_tool_overrides() {
 test_real_sudo_rejects_non_allowlisted_privileged_commands() {
   local case_dir="$TEST_TMP/privileged-command-allowlist"
   local malicious="$case_dir/malicious"
+  local malicious_log="$case_dir/malicious.log"
   local sudo_symlink="$case_dir/system-sudo"
   mkdir -p "$case_dir"
-  write_executable_stub "$malicious" 'exit 99'
+  write_executable_stub "$malicious" ': >"$MALICIOUS_LOG"' 'exit 0'
   ln -s /usr/bin/sudo "$sudo_symlink"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_SUDO_BIN="$sudo_symlink"
+  export MALICIOUS_LOG="$malicious_log"
+  NEEDS_SUDO=1
 
-  is_system_sudo_command /usr/bin/sudo
-  is_system_sudo_command "$sudo_symlink"
-  assert_command_fails is_system_sudo_command "$malicious"
+  assert_equals "$(sudo_command)" '/usr/bin/sudo'
   validate_privileged_command /usr/bin/ditto
   validate_privileged_command /usr/bin/codesign
   validate_privileged_command /bin/rm
   assert_command_fails validate_privileged_command "$malicious"
+  assert_command_fails run_with_privilege "$malicious"
+  [[ ! -e "$malicious_log" ]] || fail 'test sudo override executed a non-allowlisted command'
 }
 
 test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege() {
@@ -1619,9 +1634,9 @@ test_existing_nonwritable_app_requires_privilege() {
   export CC_SWITCH_INSTALLER_TEST_MODE=1
   export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
-  export CC_SWITCH_SUDO_BIN="$sudo_bin"
   export FAKE_SUDO_LOG="$case_dir/sudo.log"
   export FAKE_SUDO_APP_PATH="$applications_dir/CC Switch.app"
+  activate_fake_privilege_runner "$sudo_bin"
   configure_install_paths
 
   prepare_application_permissions
@@ -1653,8 +1668,8 @@ test_existing_nontraversable_app_requires_privilege() {
   export CC_SWITCH_INSTALLER_TEST_MODE=1
   export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
-  export CC_SWITCH_SUDO_BIN="$sudo_bin"
   export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  activate_fake_privilege_runner "$sudo_bin"
   configure_install_paths
 
   prepare_application_permissions
