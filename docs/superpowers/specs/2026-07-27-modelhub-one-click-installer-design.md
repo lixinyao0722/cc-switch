@@ -67,6 +67,7 @@ R2 的 `install.sh` 内部固定不可变 tag `modelhub-installer-20260727-r2`�
 - `scripts/modelhub-installer/templates/modelhub-provider-meta.json`：`max_output_tokens`、ModelHub 会话适配器和同 Provider 429 重试元数据。
 - `scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist`：LaunchAgent 模板。
 - `scripts/modelhub-installer/templates/load-modelhub-env.sh`：从 Keychain 读取 AK，并把 `MODELHUB_AK` 与 `CODEX_CLI_PATH` 注入用户 launchd 域。
+- `scripts/modelhub-installer/helpers/rename-exclusive.c`：使用 `renamex_np(..., RENAME_EXCL)` 排他发布已验证 ChatGPT App 的最小 arm64 helper 源码；只在 Release 打包时编译和 ad-hoc 签名。
 - `tests/scripts/modelhub-installer.test.sh`：隔离运行的安装器回归测试。
 - `src-tauri/src/proxy/providers/codex.rs`：当 Codex Provider 没有持久化 key、但其活跃 TOML Provider 显式声明 `env_key` 时，从 CC Switch 进程环境解析凭据。
 
@@ -113,10 +114,12 @@ https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
 1. 仅从 `persistent.oaistatic.com` 的固定 HTTPS URL 下载 DMG，使用有限次数重试；
 2. 通过 `hdiutil attach -nobrowse -readonly` 挂载到私有临时目录；
 3. 对 DMG 内的 `ChatGPT.app` 执行上述完整 Bundle ID、Team ID、arm64、严格签名和内置 Codex 校验；
-4. 先复制到 `/Applications` 下同卷的私有临时 App 路径，再次校验后原子改名为 `/Applications/ChatGPT.app`，避免安装中断留下半个目标 App；
+4. 先复制到 `/Applications` 下同卷的私有临时 App 路径并再次校验，记录暂存 App 的 device/inode，再通过最小 helper 调用 `renamex_np(..., RENAME_EXCL)` 排他发布为 `/Applications/ChatGPT.app`；目标在并发窗口出现或暂存源身份改变时失败，不覆盖任何既有目标；
 5. 无论成功或失败都卸载 DMG 并清理临时文件。
 
 ChatGPT bootstrap 位于 CC Switch 事务之前。若 ChatGPT 安装成功，但后续 CC Switch 安装失败或用户执行 `--rollback latest`，新安装的官方 ChatGPT App 都会保留，不进入 CC Switch 的备份 manifest。安装器不读取 ChatGPT 登录状态；安装结束后用户需要自行打开 ChatGPT 并完成登录。
+
+helper 的信任链由打包器和安装器共同固定：打包器以 `arm64`、macOS 12 最低版本编译并 ad-hoc 签名 helper，把其 SHA-256 精确写入本次 Release 的 `install.sh`；安装器先验证资源包 allowlist、helper 严格签名、单一 `arm64` 架构和固定哈希。需要管理员权限时，安装器只把已验证 helper 复制到 `/private/var/tmp` 下由 root 创建的随机私有目录；执行前再次确认父目录为 root-owned sticky namespace、子目录和文件均为 root 所有且不可由普通用户写入，并重新核对固定哈希。helper 执行后立即清理该隔离目录。
 
 ## 备份与事务边界
 
@@ -244,6 +247,7 @@ security add-generic-password \
 - `/Applications` 可写但已有 root-owned CC Switch App 不可写时，仍会预先获取 sudo，并让删除、安装和失败回滚走同一权限包装器。
 - ChatGPT 已存在且有效时不下载；已存在但 Bundle ID、Team ID、架构、严格签名或内置 Codex 不符时阻断。
 - ChatGPT 缺失时从固定 OpenAI 官方 DMG 下载、挂载、验签、同卷临时安装并原子改名。
+- ChatGPT 原子发布使用固定哈希的 `renamex_np(..., RENAME_EXCL)` helper；管理员路径只从 root-owned sticky namespace 中执行 root-owned、不可写的受信副本。
 - ChatGPT 下载失败、DMG 挂载失败或验签失败时不留下目标 App；ChatGPT 安装成功后即使 CC Switch 后续失败也会保留。
 - 在首次修改前拒绝 SHA 不匹配、归档路径穿越、符号链接、非预期资产或未解析占位符。
 - 不存在 CC Switch 数据库或 Codex 配置时的首次安装。

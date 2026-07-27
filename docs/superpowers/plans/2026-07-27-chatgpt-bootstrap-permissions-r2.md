@@ -15,6 +15,8 @@
 - OpenAI 官方下载页固定为 `https://openai.com/chatgpt/download/`，新版 ChatGPT DMG 固定为 `https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg`。
 - ChatGPT App 必须满足 Bundle ID `com.openai.codex`、Team ID `2DC432GLL2`、主程序含 `arm64`、严格 codesign 通过，且内置 Codex 存在、可执行并属于同一 Team ID。
 - 已有 ChatGPT 校验失败时阻断，不覆盖；缺失时才下载和安装。
+- ChatGPT 最终发布使用 `renamex_np(..., RENAME_EXCL)` 排他 helper；helper 必须为 macOS 12+ arm64、ad-hoc 签名并由 Release `install.sh` 固定 SHA-256。
+- 需要 sudo 时，helper 只从 `/private/var/tmp` 下 root-owned sticky namespace 中由 root 创建、收紧为不可写权限且重新核对固定哈希的私有副本执行。
 - 本次新安装的 ChatGPT 位于 CC Switch 事务之前，不进入失败回滚或 `--rollback latest`。
 - ChatGPT DMG 不上传到 GitHub Release；R2 Release 仍只包含现有四项公开资产。
 - R2 tag 固定为 `modelhub-installer-20260727-r2`；已有 `modelhub-installer-20260727` 和两个更早 Pre-release 保留不变。
@@ -217,7 +219,8 @@ git commit -m "feat(installer): 校验官方 ChatGPT 应用"
 
 - ChatGPT 缺失：只请求精确 `CHATGPT_DMG_URL`，参数包含 `--fail --location --retry 3 --retry-all-errors`；
 - 使用 `hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir"`，其中 `mount_dir` 来自私有 `mktemp -d`；成功/失败都调用 `detach`；
-- 挂载 App 验证后，通过 `run_with_privilege mktemp -d '/Applications/.chatgpt-modelhub.XXXXXX'` 创建同卷 `temp_dir`，复制到 `$temp_dir/ChatGPT.app`，再次验证，再原子 `mv` 到目标；
+- 挂载 App 验证后，通过 `run_with_privilege mktemp -d '/Applications/.chatgpt-modelhub.XXXXXX'` 创建同卷 `temp_dir`，复制到 `$temp_dir/ChatGPT.app` 并再次验证；记录 device/inode，再由 helper 通过 `renamex_np(..., RENAME_EXCL)` 排他发布，拒绝并发目标和源身份变化；
+- 打包时构建 macOS 12+ arm64、ad-hoc 签名 helper 并把 SHA-256 写入 `install.sh`；运行时验证资源路径、签名、架构和固定哈希；sudo 路径还验证 root-owned sticky 父目录、root-owned 私有副本和收紧权限；
 - 下载失败、attach 失败、DMG 内 App 缺失或验签失败：目标不存在、mount/temp 均清理；
 - 已有有效 App：不调用 curl/hdiutil；
 - 后续 `run_install_transaction` 失败：新安装的 ChatGPT 仍存在，`rollback_latest` 也不删除。
@@ -239,9 +242,10 @@ Expected: FAIL，缺少 bootstrap 函数。
 
 1. 通过 `run_with_privilege mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-modelhub.XXXXXX"` 创建同卷临时目录；
 2. `run_with_privilege ditto SOURCE "$temp_dir/ChatGPT.app"`；
-3. 验证临时 App；
-4. 目标仍不存在才执行 `run_with_privilege mv "$temp_dir/ChatGPT.app" "$CHATGPT_APP_PATH"`；若并发出现目标则失败并清理，不覆盖；
-5. 验证最终目标并清理临时目录。
+3. 验证临时 App，并记录其 device/inode；
+4. 验证资源包内 helper 的严格签名、单一 `arm64` 架构和 `install.sh` 固定 SHA-256；需要 sudo 时，将其复制到 `/private/var/tmp/.cc-switch-modelhub-helper.*` 的 root-owned 私有目录，收紧目录/文件权限并重新核对哈希；
+5. 由 helper 调用 `renamex_np(..., RENAME_EXCL)` 发布到目标；若并发出现目标或源身份变化则失败并清理，不覆盖；
+6. 验证最终目标并清理临时目录与受信 helper 副本。
 
 `ensure_chatgpt_app` 已存在时只验证；缺失时下载、挂载、安装、卸载并验证，设置 `CHATGPT_INSTALLED_BY_RUN=1` 仅用于报告，不加入 `managed_targets`。
 
@@ -304,9 +308,9 @@ pnpm typecheck
 pnpm format:check
 pnpm test:unit
 cd src-tauri
-PATH=/Users/shopee/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH LZMA_API_STATIC=1 cargo fmt --check
-PATH=/Users/shopee/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH LZMA_API_STATIC=1 cargo clippy --all-targets -- -D warnings
-PATH=/Users/shopee/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH LZMA_API_STATIC=1 cargo test
+PATH="$HOME/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH" LZMA_API_STATIC=1 cargo fmt --check
+PATH="$HOME/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH" LZMA_API_STATIC=1 cargo clippy --all-targets -- -D warnings
+PATH="$HOME/.rustup/toolchains/1.95-aarch64-apple-darwin/bin:$PATH" LZMA_API_STATIC=1 cargo test
 ```
 
 Expected: 所有命令退出码 0；installer 新总数、前端 529/529、Rust 全量无失败。
