@@ -989,6 +989,54 @@ test_package_rejects_source_symlinks() {
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$case_dir/output"
 }
 
+test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
+  local case_dir="$TEST_TMP/release-smoke"
+  local asset_dir
+  local database
+  local first_install_digest
+  local after_rollback_digest
+  mkdir -p "$case_dir"
+  create_transaction_state "$case_dir"
+  create_transaction_stubs "$case_dir"
+
+  if [[ -n "${CC_SWITCH_RELEASE_SMOKE_ASSET_DIR:-}" ]]; then
+    asset_dir="$CC_SWITCH_RELEASE_SMOKE_ASSET_DIR"
+  else
+    mkdir -p "$case_dir/assets"
+    create_fake_app_zip "$case_dir"
+    asset_dir="$case_dir/publish"
+    run_packager \
+      "$REPO_ROOT/scripts/modelhub-installer" \
+      "$case_dir/assets/CC-Switch-ModelHub-3.18.0-arm64.app.zip" \
+      "$asset_dir"
+  fi
+
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$asset_dir"
+  export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130000Z'
+  export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
+  export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
+  export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
+  export FAKE_SECURITY_MODE=success
+  export FAKE_HEALTH_MODE=healthy
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+
+  /bin/bash -s <"$asset_dir/install.sh"
+  first_install_digest="$(managed_state_digest "$case_dir")"
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
+
+  export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130001Z'
+  /bin/bash "$asset_dir/install.sh"
+  assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
+
+  /bin/bash "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" --rollback latest
+  after_rollback_digest="$(managed_state_digest "$case_dir")"
+  assert_equals "$after_rollback_digest" "$first_install_digest"
+}
+
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -1021,6 +1069,7 @@ run_test "package rejects sensitive content" test_package_rejects_sensitive_cont
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
+run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2

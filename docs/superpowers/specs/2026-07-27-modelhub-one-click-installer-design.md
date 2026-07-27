@@ -104,6 +104,7 @@ Release 打包器不以旧私密配置包为输入，而是只打包上述受版
 - `~/.cc-switch/settings.json`
 - `~/Library/LaunchAgents/com.ccswitch.modelhub-env.plist`
 - `~/.local/share/cc-switch-modelhub/load-modelhub-env.sh`
+- `~/.local/share/cc-switch-modelhub/install.sh`
 
 安装器不读取、不复制，也不修改 `~/.codex/auth.json`。
 
@@ -185,7 +186,7 @@ security add-generic-password \
 - `MODELHUB_AK`
 - `CODEX_CLI_PATH=/Applications/ChatGPT.app/Contents/Resources/codex`
 
-安装器在当前 `gui/<uid>` 域中加载或刷新 LaunchAgent，为当前登录会话立即执行一次环境加载脚本，启动 CC Switch，并等待 `http://127.0.0.1:15721/health` 返回 `healthy`。
+安装器在当前 `gui/<uid>` 域中加载或刷新 LaunchAgent，为当前登录会话立即执行一次环境加载脚本，启动 CC Switch，并等待 `http://127.0.0.1:15721/health` 返回包含 `"status":"healthy"` 的 JSON（同时兼容旧裸字符串 `healthy`）。回滚时会卸载该 job，并清除当前 launchd 会话中的 `MODELHUB_AK` 与 `CODEX_CLI_PATH` 后再恢复旧 LaunchAgent。
 
 ## 幂等与失败处理
 
