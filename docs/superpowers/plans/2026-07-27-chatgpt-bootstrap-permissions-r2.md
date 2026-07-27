@@ -41,7 +41,7 @@ gh pr view 1 --repo lixinyao0722/cc-switch --json url,isDraft,state,headRefOid
 gh release list --repo lixinyao0722/cc-switch --limit 5
 ```
 
-Expected: 当前分支为 `feat/modelhub-one-click-installer`，仅书面 spec/plan follow-up 提交领先或已同步；PR #1 仍为 Draft；当前 Latest 是 `modelhub-installer-20260727`。
+Expected: 当前分支为 `feat/modelhub-one-click-installer`；PR #1 已合并且 `origin/main` 包含旧安装器 head `009a714`；当前分支相对 `origin/main` 只保留 R2 follow-up 提交；当前 Latest 是 `modelhub-installer-20260727`。
 
 - [ ] **Step 2: 运行 focused 基线**
 
@@ -277,14 +277,14 @@ git commit -m "feat(installer): 自动安装官方 ChatGPT 应用"
 
 ---
 
-### Task 4: 完整验证、PR 与 R2 Release
+### Task 4: 完整验证、follow-up PR 与 R2 Release
 
 **Files:**
 - Modify: `docs/guides/modelhub-codex-proxy-compat-zh.md`
 - Generated ignored assets: `release/modelhub-installer-r2/`
 
 **Interfaces:**
-- Produces: updated remote branch and Draft PR #1
+- Produces: updated remote branch and a new follow-up Draft PR targeting `main`
 - Produces: normal Latest Release `modelhub-installer-20260727-r2`
 
 - [ ] **Step 1: 更新仓库技术说明**
@@ -315,16 +315,22 @@ Expected: 所有命令退出码 0；installer 新总数、前端 529/529、Rust 
 
 扫描仓库 diff 和打包资源，确认不包含 DMG、AK、OAuth、`auth.json`、数据库、日志或用户路径；提交技术说明后请求一次 whole-branch/scoped review，修复所有 Critical/Important finding。
 
-- [ ] **Step 4: 推送并更新 Draft PR #1**
+- [ ] **Step 4: 推送并创建 follow-up Draft PR**
 
 ```bash
 git push origin feat/modelhub-one-click-installer
 pr_notes_dir="$(mktemp -d /tmp/cc-switch-pr-r2.XXXXXX)"
 # 用 apply_patch 创建 "$pr_notes_dir/body.md" 后：
-gh pr edit 1 --repo lixinyao0722/cc-switch --body-file "$pr_notes_dir/body.md"
+gh pr create \
+  --repo lixinyao0722/cc-switch \
+  --base main \
+  --head feat/modelhub-one-click-installer \
+  --title 'fix(installer): 支持新机权限与 ChatGPT bootstrap' \
+  --body-file "$pr_notes_dir/body.md" \
+  --draft
 ```
 
-PR 增加新机诊断根因、权限修复、ChatGPT 官方来源与保留边界、R2 验证结果。
+原 PR #1 已合并并保持历史不变。新 follow-up PR 只包含 `origin/main` 之后的 R2 提交，正文记录新机诊断根因、权限修复、ChatGPT 官方来源与保留边界、R2 验证结果。
 
 - [ ] **Step 5: 构建并发布 R2**
 
