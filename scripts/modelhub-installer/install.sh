@@ -3,10 +3,230 @@
 set -euo pipefail
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
+readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
+readonly RELEASE_TAG='modelhub-installer-20260727'
+readonly INSTALLER_ASSET='install.sh'
+readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
+readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
+readonly CHECKSUM_ASSET='SHA256SUMS.txt'
+readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
 
 die() {
   echo "error: $*" >&2
   return 1
+}
+
+validate_platform() {
+  local operating_system="$1"
+  local architecture="$2"
+  local major_version="$3"
+
+  if [[ "$operating_system" != "Darwin" ]]; then
+    die "unsupported operating system: $operating_system (macOS required)"
+    return 1
+  fi
+  if [[ "$architecture" != "arm64" ]]; then
+    die "unsupported architecture: $architecture (arm64 required)"
+    return 1
+  fi
+  case "$major_version" in
+    ""|*[!0-9]*)
+      die "invalid macOS major version: $major_version"
+      return 1
+      ;;
+  esac
+  if [[ "$major_version" -lt 12 ]]; then
+    die "unsupported macOS version: $major_version (12 or later required)"
+    return 1
+  fi
+}
+
+validate_chatgpt_codex() {
+  local codex_path="$1"
+  local expected_team_id="$2"
+  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local details
+  local team_id
+
+  if [[ ! -x "$codex_path" ]]; then
+    die "ChatGPT Codex executable not found: $codex_path"
+    return 1
+  fi
+  if [[ ! -x "$codesign_bin" ]]; then
+    die "codesign command not found: $codesign_bin"
+    return 1
+  fi
+  if ! details="$("$codesign_bin" -dv --verbose=4 "$codex_path" 2>&1)"; then
+    die "unable to inspect ChatGPT Codex signature"
+    return 1
+  fi
+  team_id="$(printf '%s\n' "$details" | awk -F= '$1 == "TeamIdentifier" { print $2; exit }')"
+  if [[ "$team_id" != "$expected_team_id" ]]; then
+    die "unexpected ChatGPT Codex Team ID"
+    return 1
+  fi
+}
+
+download_release_assets() {
+  local destination="$1"
+  local curl_bin="${CC_SWITCH_CURL_BIN:-/usr/bin/curl}"
+  local base_url="https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}"
+  local asset
+
+  if [[ ! -x "$curl_bin" ]]; then
+    die "curl command not found: $curl_bin"
+    return 1
+  fi
+  mkdir -p "$destination"
+  for asset in "$INSTALLER_ASSET" "$APP_ASSET" "$RESOURCES_ASSET" "$CHECKSUM_ASSET"; do
+    if ! "$curl_bin" \
+      --fail \
+      --location \
+      --silent \
+      --show-error \
+      --retry 3 \
+      --retry-all-errors \
+      --output "$destination/$asset" \
+      "$base_url/$asset"; then
+      die "failed to download release asset: $asset"
+      return 1
+    fi
+  done
+}
+
+verify_release_assets() {
+  local asset_dir="$1"
+  local checksum_file="$asset_dir/$CHECKSUM_ASSET"
+  local shasum_bin="${CC_SWITCH_SHASUM_BIN:-/usr/bin/shasum}"
+  local asset
+  local line_count
+  local count
+
+  if [[ ! -f "$checksum_file" ]]; then
+    die "release checksum file is missing"
+    return 1
+  fi
+  if [[ ! -x "$shasum_bin" ]]; then
+    die "shasum command not found: $shasum_bin"
+    return 1
+  fi
+
+  line_count="$(awk 'NF { count += 1 } END { print count + 0 }' "$checksum_file")"
+  if [[ "$line_count" != "3" ]]; then
+    die "checksum file must contain exactly three entries"
+    return 1
+  fi
+
+  if ! awk '
+    NF != 2 { exit 1 }
+    length($1) != 64 || $1 !~ /^[0-9a-f]+$/ { exit 1 }
+    $2 ~ /\// { exit 1 }
+  ' "$checksum_file"; then
+    die "checksum file has an invalid entry"
+    return 1
+  fi
+
+  for asset in "$INSTALLER_ASSET" "$APP_ASSET" "$RESOURCES_ASSET"; do
+    if [[ ! -f "$asset_dir/$asset" ]]; then
+      die "release asset is missing: $asset"
+      return 1
+    fi
+    count="$(awk -v name="$asset" '$2 == name { count += 1 } END { print count + 0 }' "$checksum_file")"
+    if [[ "$count" != "1" ]]; then
+      die "checksum file must contain exactly one entry for $asset"
+      return 1
+    fi
+  done
+
+  if ! (
+    cd "$asset_dir"
+    "$shasum_bin" -a 256 -c "$CHECKSUM_ASSET" >/dev/null
+  ); then
+    die "release asset checksum verification failed"
+    return 1
+  fi
+}
+
+validate_archive_entry() {
+  local entry="$1"
+
+  if [[ -z "$entry" || "$entry" == /* ]]; then
+    die "unsafe archive entry: $entry"
+    return 1
+  fi
+  case "/$entry/" in
+    */../*)
+      die "unsafe archive entry: $entry"
+      return 1
+      ;;
+  esac
+}
+
+expected_resource_archive_entries() {
+  cat <<'EOF'
+modelhub-installer/
+modelhub-installer/assets/
+modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/templates/
+modelhub-installer/templates/com.ccswitch.modelhub-env.plist
+modelhub-installer/templates/load-modelhub-env.sh
+modelhub-installer/templates/modelhub-provider-meta.json
+modelhub-installer/templates/modelhub-provider.toml
+EOF
+}
+
+validate_resource_archive() {
+  local archive="$1"
+  local work_dir
+  local listing
+  local sorted_listing
+  local expected_listing
+  local verbose_listing
+  local entry
+
+  if [[ ! -f "$archive" ]]; then
+    die "resource archive does not exist: $archive"
+    return 1
+  fi
+
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-archive-check.XXXXXX")"
+  listing="$work_dir/listing.txt"
+  sorted_listing="$work_dir/listing.sorted.txt"
+  expected_listing="$work_dir/expected.sorted.txt"
+  verbose_listing="$work_dir/verbose.txt"
+
+  if ! tar -tzf "$archive" >"$listing"; then
+    rm -rf "$work_dir"
+    die "resource archive cannot be listed"
+    return 1
+  fi
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    if ! validate_archive_entry "$entry"; then
+      rm -rf "$work_dir"
+      return 1
+    fi
+  done <"$listing"
+
+  if ! tar -tvzf "$archive" >"$verbose_listing"; then
+    rm -rf "$work_dir"
+    die "resource archive metadata cannot be listed"
+    return 1
+  fi
+  if awk '$1 !~ /^[d-]/ || / link to / { found = 1 } END { exit(found ? 0 : 1) }' "$verbose_listing"; then
+    rm -rf "$work_dir"
+    die "resource archive contains a link or special file"
+    return 1
+  fi
+
+  LC_ALL=C sort "$listing" >"$sorted_listing"
+  expected_resource_archive_entries | LC_ALL=C sort >"$expected_listing"
+  if ! diff -u "$expected_listing" "$sorted_listing" >/dev/null; then
+    rm -rf "$work_dir"
+    die "resource archive does not match the public allowlist"
+    return 1
+  fi
+
+  rm -rf "$work_dir"
 }
 
 toml_escape_basic_string() {
