@@ -37,6 +37,7 @@ scan_source_tree() {
     'templates/load-modelhub-env.sh'
   )
   local forbidden_content="/Users/shopee|access_token|refresh_token|id_token|experimental_bearer_token|OPENAI_API_KEY|MODELHUB_AK[[:space:]]*[:=][[:space:]]*['\"]?[[:alnum:]]"
+  local credential_key_shape="(^|[^[:alnum:]_])([[:alnum:]_]*(access|refresh|bearer|api|auth)[_-]?(token|key)|[[:alnum:]_]*(secret|password|credential)[[:alnum:]_-]*|authorization)['\"]?[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"$]{4}"
 
   forbidden_file="$(
     find "$source_dir" -type f \
@@ -58,7 +59,7 @@ scan_source_tree() {
       die "required allowlisted source is missing or unsafe: $relative"
       return 1
     fi
-    if LC_ALL=C grep -E -q "$forbidden_content" "$source_dir/$relative"; then
+    if LC_ALL=C grep -E -i -q "$forbidden_content|$credential_key_shape" "$source_dir/$relative"; then
       die "allowlisted source contains forbidden content: $relative"
       return 1
     fi

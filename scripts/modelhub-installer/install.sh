@@ -35,6 +35,9 @@ NEEDS_SUDO=0
 MUTATION_STARTED=0
 INSTALL_COMPLETED=0
 KEYCHAIN_CREATED_BY_RUN=0
+TRANSACTION_GUARD_ACTIVE=0
+TRANSACTION_ROLLBACK_RUNNING=0
+TRANSACTION_STAGE_DIR=''
 
 die() {
   echo "error: $*" >&2
@@ -102,7 +105,10 @@ download_release_assets() {
     die "curl command not found: $curl_bin"
     return 1
   fi
-  mkdir -p "$destination"
+  if ! mkdir -p "$destination"; then
+    die "failed to create release download directory: $destination"
+    return 1
+  fi
   for asset in "$INSTALLER_ASSET" "$APP_ASSET" "$RESOURCES_ASSET" "$CHECKSUM_ASSET"; do
     if ! "$curl_bin" \
       --fail \
@@ -303,6 +309,7 @@ providers:name
 providers:settings_config
 providers:website_url
 providers:category
+providers:created_at
 providers:notes
 providers:icon
 providers:meta
@@ -317,6 +324,19 @@ proxy_config:listen_port
 proxy_config:enable_logging
 proxy_config:updated_at
 EOF
+
+  if ! count="$(
+    "$sqlite_bin" "$database" \
+      "SELECT count(*)
+         FROM pragma_index_list('providers') AS indexes
+        WHERE indexes.\"unique\" = 1
+          AND (SELECT group_concat(name, ',')
+                 FROM pragma_index_info(indexes.name)) = 'id,app_type';" \
+      2>/dev/null
+  )"; then
+    return 1
+  fi
+  [[ "$count" == "1" ]] || return 1
 }
 
 ensure_cc_switch_schema() {
@@ -370,6 +390,7 @@ merge_provider_database() {
   local meta_sql
   local provider_id_sql
   local meta_valid
+  local count
 
   if ! cc_switch_schema_ready "$database"; then
     die "CC Switch database schema is not ready: $database"
@@ -401,7 +422,20 @@ merge_provider_database() {
     die "unable to query existing ModelHub provider"
     return 1
   fi
-  provider_id="${provider_id:-$MODELHUB_PROVIDER_ID}"
+  if [[ -z "$provider_id" ]]; then
+    if ! count="$(
+      "$sqlite_bin" "$database" \
+        "SELECT count(*) FROM providers WHERE id='$MODELHUB_PROVIDER_ID' AND app_type='codex';"
+    )"; then
+      die "unable to check the fixed ModelHub provider ID"
+      return 1
+    fi
+    if [[ "$count" != "0" ]]; then
+      die "the fixed ModelHub provider ID is already used by a different Codex provider"
+      return 1
+    fi
+    provider_id="$MODELHUB_PROVIDER_ID"
+  fi
   validate_provider_id "$provider_id" || return 1
 
   database_sql="$(sql_quote "$database")"
@@ -488,8 +522,14 @@ update_settings_json() {
     return 1
   fi
 
-  mkdir -p "$(dirname "$settings_path")"
-  work_dir="$(mktemp -d "$(dirname "$settings_path")/.cc-switch-settings.XXXXXX")"
+  if ! mkdir -p "$(dirname "$settings_path")"; then
+    die "failed to create the CC Switch settings directory"
+    return 1
+  fi
+  if ! work_dir="$(mktemp -d "$(dirname "$settings_path")/.cc-switch-settings.XXXXXX")"; then
+    die "failed to create the CC Switch settings staging directory"
+    return 1
+  fi
   work_file="$work_dir/settings.json"
   if [[ -f "$settings_path" ]]; then
     if ! "$plutil_bin" -convert xml1 -o /dev/null "$settings_path" >/dev/null 2>&1; then
@@ -497,18 +537,33 @@ update_settings_json() {
       die "CC Switch settings file is not valid JSON: $settings_path"
       return 1
     fi
-    cp -p "$settings_path" "$work_file"
+    if ! cp -p "$settings_path" "$work_file"; then
+      rm -rf "$work_dir" || true
+      die "failed to stage CC Switch settings"
+      return 1
+    fi
   else
-    printf '{\n  "currentProviderCodex": "%s",\n  "enableLocalProxy": true,\n  "preserveCodexOfficialAuthOnSwitch": true\n}\n' \
+    if ! printf '{\n  "currentProviderCodex": "%s",\n  "enableLocalProxy": true,\n  "preserveCodexOfficialAuthOnSwitch": true\n}\n' \
       "$provider_id" \
-      >"$work_file"
+      >"$work_file"; then
+      rm -rf "$work_dir" || true
+      die "failed to stage new CC Switch settings"
+      return 1
+    fi
     if ! "$plutil_bin" -convert xml1 -o /dev/null "$work_file" >/dev/null 2>&1; then
       rm -rf "$work_dir"
       die "failed to create CC Switch settings"
       return 1
     fi
-    mv "$work_file" "$settings_path"
-    rmdir "$work_dir"
+    if ! mv "$work_file" "$settings_path"; then
+      rm -rf "$work_dir" || true
+      die "failed to install new CC Switch settings"
+      return 1
+    fi
+    if ! rmdir "$work_dir"; then
+      die "failed to remove the CC Switch settings staging directory"
+      return 1
+    fi
     return 0
   fi
 
@@ -521,8 +576,15 @@ update_settings_json() {
     return 1
   fi
 
-  mv "$work_file" "$settings_path"
-  rmdir "$work_dir"
+  if ! mv "$work_file" "$settings_path"; then
+    rm -rf "$work_dir" || true
+    die "failed to install updated CC Switch settings"
+    return 1
+  fi
+  if ! rmdir "$work_dir"; then
+    die "failed to remove the CC Switch settings staging directory"
+    return 1
+  fi
 }
 
 toml_escape_basic_string() {
@@ -548,9 +610,15 @@ render_template() {
     return 1
   fi
 
-  : >"$output_file"
+  if ! : >"$output_file"; then
+    die "failed to create rendered template: $output_file"
+    return 1
+  fi
   while IFS= read -r line || [[ -n "$line" ]]; do
-    printf '%s\n' "${line//$placeholder/$replacement}" >>"$output_file"
+    if ! printf '%s\n' "${line//$placeholder/$replacement}" >>"$output_file"; then
+      die "failed to render template: $source_file"
+      return 1
+    fi
   done <"$source_file"
 }
 
@@ -564,6 +632,162 @@ managed_root_key_count() {
     in_root && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { count += 1 }
     END { print count }
   ' "$file"
+}
+
+toml_header_kind() {
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+
+    function without_comment(value,    output, position, char, quote, escaped) {
+      output = ""
+      quote = ""
+      escaped = 0
+      for (position = 1; position <= length(value); position += 1) {
+        char = substr(value, position, 1)
+        if (quote == "\"") {
+          output = output char
+          if (escaped) {
+            escaped = 0
+          } else if (char == "\\") {
+            escaped = 1
+          } else if (char == "\"") {
+            quote = ""
+          }
+          continue
+        }
+        if (quote == "\047") {
+          output = output char
+          if (char == "\047") {
+            quote = ""
+          }
+          continue
+        }
+        if (char == "#") {
+          break
+        }
+        if (char == "\"" || char == "\047") {
+          quote = char
+        }
+        output = output char
+      }
+      return output
+    }
+
+    function compact_unquoted(value,    output, position, char, quote, escaped) {
+      output = ""
+      quote = ""
+      escaped = 0
+      for (position = 1; position <= length(value); position += 1) {
+        char = substr(value, position, 1)
+        if (quote == "\"") {
+          output = output char
+          if (escaped) {
+            escaped = 0
+          } else if (char == "\\") {
+            escaped = 1
+          } else if (char == "\"") {
+            quote = ""
+          }
+          continue
+        }
+        if (quote == "\047") {
+          output = output char
+          if (char == "\047") {
+            quote = ""
+          }
+          continue
+        }
+        if (char == "\"" || char == "\047") {
+          quote = char
+          output = output char
+        } else if (char !~ /[[:space:]]/) {
+          output = output char
+        }
+      }
+      return output
+    }
+
+    function unquote(value,    first, last) {
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+        return substr(value, 2, length(value) - 2)
+      }
+      return value
+    }
+
+    {
+      header = trim(without_comment($0))
+      if (substr(header, 1, 1) != "[") {
+        print "none"
+        exit
+      }
+      if (substr(header, 1, 2) == "[[" || substr(header, length(header), 1) != "]") {
+        print "table"
+        exit
+      }
+      header = compact_unquoted(substr(header, 2, length(header) - 2))
+      count = split(header, parts, ".")
+      if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
+        if (count == 2) {
+          print "modelhub"
+        } else {
+          print "modelhub-child"
+        }
+      } else {
+        print "table"
+      }
+    }
+  '
+}
+
+modelhub_section_count() {
+  local file="$1"
+  local line
+  local kind
+  local count=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
+    if [[ "$kind" == "modelhub" ]]; then
+      count=$((count + 1))
+    fi
+  done <"$file"
+  printf '%s' "$count"
+}
+
+validate_codex_config_with_parser() {
+  local file="$1"
+  local validator="${CC_SWITCH_CODEX_CONFIG_VALIDATOR:-${CHATGPT_CODEX_PATH:-}}"
+  local parser_home
+
+  [[ -n "$validator" ]] || return 0
+  if [[ ! -x "$validator" ]]; then
+    die "Codex config validator is unavailable: $validator"
+    return 1
+  fi
+  if ! parser_home="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-codex-parse.XXXXXX")"; then
+    die "failed to create a private Codex config validation directory"
+    return 1
+  fi
+  if ! /bin/cp -p "$file" "$parser_home/config.toml"; then
+    /bin/rm -rf "$parser_home" || true
+    die "failed to stage Codex config for parser validation"
+    return 1
+  fi
+  if ! CODEX_HOME="$parser_home" "$validator" features list >/dev/null 2>&1; then
+    /bin/rm -rf "$parser_home" || true
+    die "merged Codex config failed parser validation"
+    return 1
+  fi
+  if ! /bin/rm -rf "$parser_home"; then
+    die "failed to remove the Codex config validation directory"
+    return 1
+  fi
 }
 
 validate_merged_codex_config() {
@@ -595,7 +819,7 @@ validate_merged_codex_config() {
     fi
   done
 
-  section_count="$(awk -v section="$MODELHUB_SECTION" '$0 == section { count += 1 } END { print count + 0 }' "$file")"
+  section_count="$(modelhub_section_count "$file")" || return 1
   if [[ "$section_count" != "1" ]]; then
     die "expected one $MODELHUB_SECTION section, found $section_count"
     return 1
@@ -613,6 +837,7 @@ validate_merged_codex_config() {
     die "merged Codex config does not contain the ModelHub endpoint"
     return 1
   fi
+  validate_codex_config_with_parser "$file"
 }
 
 merge_codex_config() {
@@ -626,12 +851,19 @@ merge_codex_config() {
   local rendered_template
   local filtered_source
   local merged_file
+  local line
+  local header_kind
+  local in_root=1
+  local skip_modelhub=0
 
   if [[ ! -f "$template_file" ]]; then
     die "ModelHub template does not exist: $template_file"
     return 1
   fi
-  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-config-merge.XXXXXX")"
+  if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-config-merge.XXXXXX")"; then
+    die "failed to create the Codex config merge directory"
+    return 1
+  fi
   rendered_template="$work_dir/rendered-template.toml"
   filtered_source="$work_dir/filtered-source.toml"
   merged_file="$work_dir/merged.toml"
@@ -641,44 +873,83 @@ merge_codex_config() {
     effective_source=/dev/null
   fi
 
-  render_template "$template_file" "$rendered_template" '__USER_HOME__' "$escaped_home"
+  render_template "$template_file" "$rendered_template" '__USER_HOME__' "$escaped_home" || {
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  }
 
-  awk '
-    BEGIN { in_root = 1; skip_modelhub = 0 }
-
-    /^[[:space:]]*\[/ {
-      if ($0 == "[model_providers.modelhub]" || $0 ~ /^\[model_providers\.modelhub\./) {
-        skip_modelhub = 1
-        in_root = 0
-        next
-      }
-      if (skip_modelhub) {
-        skip_modelhub = 0
-      }
-      in_root = 0
-    }
-
-    skip_modelhub { next }
-
-    in_root && $0 ~ /^[[:space:]]*(model|review_model|model_provider|model_reasoning_effort|model_auto_compact_token_limit|model_context_window|model_catalog_json)[[:space:]]*=/ {
-      next
-    }
-
-    { print }
-  ' "$effective_source" >"$filtered_source"
-
-  awk -v section="$MODELHUB_SECTION" '$0 == section { exit } { print }' "$rendered_template" >"$merged_file"
-  if [[ -s "$filtered_source" ]]; then
-    printf '\n' >>"$merged_file"
-    cat "$filtered_source" >>"$merged_file"
+  if ! : >"$filtered_source"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to stage filtered Codex config"
+    return 1
   fi
-  printf '\n' >>"$merged_file"
-  awk -v section="$MODELHUB_SECTION" '$0 == section { emit = 1 } emit { print }' "$rendered_template" >>"$merged_file"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    header_kind="$(printf '%s\n' "$line" | toml_header_kind)" || {
+      /bin/rm -rf "$work_dir" || true
+      return 1
+    }
+    case "$header_kind" in
+      modelhub|modelhub-child)
+        skip_modelhub=1
+        in_root=0
+        continue
+        ;;
+      table)
+        skip_modelhub=0
+        in_root=0
+        ;;
+    esac
+    if [[ "$skip_modelhub" == "1" ]]; then
+      continue
+    fi
+    if [[ "$in_root" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*(model|review_model|model_provider|model_reasoning_effort|model_auto_compact_token_limit|model_context_window|model_catalog_json)[[:space:]]*= ]]; then
+      continue
+    fi
+    if ! printf '%s\n' "$line" >>"$filtered_source"; then
+      /bin/rm -rf "$work_dir" || true
+      die "failed to filter the existing Codex config"
+      return 1
+    fi
+  done <"$effective_source"
 
-  validate_merged_codex_config "$merged_file" "$user_home"
-  mkdir -p "$(dirname "$output_file")"
-  mv "$merged_file" "$output_file"
-  rm -rf "$work_dir"
+  if ! awk -v section="$MODELHUB_SECTION" '$0 == section { exit } { print }' "$rendered_template" >"$merged_file"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to stage managed Codex root fields"
+    return 1
+  fi
+  if [[ -s "$filtered_source" ]]; then
+    if ! printf '\n' >>"$merged_file" || ! cat "$filtered_source" >>"$merged_file"; then
+      /bin/rm -rf "$work_dir" || true
+      die "failed to append the existing Codex config"
+      return 1
+    fi
+  fi
+  if ! printf '\n' >>"$merged_file" \
+    || ! awk -v section="$MODELHUB_SECTION" '$0 == section { emit = 1 } emit { print }' "$rendered_template" >>"$merged_file"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to append the managed ModelHub table"
+    return 1
+  fi
+
+  validate_merged_codex_config "$merged_file" "$user_home" || {
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  }
+  if ! mkdir -p "$(dirname "$output_file")"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to create the Codex config output directory"
+    return 1
+  fi
+  if ! mv "$merged_file" "$output_file"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to write the merged Codex config"
+    return 1
+  fi
+  if ! rm -rf "$work_dir"; then
+    die "failed to remove the Codex config merge directory"
+    return 1
+  fi
 }
 
 xml_escape() {
@@ -729,7 +1000,6 @@ managed_targets() {
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
   printf '%s\t%s\n' "$LAUNCH_AGENT_PATH" 'com.ccswitch.modelhub-env.plist'
   printf '%s\t%s\n' "$ENV_HELPER_PATH" 'load-modelhub-env.sh'
-  printf '%s\t%s\n' "$LOCAL_INSTALLER_PATH" 'install.sh'
 }
 
 is_managed_target() {
@@ -781,24 +1051,73 @@ remove_managed_target() {
   fi
 }
 
+backup_sqlite_database() {
+  local source="$1"
+  local destination="$2"
+  local sqlite_bin="${CC_SWITCH_SQLITE3_BIN:-/usr/bin/sqlite3}"
+  local destination_sql
+  local integrity
+  local mode
+
+  if [[ ! -x "$sqlite_bin" ]]; then
+    die "sqlite3 command not found: $sqlite_bin"
+    return 1
+  fi
+  destination_sql="$(sql_quote "$destination")" || return 1
+  if ! "$sqlite_bin" "$source" ".backup $destination_sql" >/dev/null; then
+    die "failed to create a consistent CC Switch database snapshot"
+    return 1
+  fi
+  if ! integrity="$("$sqlite_bin" "$destination" 'PRAGMA integrity_check;' 2>/dev/null)" \
+    || [[ "$integrity" != "ok" ]]; then
+    die "CC Switch database snapshot failed integrity validation"
+    return 1
+  fi
+  if ! mode="$(/usr/bin/stat -f '%Lp' "$source")"; then
+    die "failed to read CC Switch database permissions"
+    return 1
+  fi
+  if ! /bin/chmod "$mode" "$destination"; then
+    die "failed to preserve CC Switch database snapshot permissions"
+    return 1
+  fi
+}
+
 create_backup() {
   local backup_root="$1"
-  local timestamp="${CC_SWITCH_INSTALLER_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-  local backup_dir="$backup_root/$timestamp"
+  local timestamp
+  local backup_dir
   local manifest
   local target
   local relative
   local counter=1
   local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
 
+  if [[ -n "${CC_SWITCH_INSTALLER_TIMESTAMP:-}" ]]; then
+    timestamp="$CC_SWITCH_INSTALLER_TIMESTAMP"
+  elif ! timestamp="$(date -u +%Y%m%dT%H%M%SZ)"; then
+    die "failed to create the backup timestamp"
+    return 1
+  fi
+  backup_dir="$backup_root/$timestamp"
+
   while [[ -e "$backup_dir" ]]; do
-    backup_dir="$backup_root/$timestamp-$counter"
+    backup_dir="$(printf '%s/%s-%04d' "$backup_root" "$timestamp" "$counter")" || return 1
     counter=$((counter + 1))
   done
-  /bin/mkdir -p "$backup_dir/files"
-  /bin/chmod 700 "$backup_dir"
+  if ! /bin/mkdir -p "$backup_dir/files"; then
+    die "failed to create backup directory: $backup_dir"
+    return 1
+  fi
+  if ! /bin/chmod 700 "$backup_dir"; then
+    die "failed to protect backup directory: $backup_dir"
+    return 1
+  fi
   manifest="$backup_dir/manifest.tsv"
-  : >"$manifest"
+  if ! : >"$manifest"; then
+    die "failed to create backup manifest: $manifest"
+    return 1
+  fi
 
   while IFS=$'\t' read -r target relative; do
     if [[ -L "$target" ]]; then
@@ -806,16 +1125,34 @@ create_backup() {
       return 1
     fi
     if [[ -d "$target" ]]; then
-      "$ditto_bin" "$target" "$backup_dir/files/$relative"
-      printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest"
+      if ! "$ditto_bin" "$target" "$backup_dir/files/$relative"; then
+        die "failed to back up managed directory: $target"
+        return 1
+      fi
+      if ! printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest"; then
+        die "failed to record backup manifest entry: $target"
+        return 1
+      fi
     elif [[ -f "$target" ]]; then
-      /bin/cp -p "$target" "$backup_dir/files/$relative"
-      printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest"
+      if [[ "$target" == "$CC_SWITCH_DATABASE_PATH" ]]; then
+        backup_sqlite_database "$target" "$backup_dir/files/$relative" || return 1
+      elif ! /bin/cp -p "$target" "$backup_dir/files/$relative"; then
+        die "failed to back up managed file: $target"
+        return 1
+      fi
+      if ! printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest"; then
+        die "failed to record backup manifest entry: $target"
+        return 1
+      fi
     else
-      printf '%s\t0\t-\n' "$target" >>"$manifest"
+      if ! printf '%s\t0\t-\n' "$target" >>"$manifest"; then
+        die "failed to record absent backup target: $target"
+        return 1
+      fi
     fi
   done < <(managed_targets)
 
+  validate_backup_manifest "$backup_dir" || return 1
   printf '%s' "$backup_dir"
 }
 
@@ -884,6 +1221,16 @@ validate_backup_manifest() {
       die "backup file payload is missing: $backup_path"
       return 1
     fi
+    if [[ "$expected_relative" == "cc-switch.db" ]]; then
+      local sqlite_bin="${CC_SWITCH_SQLITE3_BIN:-/usr/bin/sqlite3}"
+      local integrity
+      if [[ ! -x "$sqlite_bin" ]] \
+        || ! integrity="$("$sqlite_bin" "$backup_path" 'PRAGMA integrity_check;' 2>/dev/null)" \
+        || [[ "$integrity" != "ok" ]]; then
+        die "backup database payload failed integrity validation: $backup_path"
+        return 1
+      fi
+    fi
   done <"$manifest"
 }
 
@@ -926,19 +1273,40 @@ restore_backup() {
       die "backup manifest contains unmanaged target: $target"
       return 1
     fi
-    remove_managed_target "$target" || return 1
+    if [[ "$target" == "$CC_SWITCH_DATABASE_PATH" ]]; then
+      if ! /bin/rm -f -- "$CC_SWITCH_DATABASE_PATH-wal" "$CC_SWITCH_DATABASE_PATH-shm"; then
+        die "failed to remove stale CC Switch database sidecars"
+        return 1
+      fi
+    fi
+    if [[ -e "$target" || -L "$target" ]]; then
+      remove_managed_target "$target" || return 1
+    fi
     if [[ "$existed" == "1" ]]; then
       backup_path="$backup_dir/$relative"
       if [[ -d "$backup_path" ]]; then
-        /bin/mkdir -p "$(dirname "$target")"
+        if ! /bin/mkdir -p "$(dirname "$target")"; then
+          die "failed to create restore parent directory: $target"
+          return 1
+        fi
         if [[ "$target" == "$CC_SWITCH_APP_PATH" ]]; then
-          run_with_privilege "$ditto_bin" "$backup_path" "$target"
-        else
-          "$ditto_bin" "$backup_path" "$target"
+          if ! run_with_privilege "$ditto_bin" "$backup_path" "$target"; then
+            die "failed to restore CC Switch app"
+            return 1
+          fi
+        elif ! "$ditto_bin" "$backup_path" "$target"; then
+          die "failed to restore managed directory: $target"
+          return 1
         fi
       elif [[ -f "$backup_path" ]]; then
-        /bin/mkdir -p "$(dirname "$target")"
-        /bin/cp -p "$backup_path" "$target"
+        if ! /bin/mkdir -p "$(dirname "$target")"; then
+          die "failed to create restore parent directory: $target"
+          return 1
+        fi
+        if ! /bin/cp -p "$backup_path" "$target"; then
+          die "failed to restore managed file: $target"
+          return 1
+        fi
       else
         die "backup payload is missing: $backup_path"
         return 1
@@ -949,7 +1317,7 @@ restore_backup() {
     fi
   done <"$manifest"
 
-  reload_restored_launch_agent
+  reload_restored_launch_agent || return 1
 }
 
 install_app() {
@@ -960,7 +1328,10 @@ install_app() {
   local work_dir
   local extracted_app
 
-  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-app-install.XXXXXX")"
+  if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-app-install.XXXXXX")"; then
+    die "failed to create CC Switch app staging directory"
+    return 1
+  fi
   if ! "$ditto_bin" -x -k "$app_zip" "$work_dir"; then
     /bin/rm -rf "$work_dir"
     die "failed to extract CC Switch app"
@@ -982,7 +1353,11 @@ install_app() {
     /bin/rm -rf "$work_dir"
     return 1
   }
-  /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR"
+  if ! /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to create Applications directory"
+    return 1
+  fi
   if ! run_with_privilege "$ditto_bin" "$extracted_app" "$CC_SWITCH_APP_PATH"; then
     /bin/rm -rf "$work_dir"
     die "failed to install CC Switch app"
@@ -994,12 +1369,14 @@ install_app() {
     return 1
   fi
   run_with_privilege "$xattr_bin" -dr com.apple.quarantine "$CC_SWITCH_APP_PATH" >/dev/null 2>&1 || true
-  /bin/rm -rf "$work_dir"
+  if ! /bin/rm -rf "$work_dir"; then
+    die "failed to remove CC Switch app staging directory"
+    return 1
+  fi
 }
 
 install_runtime_files() {
   local resources_dir="$1"
-  local verified_installer="$2"
   local provider_id
   local config_work_dir
   local config_work_file
@@ -1007,42 +1384,91 @@ install_runtime_files() {
   local plist_work_file
   local escaped_helper_path
 
-  /bin/mkdir -p \
+  if ! /bin/mkdir -p \
     "$INSTALL_USER_HOME/.codex" \
     "$INSTALL_USER_HOME/.cc-switch" \
     "$(dirname "$ENV_HELPER_PATH")" \
-    "$(dirname "$LAUNCH_AGENT_PATH")"
-  /bin/chmod 700 "$INSTALL_USER_HOME/.codex" "$INSTALL_USER_HOME/.cc-switch" "$(dirname "$ENV_HELPER_PATH")"
+    "$(dirname "$LAUNCH_AGENT_PATH")"; then
+    die "failed to create ModelHub runtime directories"
+    return 1
+  fi
+  if ! /bin/chmod 700 \
+    "$INSTALL_USER_HOME/.codex" \
+    "$INSTALL_USER_HOME/.cc-switch" \
+    "$(dirname "$ENV_HELPER_PATH")"; then
+    die "failed to protect ModelHub runtime directories"
+    return 1
+  fi
 
-  /usr/bin/install -m 600 "$resources_dir/assets/models-modelhub-1m.json" "$MODEL_CATALOG_PATH"
+  if ! /usr/bin/install -m 600 \
+    "$resources_dir/assets/models-modelhub-1m.json" \
+    "$MODEL_CATALOG_PATH"; then
+    die "failed to install the ModelHub model catalog"
+    return 1
+  fi
 
-  config_work_dir="$(mktemp -d "$INSTALL_USER_HOME/.codex/.modelhub-config.XXXXXX")"
+  if ! config_work_dir="$(mktemp -d "$INSTALL_USER_HOME/.codex/.modelhub-config.XXXXXX")"; then
+    die "failed to create the Codex config staging directory"
+    return 1
+  fi
   config_work_file="$config_work_dir/config.toml"
-  merge_codex_config \
+  if ! merge_codex_config \
     "$CODEX_CONFIG_PATH" \
     "$resources_dir/templates/modelhub-provider.toml" \
     "$config_work_file" \
-    "$INSTALL_USER_HOME"
-  /bin/chmod 600 "$config_work_file"
-  /bin/mv "$config_work_file" "$CODEX_CONFIG_PATH"
-  /bin/rmdir "$config_work_dir"
+    "$INSTALL_USER_HOME"; then
+    /bin/rm -rf "$config_work_dir" || true
+    return 1
+  fi
+  if ! /bin/chmod 600 "$config_work_file"; then
+    /bin/rm -rf "$config_work_dir" || true
+    die "failed to protect the merged Codex config"
+    return 1
+  fi
+  if ! /bin/mv "$config_work_file" "$CODEX_CONFIG_PATH"; then
+    /bin/rm -rf "$config_work_dir" || true
+    die "failed to install the merged Codex config"
+    return 1
+  fi
+  if ! /bin/rmdir "$config_work_dir"; then
+    die "failed to remove the Codex config staging directory"
+    return 1
+  fi
 
-  /usr/bin/install -m 700 "$resources_dir/templates/load-modelhub-env.sh" "$ENV_HELPER_PATH"
-  plist_work_dir="$(mktemp -d "$(dirname "$LAUNCH_AGENT_PATH")/.modelhub-plist.XXXXXX")"
+  if ! /usr/bin/install -m 700 \
+    "$resources_dir/templates/load-modelhub-env.sh" \
+    "$ENV_HELPER_PATH"; then
+    die "failed to install the ModelHub environment helper"
+    return 1
+  fi
+  if ! plist_work_dir="$(mktemp -d "$(dirname "$LAUNCH_AGENT_PATH")/.modelhub-plist.XXXXXX")"; then
+    die "failed to create the LaunchAgent staging directory"
+    return 1
+  fi
   plist_work_file="$plist_work_dir/com.ccswitch.modelhub-env.plist"
   escaped_helper_path="$(xml_escape "$ENV_HELPER_PATH")"
-  render_template \
+  if ! render_template \
     "$resources_dir/templates/com.ccswitch.modelhub-env.plist" \
     "$plist_work_file" \
     '__HELPER_PATH__' \
-    "$escaped_helper_path"
+    "$escaped_helper_path"; then
+    /bin/rm -rf "$plist_work_dir" || true
+    return 1
+  fi
   if ! /usr/bin/plutil -lint "$plist_work_file" >/dev/null; then
     /bin/rm -rf "$plist_work_dir"
     die "rendered LaunchAgent is invalid"
     return 1
   fi
-  /usr/bin/install -m 600 "$plist_work_file" "$LAUNCH_AGENT_PATH"
-  /bin/rm -rf "$plist_work_dir"
+  if ! /usr/bin/install -m 600 "$plist_work_file" "$LAUNCH_AGENT_PATH"; then
+    /bin/rm -rf "$plist_work_dir" || true
+    die "failed to install the ModelHub LaunchAgent"
+    return 1
+  fi
+  if ! /bin/rm -rf "$plist_work_dir"; then
+    die "failed to remove the LaunchAgent staging directory"
+    return 1
+  fi
 
   ensure_cc_switch_schema "$CC_SWITCH_DATABASE_PATH" "$CC_SWITCH_APP_PATH" || return 1
   provider_id="$(
@@ -1052,7 +1478,46 @@ install_runtime_files() {
       "$resources_dir/templates/modelhub-provider-meta.json"
   )" || return 1
   update_settings_json "$CC_SWITCH_SETTINGS_PATH" "$provider_id" || return 1
-  /usr/bin/install -m 700 "$verified_installer" "$LOCAL_INSTALLER_PATH"
+}
+
+install_durable_launcher() {
+  local verified_installer="$1"
+  local launcher_parent
+  local work_dir
+  local staged_launcher
+
+  launcher_parent="$(dirname "$LOCAL_INSTALLER_PATH")"
+  if [[ -L "$LOCAL_INSTALLER_PATH" || -d "$LOCAL_INSTALLER_PATH" ]]; then
+    die "refusing to overwrite an unsafe local installer path: $LOCAL_INSTALLER_PATH"
+    return 1
+  fi
+  if ! /bin/mkdir -p "$launcher_parent"; then
+    die "failed to create the local installer directory"
+    return 1
+  fi
+  if ! /bin/chmod 700 "$launcher_parent"; then
+    die "failed to protect the local installer directory"
+    return 1
+  fi
+  if ! work_dir="$(mktemp -d "$launcher_parent/.installer.XXXXXX")"; then
+    die "failed to create the local installer staging directory"
+    return 1
+  fi
+  staged_launcher="$work_dir/install.sh"
+  if ! /usr/bin/install -m 700 "$verified_installer" "$staged_launcher"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to stage the durable rollback launcher"
+    return 1
+  fi
+  if ! /bin/mv -f "$staged_launcher" "$LOCAL_INSTALLER_PATH"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to install the durable rollback launcher"
+    return 1
+  fi
+  if ! /bin/rmdir "$work_dir"; then
+    die "failed to remove the local installer staging directory"
+    return 1
+  fi
 }
 
 keychain_account_name() {
@@ -1062,14 +1527,37 @@ keychain_account_name() {
 configure_keychain() {
   local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
   local account_name
+  local find_status
   account_name="$(keychain_account_name)"
   KEYCHAIN_CREATED_BY_RUN=0
 
   if "$security_bin" find-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
-    printf '1\n' >"$ACTIVE_BACKUP_DIR/keychain-existed"
+    find_status=0
   else
-    printf '0\n' >"$ACTIVE_BACKUP_DIR/keychain-existed"
-    KEYCHAIN_CREATED_BY_RUN=1
+    find_status=$?
+  fi
+  case "$find_status" in
+    0)
+      if ! printf '1\n' >"$ACTIVE_BACKUP_DIR/keychain-existed"; then
+        die "failed to record existing Keychain state"
+        return 1
+      fi
+      ;;
+    44)
+      if ! printf '0\n' >"$ACTIVE_BACKUP_DIR/keychain-existed"; then
+        die "failed to record absent Keychain state"
+        return 1
+      fi
+      KEYCHAIN_CREATED_BY_RUN=1
+      ;;
+    *)
+      die "unable to inspect the ModelHub Keychain item (security status $find_status)"
+      return 1
+      ;;
+  esac
+
+  if [[ "$find_status" == "0" ]]; then
+    KEYCHAIN_CREATED_BY_RUN=0
   fi
 
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
@@ -1087,8 +1575,22 @@ configure_keychain() {
 delete_keychain_item() {
   local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
   local account_name
+  local delete_status
   account_name="$(keychain_account_name)"
-  "$security_bin" delete-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+  if "$security_bin" delete-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1; then
+    delete_status=0
+  else
+    delete_status=$?
+  fi
+  case "$delete_status" in
+    0|44)
+      return 0
+      ;;
+    *)
+      die "failed to delete the ModelHub Keychain item (security status $delete_status)"
+      return 1
+      ;;
+  esac
 }
 
 install_launch_agent() {
@@ -1111,6 +1613,44 @@ quit_apps() {
   local osascript_bin="${CC_SWITCH_OSASCRIPT_BIN:-/usr/bin/osascript}"
   "$osascript_bin" -e 'quit app "ChatGPT"' >/dev/null 2>&1 || true
   "$osascript_bin" -e 'quit app "CC Switch"' >/dev/null 2>&1 || true
+  wait_for_cc_switch_exit
+}
+
+wait_for_cc_switch_exit() {
+  local pgrep_bin="${CC_SWITCH_PGREP_BIN:-/usr/bin/pgrep}"
+  local sleep_bin="${CC_SWITCH_SLEEP_BIN:-/bin/sleep}"
+  local attempt=1
+  local pgrep_status
+
+  if [[ ! -x "$pgrep_bin" || ! -x "$sleep_bin" ]]; then
+    die "required CC Switch process-wait command is unavailable"
+    return 1
+  fi
+  while [[ "$attempt" -le 30 ]]; do
+    if "$pgrep_bin" -x 'cc-switch' >/dev/null 2>&1; then
+      pgrep_status=0
+    else
+      pgrep_status=$?
+    fi
+    case "$pgrep_status" in
+      0)
+        "$sleep_bin" 1 || {
+          die "failed while waiting for CC Switch to quit"
+          return 1
+        }
+        ;;
+      1)
+        return 0
+        ;;
+      *)
+        die "unable to inspect the CC Switch process state"
+        return 1
+        ;;
+    esac
+    attempt=$((attempt + 1))
+  done
+  die "CC Switch did not quit within 30 seconds"
+  return 1
 }
 
 start_cc_switch() {
@@ -1133,7 +1673,10 @@ wait_for_health() {
         return 0
       fi
     fi
-    "$sleep_bin" 1
+    if ! "$sleep_bin" 1; then
+      die "failed while waiting for CC Switch health"
+      return 1
+    fi
     attempt=$((attempt + 1))
   done
 
@@ -1163,15 +1706,65 @@ extract_verified_resources() {
 }
 
 rollback_failed_install() {
-  quit_apps
+  local rollback_status=0
+  local restore_allowed=1
+
+  if [[ "$TRANSACTION_ROLLBACK_RUNNING" == "1" ]]; then
+    return 1
+  fi
+  TRANSACTION_ROLLBACK_RUNNING=1
+  if ! quit_apps; then
+    rollback_status=1
+    restore_allowed=0
+  fi
   unload_launch_agent
   clear_runtime_environment
   if [[ "$KEYCHAIN_CREATED_BY_RUN" == "1" ]]; then
-    delete_keychain_item
+    delete_keychain_item || rollback_status=1
   fi
-  if [[ -n "$ACTIVE_BACKUP_DIR" ]]; then
-    restore_backup "$ACTIVE_BACKUP_DIR"
+  if [[ -n "$ACTIVE_BACKUP_DIR" && "$restore_allowed" == "1" ]]; then
+    restore_backup "$ACTIVE_BACKUP_DIR" || rollback_status=1
   fi
+  TRANSACTION_ROLLBACK_RUNNING=0
+  return "$rollback_status"
+}
+
+cleanup_transaction_stage() {
+  if [[ -n "$TRANSACTION_STAGE_DIR" && -d "$TRANSACTION_STAGE_DIR" ]]; then
+    if ! /bin/rm -rf "$TRANSACTION_STAGE_DIR"; then
+      die "failed to remove the installer staging directory"
+      return 1
+    fi
+  fi
+  TRANSACTION_STAGE_DIR=''
+}
+
+transaction_exit_guard() {
+  local exit_status=$?
+
+  trap - EXIT INT TERM
+  if [[ "$TRANSACTION_GUARD_ACTIVE" == "1" \
+    && "$MUTATION_STARTED" == "1" \
+    && "$INSTALL_COMPLETED" == "0" \
+    && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
+    rollback_failed_install || exit_status=1
+  fi
+  cleanup_transaction_stage || exit_status=1
+  exit "$exit_status"
+}
+
+transaction_signal_guard() {
+  local exit_status="$1"
+
+  trap - EXIT INT TERM
+  if [[ "$TRANSACTION_GUARD_ACTIVE" == "1" \
+    && "$MUTATION_STARTED" == "1" \
+    && "$INSTALL_COMPLETED" == "0" \
+    && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
+    rollback_failed_install || exit_status=1
+  fi
+  cleanup_transaction_stage || exit_status=1
+  exit "$exit_status"
 }
 
 run_install_transaction() {
@@ -1180,7 +1773,7 @@ run_install_transaction() {
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
 
   install_app "$asset_dir/$APP_ASSET" || return 1
-  install_runtime_files "$resources_dir" "$asset_dir/$INSTALLER_ASSET" || return 1
+  install_runtime_files "$resources_dir" || return 1
   configure_keychain || return 1
   install_launch_agent || return 1
   start_cc_switch || return 1
@@ -1195,6 +1788,7 @@ perform_install() {
   local asset_dir
   local resources_parent
   local resources_dir
+  local rollback_status
 
   configure_install_paths || return 1
   operating_system="${CC_SWITCH_INSTALLER_TEST_OS:-$(/usr/bin/uname -s)}"
@@ -1203,55 +1797,94 @@ perform_install() {
   validate_platform "$operating_system" "$architecture" "$major_version" || return 1
   validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || return 1
 
-  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-modelhub-install.XXXXXX")"
+  if ! stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-modelhub-install.XXXXXX")"; then
+    die "failed to create the installer staging directory"
+    return 1
+  fi
+  TRANSACTION_STAGE_DIR="$stage_dir"
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
     asset_dir="$stage_dir/assets"
     download_release_assets "$asset_dir" || {
       /bin/rm -rf "$stage_dir"
+      TRANSACTION_STAGE_DIR=''
       return 1
     }
   fi
   verify_release_assets "$asset_dir" || {
     /bin/rm -rf "$stage_dir"
+    TRANSACTION_STAGE_DIR=''
     return 1
   }
   validate_resource_archive "$asset_dir/$RESOURCES_ASSET" || {
     /bin/rm -rf "$stage_dir"
+    TRANSACTION_STAGE_DIR=''
     return 1
   }
 
   resources_parent="$stage_dir/resources"
-  /bin/mkdir -p "$resources_parent"
+  if ! /bin/mkdir -p "$resources_parent"; then
+    cleanup_transaction_stage || true
+    die "failed to create the resource staging directory"
+    return 1
+  fi
   extract_verified_resources "$asset_dir" "$resources_parent" || {
-    /bin/rm -rf "$stage_dir"
+    cleanup_transaction_stage || true
     return 1
   }
   resources_dir="$resources_parent/modelhub-installer"
 
   prepare_application_permissions || {
-    /bin/rm -rf "$stage_dir"
+    cleanup_transaction_stage || true
     return 1
   }
-  quit_apps
+  quit_apps || {
+    cleanup_transaction_stage || true
+    return 1
+  }
   ACTIVE_BACKUP_DIR="$(create_backup "$BACKUP_ROOT")" || {
-    /bin/rm -rf "$stage_dir"
+    cleanup_transaction_stage || true
     return 1
   }
   MUTATION_STARTED=1
   INSTALL_COMPLETED=0
   KEYCHAIN_CREATED_BY_RUN=0
+  TRANSACTION_GUARD_ACTIVE=1
 
   if ! run_install_transaction "$asset_dir" "$resources_dir"; then
-    rollback_failed_install || true
-    /bin/rm -rf "$stage_dir"
+    rollback_status=0
+    rollback_failed_install || rollback_status=$?
+    TRANSACTION_GUARD_ACTIVE=0
+    cleanup_transaction_stage || rollback_status=1
+    if [[ "$rollback_status" != "0" ]]; then
+      die "installation failed and automatic rollback was incomplete"
+    fi
     return 1
   fi
 
+  if ! install_durable_launcher "$asset_dir/$INSTALLER_ASSET"; then
+    rollback_status=0
+    rollback_failed_install || rollback_status=$?
+    TRANSACTION_GUARD_ACTIVE=0
+    cleanup_transaction_stage || rollback_status=1
+    if [[ "$rollback_status" != "0" ]]; then
+      die "local launcher installation failed and automatic rollback was incomplete"
+    fi
+    return 1
+  fi
+
+  if ! : >"$ACTIVE_BACKUP_DIR/install-completed"; then
+    rollback_status=0
+    rollback_failed_install || rollback_status=$?
+    TRANSACTION_GUARD_ACTIVE=0
+    cleanup_transaction_stage || rollback_status=1
+    die "failed to mark the installer backup as completed"
+    return 1
+  fi
   INSTALL_COMPLETED=1
-  : >"$ACTIVE_BACKUP_DIR/install-completed"
-  /bin/rm -rf "$stage_dir"
+  TRANSACTION_GUARD_ACTIVE=0
+  cleanup_transaction_stage || return 1
 }
 
 rollback_latest() {
@@ -1271,12 +1904,12 @@ rollback_latest() {
   fi
 
   prepare_application_permissions || return 1
-  quit_apps
+  quit_apps || return 1
   unload_launch_agent
   clear_runtime_environment
   keychain_existed="$(/bin/cat "$latest_backup/keychain-existed" 2>/dev/null || printf '1')"
   if [[ "$keychain_existed" == "0" ]]; then
-    delete_keychain_item
+    delete_keychain_item || return 1
   fi
   restore_backup "$latest_backup" || return 1
 }
@@ -1317,5 +1950,8 @@ main() {
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 if [[ -z "$SCRIPT_SOURCE" || "$SCRIPT_SOURCE" == "$0" ]]; then
+  trap transaction_exit_guard EXIT
+  trap 'transaction_signal_guard 130' INT
+  trap 'transaction_signal_guard 143' TERM
   main "$@"
 fi
