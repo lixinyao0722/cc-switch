@@ -331,7 +331,12 @@ create_chatgpt_validation_stubs() {
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
-    'echo "Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    'printf "%s\n" "$*" >>"${FAKE_FILE_LOG:-/dev/null}"' \
+    'if [[ "${1:-}" == "-b" ]]; then' \
+    '  echo "Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    'else' \
+    '  echo "$1: Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    'fi' \
     >"$case_dir/file"
   printf '%s\n' \
     '#!/bin/bash' \
@@ -356,6 +361,8 @@ create_chatgpt_validation_stubs() {
 test_validates_existing_chatgpt_app() {
   local case_dir="$TEST_TMP/chatgpt-validation"
   local app_path="$case_dir/ChatGPT.app"
+  local misleading_app_path="$case_dir/misleading/ChatGPT.app"
+  local file_log="$case_dir/file.log"
   local info_plist="$app_path/Contents/Info.plist"
   local codex_path="$app_path/Contents/Resources/codex"
   mkdir -p "$case_dir"
@@ -395,6 +402,13 @@ test_validates_existing_chatgpt_app() {
   FAKE_CODEX_TEAM_ID='WRONGTEAM' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
     CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
     assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  create_chatgpt_app_fixture "$misleading_app_path" 'arm64'
+  FAKE_APP_ARCHS='x86_64' FAKE_FILE_LOG="$file_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$misleading_app_path" '2DC432GLL2' 'com.openai.codex'
+  assert_contains "$file_log" "-b $misleading_app_path/Contents/MacOS/arm64"
 }
 
 test_blocks_invalid_existing_chatgpt_without_mutation() {

@@ -179,7 +179,7 @@ validate_chatgpt_app() {
     die "ChatGPT app strict signature verification failed"
     return 1
   fi
-  if ! file_details="$("$file_bin" "$executable_path" 2>/dev/null)"; then
+  if ! file_details="$("$file_bin" -b "$executable_path" 2>/dev/null)"; then
     die "unable to inspect the ChatGPT main executable architecture"
     return 1
   fi
