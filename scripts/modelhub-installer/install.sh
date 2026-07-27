@@ -45,8 +45,11 @@ TRANSACTION_STAGE_DIR=''
 LAUNCHER_FAILURE_SNAPSHOT_READY=0
 LAUNCHER_REPLACED_BY_RUN=0
 CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=0
 CHATGPT_BOOTSTRAP_TEMP_DIR=''
 CHATGPT_BOOTSTRAP_STAGE_DIR=''
+CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
 CHATGPT_INSTALLED_BY_RUN=0
 
 die() {
@@ -88,6 +91,46 @@ validate_platform() {
   fi
 }
 
+path_is_directory() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -d "$1"
+  else
+    [[ -d "$1" ]]
+  fi
+}
+
+path_is_regular_file() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -f "$1"
+  else
+    [[ -f "$1" ]]
+  fi
+}
+
+path_is_executable() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -x "$1"
+  else
+    [[ -x "$1" ]]
+  fi
+}
+
+path_is_symlink() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -L "$1"
+  else
+    [[ -L "$1" ]]
+  fi
+}
+
+path_exists() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -e "$1"
+  else
+    [[ -e "$1" ]]
+  fi
+}
+
 validate_chatgpt_codex() {
   local codex_path="$1"
   local expected_team_id="$2"
@@ -95,7 +138,7 @@ validate_chatgpt_codex() {
   local details
   local team_id
 
-  if [[ ! -x "$codex_path" ]]; then
+  if ! path_is_executable "$codex_path"; then
     die "ChatGPT Codex executable not found: $codex_path"
     return 1
   fi
@@ -103,7 +146,7 @@ validate_chatgpt_codex() {
     die "codesign command not found: $codesign_bin"
     return 1
   fi
-  if ! details="$("$codesign_bin" -dv --verbose=4 "$codex_path" 2>&1)"; then
+  if ! details="$(run_with_privilege "$codesign_bin" -dv --verbose=4 "$codex_path" 2>&1)"; then
     die "unable to inspect ChatGPT Codex signature"
     return 1
   fi
@@ -129,7 +172,9 @@ validate_chatgpt_app() {
   local team_id
   local file_details
 
-  if [[ ! -d "$app_path" || ! -f "$info_plist" ]]; then
+  if path_is_symlink "$app_path" \
+    || ! path_is_directory "$app_path" \
+    || ! path_is_regular_file "$info_plist"; then
     die "ChatGPT app bundle is missing or incomplete: $app_path"
     return 1
   fi
@@ -146,7 +191,7 @@ validate_chatgpt_app() {
     return 1
   fi
 
-  if ! bundle_id="$("$plutil_bin" -extract CFBundleIdentifier raw -o - "$info_plist" 2>/dev/null)"; then
+  if ! bundle_id="$(run_with_privilege "$plutil_bin" -extract CFBundleIdentifier raw -o - "$info_plist" 2>/dev/null)"; then
     die "unable to read the ChatGPT bundle identifier"
     return 1
   fi
@@ -154,7 +199,7 @@ validate_chatgpt_app() {
     die "unexpected ChatGPT bundle identifier"
     return 1
   fi
-  if ! executable_name="$("$plutil_bin" -extract CFBundleExecutable raw -o - "$info_plist" 2>/dev/null)"; then
+  if ! executable_name="$(run_with_privilege "$plutil_bin" -extract CFBundleExecutable raw -o - "$info_plist" 2>/dev/null)"; then
     die "unable to read the ChatGPT main executable name"
     return 1
   fi
@@ -165,12 +210,12 @@ validate_chatgpt_app() {
       ;;
   esac
   executable_path="$app_path/Contents/MacOS/$executable_name"
-  if [[ ! -x "$executable_path" ]]; then
+  if ! path_is_executable "$executable_path"; then
     die "ChatGPT main executable not found: $executable_path"
     return 1
   fi
 
-  if ! details="$("$codesign_bin" -dv --verbose=4 "$app_path" 2>&1)"; then
+  if ! details="$(run_with_privilege "$codesign_bin" -dv --verbose=4 "$app_path" 2>&1)"; then
     die "unable to inspect the ChatGPT app signature"
     return 1
   fi
@@ -179,11 +224,11 @@ validate_chatgpt_app() {
     die "unexpected ChatGPT app Team ID"
     return 1
   fi
-  if ! "$codesign_bin" --verify --deep --strict "$app_path" >/dev/null 2>&1; then
+  if ! run_with_privilege "$codesign_bin" --verify --deep --strict "$app_path" >/dev/null 2>&1; then
     die "ChatGPT app strict signature verification failed"
     return 1
   fi
-  if ! file_details="$("$file_bin" -b "$executable_path" 2>/dev/null)"; then
+  if ! file_details="$(run_with_privilege "$file_bin" -b "$executable_path" 2>/dev/null)"; then
     die "unable to inspect the ChatGPT main executable architecture"
     return 1
   fi
@@ -246,99 +291,300 @@ detach_chatgpt_dmg() {
   fi
 }
 
-cleanup_chatgpt_bootstrap() {
-  local cleanup_status=0
-  local mount_dir="$CHATGPT_BOOTSTRAP_MOUNT_DIR"
-  local temp_dir="$CHATGPT_BOOTSTRAP_TEMP_DIR"
-  local stage_dir="$CHATGPT_BOOTSTRAP_STAGE_DIR"
-
-  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
-  CHATGPT_BOOTSTRAP_TEMP_DIR=''
-  CHATGPT_BOOTSTRAP_STAGE_DIR=''
-  if [[ -n "$mount_dir" ]]; then
-    detach_chatgpt_dmg "$mount_dir" || cleanup_status=1
-    case "$mount_dir" in
-      "$stage_dir"/chatgpt-mount.*)
-        /bin/rm -rf -- "$mount_dir" || cleanup_status=1
-        ;;
-      *)
-        die "refusing to remove an unsafe ChatGPT mount directory: $mount_dir"
-        cleanup_status=1
-        ;;
-    esac
-  fi
-  if [[ -n "$temp_dir" ]]; then
-    case "$temp_dir" in
-      "$INSTALL_APPLICATIONS_DIR"/.chatgpt-modelhub.*)
-        run_with_privilege /bin/rm -rf -- "$temp_dir" || cleanup_status=1
-        ;;
-      *)
-        die "refusing to remove an unsafe ChatGPT install directory: $temp_dir"
-        cleanup_status=1
-        ;;
-    esac
-  fi
-  return "$cleanup_status"
+canonical_directory() {
+  (cd "$1" 2>/dev/null && /bin/pwd -P)
 }
 
-install_verified_chatgpt_app() {
+validate_mounted_chatgpt_source() {
   local source_app="$1"
-  local target_app="$2"
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
-  local temp_dir
-  local temp_app
+  local mount_dir="$2"
+  local canonical_source
+  local canonical_mount
+  local canonical_stage
 
-  if [[ "$target_app" != "$CHATGPT_APP_PATH" ]]; then
-    die "refusing to install ChatGPT at an unexpected path: $target_app"
+  if path_is_symlink "$mount_dir" || path_is_symlink "$source_app"; then
+    die "mounted ChatGPT app must not be a symlink"
     return 1
   fi
-  if [[ -e "$target_app" || -L "$target_app" ]]; then
-    die "ChatGPT appeared while preparing the official app install"
+  canonical_stage="$(canonical_directory "$CHATGPT_BOOTSTRAP_STAGE_DIR")" || {
+    die "unable to resolve the ChatGPT bootstrap stage"
+    return 1
+  }
+  canonical_mount="$(canonical_directory "$mount_dir")" || {
+    die "unable to resolve the ChatGPT mount directory"
+    return 1
+  }
+  case "$canonical_mount" in
+    "$canonical_stage"/chatgpt-mount.*) ;;
+    *)
+      die "ChatGPT mount directory escapes the private stage"
+      return 1
+      ;;
+  esac
+  canonical_source="$(canonical_directory "$source_app")" || {
+    die "unable to resolve the mounted ChatGPT app"
+    return 1
+  }
+  if [[ "$canonical_source" != "$canonical_mount/ChatGPT.app" ]]; then
+    die "mounted ChatGPT app escapes its private mount directory"
     return 1
   fi
-  if [[ ! -x "$ditto_bin" ]]; then
-    die "ditto command not found: $ditto_bin"
-    return 1
-  fi
-  if ! temp_dir="$(run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-modelhub.XXXXXX")"; then
-    die "failed to create a same-volume ChatGPT install directory"
-    return 1
-  fi
-  CHATGPT_BOOTSTRAP_TEMP_DIR="$temp_dir"
-  temp_app="$temp_dir/ChatGPT.app"
-  if ! run_with_privilege "$ditto_bin" "$source_app" "$temp_app"; then
-    die "failed to copy the verified ChatGPT app"
-    return 1
-  fi
-  validate_chatgpt_app "$temp_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
-  if [[ -e "$target_app" || -L "$target_app" ]]; then
-    die "ChatGPT appeared before the official app could be installed"
-    return 1
-  fi
+}
 
-  # On macOS, mv -n performs a no-clobber rename. Passing the destination
-  # directory keeps an existing ChatGPT.app collision at the sibling boundary.
-  if ! run_with_privilege /bin/mv -n "$temp_app" "$INSTALL_APPLICATIONS_DIR"; then
-    die "failed to atomically install the verified ChatGPT app"
+validate_staged_chatgpt_source() {
+  local source_app="$1"
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" \
+    || "$source_app" != "$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app" ]]; then
+    die "staged ChatGPT app is outside the tracked Applications directory"
     return 1
   fi
-  if [[ -e "$temp_app" || -L "$temp_app" ]]; then
-    die "ChatGPT appeared during the official app install"
+  if path_is_symlink "$source_app" || ! path_is_directory "$source_app"; then
+    die "staged ChatGPT app must be a real directory"
     return 1
   fi
-  validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
-  if ! run_with_privilege /bin/rm -rf -- "$temp_dir"; then
+}
+
+validate_rename_helper() {
+  local helper_path="$1"
+  local codesign_bin="${CC_SWITCH_HELPER_CODESIGN_BIN:-/usr/bin/codesign}"
+  local lipo_bin="${CC_SWITCH_LIPO_BIN:-/usr/bin/lipo}"
+  local architectures
+
+  if [[ -z "$helper_path" || "$helper_path" != /* \
+    || ! -f "$helper_path" || ! -x "$helper_path" || -L "$helper_path" ]]; then
+    die "exclusive rename helper is missing or unsafe"
+    return 1
+  fi
+  if [[ ! -x "$codesign_bin" || ! -x "$lipo_bin" ]]; then
+    die "exclusive rename helper verification tool is unavailable"
+    return 1
+  fi
+  if ! "$codesign_bin" --verify --strict --verbose=2 "$helper_path" >/dev/null 2>&1; then
+    die "exclusive rename helper signature verification failed"
+    return 1
+  fi
+  architectures="$("$lipo_bin" -archs "$helper_path")" || return 1
+  if [[ "$architectures" != 'arm64' ]]; then
+    die "exclusive rename helper must contain only arm64"
+    return 1
+  fi
+}
+
+validate_packaged_rename_helper() {
+  local stage_dir="$1"
+  local resources_dir="$2"
+  local helper_path="$resources_dir/helpers/rename-exclusive"
+  local canonical_stage
+  local canonical_resources
+
+  if [[ "$resources_dir" != "$stage_dir/resources/modelhub-installer" \
+    || -L "$resources_dir" || -L "$resources_dir/helpers" ]]; then
+    die "exclusive rename helper is outside verified packaged resources"
+    return 1
+  fi
+  canonical_stage="$(canonical_directory "$stage_dir")" || return 1
+  canonical_resources="$(canonical_directory "$resources_dir")" || return 1
+  if [[ "$canonical_resources" != "$canonical_stage/resources/modelhub-installer" ]]; then
+    die "exclusive rename helper resource path is not canonically contained"
+    return 1
+  fi
+  validate_rename_helper "$helper_path"
+}
+
+chatgpt_path_identity() {
+  run_with_privilege /usr/bin/stat -f '%d:%i' "$1"
+}
+
+cleanup_chatgpt_mount() {
+  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ]]; then
+    return 0
+  fi
+  case "$CHATGPT_BOOTSTRAP_MOUNT_DIR" in
+    "$CHATGPT_BOOTSTRAP_STAGE_DIR"/chatgpt-mount.*) ;;
+    *)
+      die "refusing to remove an unsafe ChatGPT mount directory: $CHATGPT_BOOTSTRAP_MOUNT_DIR"
+      return 1
+      ;;
+  esac
+  if [[ "$CHATGPT_BOOTSTRAP_MOUNT_ATTACHED" == "1" ]]; then
+    if ! detach_chatgpt_dmg "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+      return 1
+    fi
+    CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=0
+  fi
+  if [[ ! -x "$rm_bin" ]]; then
+    die "rm command not found: $rm_bin"
+    return 1
+  fi
+  if ! "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+    die "failed to remove the ChatGPT mount directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+}
+
+cleanup_chatgpt_temp() {
+  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" ]]; then
+    return 0
+  fi
+  case "$CHATGPT_BOOTSTRAP_TEMP_DIR" in
+    "$INSTALL_APPLICATIONS_DIR"/.chatgpt-modelhub.*) ;;
+    *)
+      die "refusing to remove an unsafe ChatGPT install directory: $CHATGPT_BOOTSTRAP_TEMP_DIR"
+      return 1
+      ;;
+  esac
+  if [[ ! -x "$rm_bin" ]]; then
+    die "rm command not found: $rm_bin"
+    return 1
+  fi
+  if ! run_with_privilege "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_TEMP_DIR"; then
     die "failed to remove the ChatGPT install directory"
     return 1
   fi
   CHATGPT_BOOTSTRAP_TEMP_DIR=''
 }
 
+cleanup_chatgpt_published_target() {
+  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
+  local current_identity
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" ]]; then
+    return 0
+  fi
+  if [[ "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" != "$CHATGPT_APP_PATH" \
+    || -z "$CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY" ]]; then
+    die "refusing to remove an unproven ChatGPT target"
+    return 1
+  fi
+  if ! path_exists "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" \
+    && ! path_is_symlink "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET"; then
+    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+    return 0
+  fi
+  current_identity="$(chatgpt_path_identity "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" 2>/dev/null)" || {
+    die "unable to confirm ownership of the published ChatGPT target"
+    return 1
+  }
+  if [[ "$current_identity" != "$CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY" ]]; then
+    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+    die "published ChatGPT target changed before cleanup"
+    return 1
+  fi
+  if [[ ! -x "$rm_bin" ]]; then
+    die "rm command not found: $rm_bin"
+    return 1
+  fi
+  if ! run_with_privilege "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET"; then
+    die "failed to remove the run-owned ChatGPT target"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+}
+
+cleanup_chatgpt_bootstrap() {
+  local cleanup_status=0
+
+  cleanup_chatgpt_mount || cleanup_status=1
+  cleanup_chatgpt_published_target || cleanup_status=1
+  cleanup_chatgpt_temp || cleanup_status=1
+  if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+    && -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" \
+    && -z "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" ]]; then
+    CHATGPT_BOOTSTRAP_STAGE_DIR=''
+  fi
+  return "$cleanup_status"
+}
+
+stage_verified_chatgpt_app() {
+  local source_app="$1"
+  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local temp_app
+
+  if [[ ! -x "$ditto_bin" ]]; then
+    die "ditto command not found: $ditto_bin"
+    return 1
+  fi
+  if ! CHATGPT_BOOTSTRAP_TEMP_DIR="$(
+    run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-modelhub.XXXXXX"
+  )"; then
+    CHATGPT_BOOTSTRAP_TEMP_DIR=''
+    die "failed to create a same-volume ChatGPT install directory"
+    return 1
+  fi
+  temp_app="$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app"
+  if ! run_with_privilege "$ditto_bin" "$source_app" "$temp_app"; then
+    die "failed to copy the verified ChatGPT app"
+    return 1
+  fi
+  validate_staged_chatgpt_source "$temp_app" || return 1
+  validate_chatgpt_app "$temp_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"
+}
+
+install_verified_chatgpt_app() {
+  local source_app="$1"
+  local target_app="$2"
+  local helper_path="$3"
+  local helper_status
+  local source_identity
+
+  validate_staged_chatgpt_source "$source_app" || return 1
+  if [[ "$target_app" != "$CHATGPT_APP_PATH" ]]; then
+    die "refusing to install ChatGPT at an unexpected path: $target_app"
+    return 1
+  fi
+  if path_exists "$target_app" || path_is_symlink "$target_app"; then
+    die "ChatGPT appeared before the official app could be installed"
+    return 1
+  fi
+  validate_rename_helper "$helper_path" || return 1
+  source_identity="$(chatgpt_path_identity "$source_app")" || {
+    die "unable to record the staged ChatGPT app identity"
+    return 1
+  }
+  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY="$source_identity"
+  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET="$target_app"
+  if run_with_privilege "$helper_path" "$source_app" "$target_app"; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  if [[ "$helper_status" != "0" ]]; then
+    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+    if [[ "$helper_status" == "17" ]]; then
+      die "ChatGPT appeared during the exclusive app publication"
+    else
+      die "failed to atomically publish the verified ChatGPT app"
+    fi
+    return 1
+  fi
+  if path_is_symlink "$target_app" \
+    || ! validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
+    cleanup_chatgpt_published_target || true
+    return 1
+  fi
+
+  CHATGPT_INSTALLED_BY_RUN=1
+  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
+  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+  cleanup_chatgpt_temp
+}
+
 ensure_chatgpt_app() {
   local stage_dir="$1"
+  local resources_dir="${2:-}"
+  local helper_path="$resources_dir/helpers/rename-exclusive"
   local dmg_path="$stage_dir/ChatGPT.dmg"
-  local mount_dir
-  local cleanup_status
+  local mounted_app
 
   CHATGPT_INSTALLED_BY_RUN=0
   if [[ -e "$CHATGPT_APP_PATH" || -L "$CHATGPT_APP_PATH" ]]; then
@@ -352,30 +598,41 @@ ensure_chatgpt_app() {
     die "ChatGPT bootstrap staging directory is missing: $stage_dir"
     return 1
   fi
+  validate_packaged_rename_helper "$stage_dir" "$resources_dir" || return 1
   CHATGPT_BOOTSTRAP_STAGE_DIR="$stage_dir"
   download_chatgpt_dmg "$dmg_path" || {
     cleanup_chatgpt_bootstrap || true
     return 1
   }
-  if ! mount_dir="$(/usr/bin/mktemp -d "$stage_dir/chatgpt-mount.XXXXXX")"; then
+  if ! CHATGPT_BOOTSTRAP_MOUNT_DIR="$(
+    /usr/bin/mktemp -d "$stage_dir/chatgpt-mount.XXXXXX"
+  )"; then
+    CHATGPT_BOOTSTRAP_MOUNT_DIR=''
     cleanup_chatgpt_bootstrap || true
     die "failed to create the ChatGPT disk image mount directory"
     return 1
   fi
-  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
-  if ! attach_chatgpt_dmg "$dmg_path" "$mount_dir" \
-    || ! validate_chatgpt_app "$mount_dir/ChatGPT.app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" \
-    || ! install_verified_chatgpt_app "$mount_dir/ChatGPT.app" "$CHATGPT_APP_PATH"; then
+  CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=1
+  mounted_app="$CHATGPT_BOOTSTRAP_MOUNT_DIR/ChatGPT.app"
+  if ! attach_chatgpt_dmg "$dmg_path" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+    || ! validate_mounted_chatgpt_source "$mounted_app" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+    || ! validate_chatgpt_app "$mounted_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" \
+    || ! stage_verified_chatgpt_app "$mounted_app"; then
     cleanup_chatgpt_bootstrap || true
     return 1
   fi
-  cleanup_status=0
-  cleanup_chatgpt_bootstrap || cleanup_status=$?
-  if [[ "$cleanup_status" != "0" ]]; then
+  if ! cleanup_chatgpt_mount; then
+    cleanup_chatgpt_bootstrap || true
     return 1
   fi
-  validate_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
-  CHATGPT_INSTALLED_BY_RUN=1
+  if ! install_verified_chatgpt_app \
+    "$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app" \
+    "$CHATGPT_APP_PATH" \
+    "$helper_path"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  cleanup_chatgpt_bootstrap
 }
 
 download_release_assets() {
@@ -481,6 +738,8 @@ expected_resource_archive_entries() {
 modelhub-installer/
 modelhub-installer/assets/
 modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/helpers/
+modelhub-installer/helpers/rename-exclusive
 modelhub-installer/templates/
 modelhub-installer/templates/com.ccswitch.modelhub-env.plist
 modelhub-installer/templates/load-modelhub-env.sh
@@ -2148,6 +2407,9 @@ rollback_failed_install() {
 }
 
 cleanup_transaction_stage() {
+  if ! cleanup_chatgpt_bootstrap; then
+    return 1
+  fi
   if [[ -n "$TRANSACTION_STAGE_DIR" && -d "$TRANSACTION_STAGE_DIR" ]]; then
     if ! /bin/rm -rf "$TRANSACTION_STAGE_DIR"; then
       die "failed to remove the installer staging directory"
@@ -2229,14 +2491,6 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
-  ensure_chatgpt_app "$stage_dir" || {
-    cleanup_transaction_stage || true
-    return 1
-  }
-  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || {
-    cleanup_transaction_stage || true
-    return 1
-  }
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -2269,6 +2523,15 @@ perform_install() {
     return 1
   }
   resources_dir="$resources_parent/modelhub-installer"
+
+  ensure_chatgpt_app "$stage_dir" "$resources_dir" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
 
   quit_apps || {
     cleanup_transaction_stage || true

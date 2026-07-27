@@ -7,11 +7,13 @@ INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
 PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
+RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
 TEST_FILTER="${1:-}"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-installer-tests.XXXXXX")"
+TEST_RENAME_HELPER="$TEST_TMP/rename-exclusive"
 TESTS_RUN=0
 TESTS_FAILED=0
 
@@ -77,6 +79,67 @@ assert_command_fails() {
   if "$@" >/dev/null 2>&1; then
     fail "expected command to fail: $*"
   fi
+}
+
+build_test_rename_helper() {
+  local output_path="$1"
+
+  /usr/bin/xcrun clang \
+    -arch arm64 \
+    -mmacosx-version-min=12.0 \
+    -Os \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -o "$output_path" \
+    "$RENAME_HELPER_SOURCE"
+  /usr/bin/codesign \
+    --force \
+    --sign - \
+    --timestamp=none \
+    --identifier com.ccswitch.modelhub.rename-exclusive \
+    "$output_path"
+  /usr/bin/codesign --verify --strict --verbose=2 "$output_path"
+}
+
+ensure_test_rename_helper() {
+  if [[ ! -x "$TEST_RENAME_HELPER" ]]; then
+    build_test_rename_helper "$TEST_RENAME_HELPER"
+  fi
+}
+
+test_helper_exclusive_rename_preserves_exact_collision() {
+  local case_dir="$TEST_TMP/rename-helper-collision"
+  local helper="$case_dir/rename-exclusive"
+  local source="$case_dir/ChatGPT.app"
+  local competitor="$case_dir/Applications/ChatGPT.app"
+  local status
+  mkdir -p "$source" "$(dirname "$competitor")" "$competitor"
+  printf 'staged\n' >"$source/owner"
+  printf 'competitor\n' >"$competitor/owner"
+
+  build_test_rename_helper "$helper"
+  set +e
+  "$helper" "$source" "$competitor" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  assert_equals "$status" '17'
+  assert_contains "$source/owner" 'staged'
+  assert_contains "$competitor/owner" 'competitor'
+  assert_equals "$(/usr/bin/lipo -archs "$helper")" 'arm64'
+  /usr/bin/codesign --verify --strict --verbose=2 "$helper"
+
+  set +e
+  "$helper" >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_equals "$status" '64'
+  set +e
+  "$helper" "$case_dir/missing-source" "$case_dir/new-target" >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_equals "$status" '1'
 }
 
 run_test() {
@@ -309,15 +372,18 @@ create_chatgpt_validation_stubs() {
     '#!/bin/bash' \
     'set -euo pipefail' \
     '[[ "$1" == "-extract" && "$3" == "raw" && "$4" == "-o" && "$5" == "-" ]]' \
+    'if [[ "$6" == */.chatgpt-modelhub.*/ChatGPT.app/* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
     'awk -F= -v key="$2" '\''$1 == key { print substr($0, index($0, "=") + 1); found = 1; exit } END { exit(found ? 0 : 1) }'\'' "$6"' \
     >"$case_dir/plutil"
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
     'target="${@: -1}"' \
+    'if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
     'if [[ "$1" == "--verify" ]]; then' \
     '  [[ "$2" == "--deep" && "$3" == "--strict" && "$#" == "4" ]]' \
     '  if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app && "${FAKE_TEMP_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
+    '  if [[ -n "${FAKE_FINAL_TARGET:-}" && "$target" == "$FAKE_FINAL_TARGET" && "${FAKE_FINAL_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
     '  [[ "${FAKE_APP_STRICT:-pass}" == "pass" ]]' \
     'elif [[ "$1" == "-dv" ]]; then' \
     '  if [[ "$target" == */Contents/Resources/codex ]]; then' \
@@ -332,6 +398,8 @@ create_chatgpt_validation_stubs() {
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
+    'target="${@: -1}"' \
+    'if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app/* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
     'printf "%s\n" "$*" >>"${FAKE_FILE_LOG:-/dev/null}"' \
     'if [[ "${1:-}" == "-b" ]]; then' \
     '  echo "Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
@@ -495,26 +563,49 @@ create_chatgpt_bootstrap_stubs() {
     '  attach)' \
     '    [[ "$2" == "-nobrowse" && "$3" == "-readonly" && "$4" == "-mountpoint" && "$#" == "6" ]]' \
     '    [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "attach-fail" ]] || exit 82' \
-    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "app-missing" ]]; then' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "mount-symlink" ]]; then' \
+    '      /bin/rmdir "$5"' \
+    '      ln -s "$FAKE_CHATGPT_MOUNT_ESCAPE" "$5"' \
+    '    elif [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "source-symlink" ]]; then' \
+    '      ln -s "$FAKE_CHATGPT_DMG_SOURCE" "$5/ChatGPT.app"' \
+    '    elif [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "app-missing" ]]; then' \
     '      /usr/bin/ditto "$FAKE_CHATGPT_DMG_SOURCE" "$5/ChatGPT.app"' \
     '    fi' \
     '    ;;' \
     '  detach)' \
     '    [[ "$#" == "2" ]]' \
+    '    printf "detach\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "detach-fail-always" ]]; then exit 83; fi' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "detach-fail-once" && ! -e "$FAKE_CHATGPT_DETACH_STATE" ]]; then : >"$FAKE_CHATGPT_DETACH_STATE"; exit 83; fi' \
     '    ;;' \
     '  *) exit 64 ;;' \
     'esac'
   write_executable_stub "$case_dir/ditto" \
     'printf "%s\n" "$*" >>"$FAKE_CHATGPT_DITTO_LOG"' \
+    'if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "staging-symlink" ]]; then ln -s "$1" "$2"; exit 0; fi' \
     'exec /usr/bin/ditto "$@"'
+  write_executable_stub "$case_dir/rm" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_RM_LOG"' \
+    'if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "rm-fail-once" && ! -e "$FAKE_CHATGPT_RM_STATE" ]]; then : >"$FAKE_CHATGPT_RM_STATE"; exit 84; fi' \
+    'exec /bin/rm "$@"'
   write_executable_stub "$case_dir/sudo" \
     'printf "%s\n" "$*" >>"$FAKE_CHATGPT_SUDO_LOG"' \
     'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
-    'if [[ "${1:-}" == "/bin/mv" && -n "${FAKE_RACE_TARGET:-}" && ! -e "$FAKE_RACE_TARGET" ]]; then' \
+    'if [[ "${1:-}" == */rename-exclusive ]]; then' \
+    '  printf "publish\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    'fi' \
+    'if [[ "${1:-}" == */rename-exclusive && -n "${FAKE_RACE_TARGET:-}" && ! -e "$FAKE_RACE_TARGET" ]]; then' \
     '  mkdir -p "$FAKE_RACE_TARGET"' \
     '  printf "competitor\n" >"$FAKE_RACE_TARGET/owner"' \
     'fi' \
-    'exec "$@"'
+    'set +e' \
+    'FAKE_PRIVILEGED=1 "$@"' \
+    'command_status=$?' \
+    'set -e' \
+    'if [[ "${1:-}" == */rename-exclusive && "$command_status" == "0" && "${FAKE_SIGNAL_AFTER_PUBLISH:-0}" == "1" ]]; then' \
+    '  kill -TERM "$PPID"' \
+    'fi' \
+    'exit "$command_status"'
 
   export CC_SWITCH_PLUTIL_BIN="$case_dir/plutil"
   export CC_SWITCH_CODESIGN_BIN="$case_dir/codesign"
@@ -523,10 +614,15 @@ create_chatgpt_bootstrap_stubs() {
   export CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil"
   export CC_SWITCH_DITTO_BIN="$case_dir/ditto"
   export CC_SWITCH_SUDO_BIN="$case_dir/sudo"
+  export CC_SWITCH_RM_BIN="$case_dir/rm"
   export FAKE_CHATGPT_CURL_LOG="$case_dir/curl.log"
   export FAKE_CHATGPT_HDIUTIL_LOG="$case_dir/hdiutil.log"
   export FAKE_CHATGPT_DITTO_LOG="$case_dir/ditto.log"
   export FAKE_CHATGPT_SUDO_LOG="$case_dir/sudo.log"
+  export FAKE_CHATGPT_RM_LOG="$case_dir/rm.log"
+  export FAKE_CHATGPT_EVENT_LOG="$case_dir/events.log"
+  export FAKE_CHATGPT_DETACH_STATE="$case_dir/detach.state"
+  export FAKE_CHATGPT_RM_STATE="$case_dir/rm.state"
 }
 
 prepare_chatgpt_bootstrap_case() {
@@ -536,18 +632,31 @@ prepare_chatgpt_bootstrap_case() {
   create_chatgpt_app_fixture "$case_dir/dmg-source/ChatGPT.app"
   printf 'installed-from-official-dmg\n' \
     >"$case_dir/dmg-source/ChatGPT.app/Contents/Resources/bootstrap-marker"
+  mkdir -p "$case_dir/mount-escape"
+  /usr/bin/ditto \
+    "$case_dir/dmg-source/ChatGPT.app" \
+    "$case_dir/mount-escape/ChatGPT.app"
   create_chatgpt_bootstrap_stubs "$case_dir"
   export CC_SWITCH_INSTALLER_TEST_MODE=1
   export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
   export FAKE_CHATGPT_DMG_SOURCE="$case_dir/dmg-source/ChatGPT.app"
+  export FAKE_CHATGPT_MOUNT_ESCAPE="$case_dir/mount-escape"
   export FAKE_CHATGPT_BOOTSTRAP_MODE=success
   export FAKE_APP_TEAM_ID=2DC432GLL2
   export FAKE_APP_STRICT=pass
   export FAKE_TEMP_APP_STRICT=pass
+  export FAKE_FINAL_APP_STRICT=pass
+  export FAKE_FINAL_TARGET="$case_dir/Applications/ChatGPT.app"
+  export FAKE_REQUIRE_PRIVILEGED_STAGING=0
+  export FAKE_SIGNAL_AFTER_PUBLISH=0
   export FAKE_RACE_TARGET=''
   configure_install_paths
   NEEDS_SUDO=1
+  ensure_test_rename_helper
+  export FAKE_CHATGPT_RESOURCE_DIR="$case_dir/stage/resources/modelhub-installer"
+  mkdir -p "$FAKE_CHATGPT_RESOURCE_DIR/helpers"
+  cp "$TEST_RENAME_HELPER" "$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
 }
 
 assert_chatgpt_bootstrap_scratch_clean() {
@@ -565,7 +674,7 @@ test_bootstraps_missing_chatgpt_from_official_dmg() {
   local attach_count
   prepare_chatgpt_bootstrap_case "$case_dir"
 
-  ensure_chatgpt_app "$case_dir/stage"
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
 
   [[ -d "$CHATGPT_APP_PATH" ]] || fail 'ChatGPT was not installed'
   assert_equals "$CHATGPT_INSTALLED_BY_RUN" '1'
@@ -578,12 +687,14 @@ test_bootstraps_missing_chatgpt_from_official_dmg() {
   assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
   assert_contains "$FAKE_CHATGPT_DITTO_LOG" "/ChatGPT.app $case_dir/Applications/.chatgpt-modelhub."
   assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d $case_dir/Applications/.chatgpt-modelhub.XXXXXX"
-  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/mv -n"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  assert_equals "$(sed -n '1p' "$FAKE_CHATGPT_EVENT_LOG")" 'detach'
+  assert_equals "$(sed -n '2p' "$FAKE_CHATGPT_EVENT_LOG")" 'publish'
   assert_chatgpt_bootstrap_scratch_clean "$case_dir"
 
   curl_count="$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')"
   attach_count="$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")"
-  ensure_chatgpt_app "$case_dir/stage"
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
   assert_equals "$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')" "$curl_count"
   assert_equals "$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")" "$attach_count"
 }
@@ -593,7 +704,7 @@ test_bootstraps_missing_chatgpt_cleans_all_failure_paths() {
   local case_dir
   local status
 
-  for mode in download-fail attach-fail app-missing signature-fail temp-signature-fail; do
+  for mode in download-fail attach-fail app-missing signature-fail temp-signature-fail mount-symlink source-symlink staging-symlink; do
     case_dir="$TEST_TMP/chatgpt-bootstrap-$mode"
     prepare_chatgpt_bootstrap_case "$case_dir"
     export FAKE_CHATGPT_BOOTSTRAP_MODE="$mode"
@@ -604,7 +715,7 @@ test_bootstraps_missing_chatgpt_cleans_all_failure_paths() {
     fi
 
     set +e
-    ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+    ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
     status=$?
     set -e
 
@@ -626,7 +737,7 @@ test_bootstraps_missing_chatgpt_rejects_final_target_race() {
   export FAKE_RACE_TARGET="$CHATGPT_APP_PATH"
 
   set +e
-  ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
   status=$?
   set -e
 
@@ -637,10 +748,190 @@ test_bootstraps_missing_chatgpt_rejects_final_target_race() {
   assert_chatgpt_bootstrap_scratch_clean "$case_dir"
 }
 
+test_chatgpt_bootstrap_cleanup_retries_detach_before_removing_mount() {
+  local case_dir="$TEST_TMP/chatgpt-cleanup-detach-retry"
+  local mount_dir
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  mount_dir="$case_dir/stage/chatgpt-mount.retry"
+  mkdir -p "$mount_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$case_dir/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=1
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=detach-fail-once
+
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first detach cleanup unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" "$mount_dir"
+  [[ -d "$mount_dir" ]] || fail 'failed detach removed a still-mounted path'
+  [[ ! -e "$FAKE_CHATGPT_RM_LOG" ]] || fail 'failed detach invoked mount removal'
+
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ''
+  [[ ! -e "$mount_dir" ]] || fail 'second cleanup did not remove detached mount directory'
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 2
+}
+
+test_chatgpt_bootstrap_cleanup_retries_mount_and_temp_removal() {
+  local mount_case="$TEST_TMP/chatgpt-cleanup-mount-rm-retry"
+  local temp_case="$TEST_TMP/chatgpt-cleanup-temp-rm-retry"
+  local mount_dir
+  local temp_dir
+  local status
+
+  prepare_chatgpt_bootstrap_case "$mount_case"
+  mount_dir="$mount_case/stage/chatgpt-mount.retry"
+  mkdir -p "$mount_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$mount_case/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=1
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=rm-fail-once
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first mount removal unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" "$mount_dir"
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_ATTACHED" '0'
+  [[ -d "$mount_dir" ]] || fail 'failed mount removal lost retry state'
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ''
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+
+  prepare_chatgpt_bootstrap_case "$temp_case"
+  temp_dir="$temp_case/Applications/.chatgpt-modelhub.retry"
+  mkdir -p "$temp_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$temp_case/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+  CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=0
+  CHATGPT_BOOTSTRAP_TEMP_DIR="$temp_dir"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=rm-fail-once
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first temp removal unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_TEMP_DIR" "$temp_dir"
+  [[ -d "$temp_dir" ]] || fail 'failed temp removal lost retry state'
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_TEMP_DIR" ''
+  [[ ! -e "$temp_dir" ]] || fail 'second cleanup did not remove temp directory'
+}
+
+test_chatgpt_bootstrap_detach_failure_prevents_publication() {
+  local case_dir="$TEST_TMP/chatgpt-detach-before-publish"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=detach-fail-always
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a failed DMG detach'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'ChatGPT was published before successful DMG detach'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'publish'
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  cleanup_chatgpt_bootstrap
+}
+
+test_chatgpt_bootstrap_removes_only_owned_target_after_final_validation_failure() {
+  local case_dir="$TEST_TMP/chatgpt-final-validation-failure"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_FINAL_APP_STRICT=fail
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted failed final validation'
+  [[ ! -e "$CHATGPT_APP_PATH" && ! -L "$CHATGPT_APP_PATH" ]] \
+    || fail 'failed final validation left the run-owned ChatGPT target'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege() {
+  local case_dir="$TEST_TMP/chatgpt-root-owned-staging"
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_REQUIRE_PRIVILEGED_STAGING=1
+
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'privileged staging validation did not install ChatGPT'
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/plutil -extract"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/codesign --verify --deep --strict"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/file -b"
+}
+
+test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download() {
+  local case_dir="$TEST_TMP/chatgpt-unverified-helper"
+  local corrupt_helper
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  corrupt_helper="$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  printf 'tamper\n' >>"$corrupt_helper"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted an unverified rename helper'
+  [[ ! -e "$FAKE_CHATGPT_CURL_LOG" ]] || fail 'unverified helper was rejected only after download'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'unverified helper installed ChatGPT'
+}
+
+test_chatgpt_bootstrap_rejects_signed_helper_outside_verified_resource_root() {
+  local case_dir="$TEST_TMP/chatgpt-outside-helper"
+  local outside_helper="$case_dir/outside-rename-exclusive"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  cp "$TEST_RENAME_HELPER" "$outside_helper"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$outside_helper" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a signed helper outside verified resources'
+  [[ ! -e "$FAKE_CHATGPT_CURL_LOG" ]] || fail 'outside helper was rejected only after download'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'outside helper installed ChatGPT'
+}
+
+test_chatgpt_bootstrap_signal_after_exclusive_publish_cleans_owned_target() {
+  local case_dir="$TEST_TMP/chatgpt-signal-after-publish"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_SIGNAL_AFTER_PUBLISH=1
+
+  set +e
+  (
+    trap 'cleanup_chatgpt_bootstrap; exit 143' TERM
+    ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  assert_equals "$status" '143'
+  [[ ! -e "$CHATGPT_APP_PATH" && ! -L "$CHATGPT_APP_PATH" ]] \
+    || fail 'signal after exclusive publish left the run-owned target'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
 create_expected_resource_tree() {
   local root="$1/modelhub-installer"
-  mkdir -p "$root/assets" "$root/templates"
+  mkdir -p "$root/assets" "$root/helpers" "$root/templates"
+  ensure_test_rename_helper
   : >"$root/assets/models-modelhub-1m.json"
+  cp "$TEST_RENAME_HELPER" "$root/helpers/rename-exclusive"
   : >"$root/templates/modelhub-provider.toml"
   : >"$root/templates/modelhub-provider-meta.json"
   : >"$root/templates/com.ccswitch.modelhub-env.plist"
@@ -1183,10 +1474,12 @@ create_transaction_assets() {
   local case_dir="$1"
   local asset_dir="$case_dir/assets"
   local resource_root="$case_dir/resource-build/modelhub-installer"
-  mkdir -p "$asset_dir" "$resource_root/assets" "$resource_root/templates"
+  mkdir -p "$asset_dir" "$resource_root/assets" "$resource_root/helpers" "$resource_root/templates"
+  ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
   printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$TEST_RENAME_HELPER" "$resource_root/helpers/rename-exclusive"
   cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
@@ -1676,7 +1969,7 @@ test_transaction_corrupt_backup_fails_before_restore_writes() {
 
 create_packager_source() {
   local source_dir="$1"
-  mkdir -p "$source_dir/assets" "$source_dir/templates"
+  mkdir -p "$source_dir/assets" "$source_dir/helpers" "$source_dir/templates"
   cp "$INSTALLER" "$source_dir/install.sh"
   cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
@@ -1684,6 +1977,7 @@ create_packager_source() {
     "$source_dir/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
     "$source_dir/templates/load-modelhub-env.sh"
+  cp "$RENAME_HELPER_SOURCE" "$source_dir/helpers/rename-exclusive.c"
   printf '{"models":{}}\n' >"$source_dir/assets/models-modelhub-1m.json"
 }
 
@@ -1701,6 +1995,7 @@ test_package_builds_exact_allowlisted_release_assets() {
   local output_dir="$case_dir/output"
   local actual_files
   local expected_files
+  local extracted_dir="$case_dir/extracted"
   mkdir -p "$case_dir"
   create_packager_source "$source_dir"
   printf 'verified-app-zip\n' >"$case_dir/app.zip"
@@ -1717,6 +2012,17 @@ test_package_builds_exact_allowlisted_release_assets() {
   assert_equals "$actual_files" "$expected_files"
   verify_release_assets "$output_dir"
   validate_resource_archive "$output_dir/modelhub-installer-resources.tar.gz"
+  mkdir -p "$extracted_dir"
+  tar -xzf "$output_dir/modelhub-installer-resources.tar.gz" -C "$extracted_dir"
+  [[ -x "$extracted_dir/modelhub-installer/helpers/rename-exclusive" ]] \
+    || fail 'resource package is missing the executable rename helper'
+  [[ ! -e "$extracted_dir/modelhub-installer/helpers/rename-exclusive.c" ]] \
+    || fail 'resource package unexpectedly ships rename helper source'
+  assert_equals \
+    "$(/usr/bin/lipo -archs "$extracted_dir/modelhub-installer/helpers/rename-exclusive")" \
+    'arm64'
+  /usr/bin/codesign --verify --strict --verbose=2 \
+    "$extracted_dir/modelhub-installer/helpers/rename-exclusive"
   assert_equals "$(awk 'NF { count += 1 } END { print count + 0 }' "$output_dir/SHA256SUMS.txt")" '3'
 }
 
@@ -1877,6 +2183,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
+run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
 run_test "merge replaces only modelhub section" test_merge_replaces_only_active_modelhub_section
@@ -1891,6 +2198,14 @@ run_test "blocks invalid existing ChatGPT symlink" test_blocks_invalid_existing_
 run_test "bootstraps missing ChatGPT from official DMG" test_bootstraps_missing_chatgpt_from_official_dmg
 run_test "bootstraps missing ChatGPT cleans all failure paths" test_bootstraps_missing_chatgpt_cleans_all_failure_paths
 run_test "bootstraps missing ChatGPT rejects final target race" test_bootstraps_missing_chatgpt_rejects_final_target_race
+run_test "ChatGPT bootstrap cleanup retries detach" test_chatgpt_bootstrap_cleanup_retries_detach_before_removing_mount
+run_test "ChatGPT bootstrap cleanup retries mount and temp removal" test_chatgpt_bootstrap_cleanup_retries_mount_and_temp_removal
+run_test "ChatGPT bootstrap detach failure prevents publication" test_chatgpt_bootstrap_detach_failure_prevents_publication
+run_test "ChatGPT bootstrap removes owned target after final validation failure" test_chatgpt_bootstrap_removes_only_owned_target_after_final_validation_failure
+run_test "ChatGPT bootstrap validates root-owned staging through privilege" test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege
+run_test "ChatGPT bootstrap rejects unverified packaged helper" test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download
+run_test "ChatGPT bootstrap rejects signed helper outside verified resources" test_chatgpt_bootstrap_rejects_signed_helper_outside_verified_resource_root
+run_test "ChatGPT bootstrap signal after exclusive publish cleans owned target" test_chatgpt_bootstrap_signal_after_exclusive_publish_cleans_owned_target
 run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_keeps_bootstrapped_chatgpt_after_failure_and_explicit_rollback
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries

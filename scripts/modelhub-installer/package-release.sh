@@ -31,6 +31,7 @@ scan_source_tree() {
   local required_files=(
     'install.sh'
     'assets/models-modelhub-1m.json'
+    'helpers/rename-exclusive.c'
     'templates/modelhub-provider.toml'
     'templates/modelhub-provider-meta.json'
     'templates/com.ccswitch.modelhub-env.plist'
@@ -66,22 +67,81 @@ scan_source_tree() {
   done
 }
 
+build_rename_helper() {
+  local source_path="$1"
+  local output_path="$2"
+  local xcrun_bin="${CC_SWITCH_XCRUN_BIN:-/usr/bin/xcrun}"
+  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local lipo_bin="${CC_SWITCH_LIPO_BIN:-/usr/bin/lipo}"
+  local otool_bin="${CC_SWITCH_OTOOL_BIN:-/usr/bin/otool}"
+  local architectures
+  local minimum_version
+
+  if [[ ! -x "$xcrun_bin" || ! -x "$codesign_bin" \
+    || ! -x "$lipo_bin" || ! -x "$otool_bin" ]]; then
+    die 'required macOS helper build tool is unavailable'
+    return 1
+  fi
+  if ! "$xcrun_bin" clang \
+    -arch arm64 \
+    -mmacosx-version-min=12.0 \
+    -Os \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -o "$output_path" \
+    "$source_path"; then
+    die 'failed to build the exclusive rename helper'
+    return 1
+  fi
+  if ! "$codesign_bin" \
+    --force \
+    --sign - \
+    --timestamp=none \
+    --identifier com.ccswitch.modelhub.rename-exclusive \
+    "$output_path"; then
+    die 'failed to ad-hoc sign the exclusive rename helper'
+    return 1
+  fi
+  if ! "$codesign_bin" --verify --strict --verbose=2 "$output_path"; then
+    die 'exclusive rename helper signature verification failed'
+    return 1
+  fi
+  architectures="$("$lipo_bin" -archs "$output_path")" || return 1
+  if [[ "$architectures" != 'arm64' ]]; then
+    die "exclusive rename helper has unexpected architectures: $architectures"
+    return 1
+  fi
+  minimum_version="$(
+    "$otool_bin" -l "$output_path" \
+      | awk '/LC_BUILD_VERSION/ { found = 1; next } found && $1 == "minos" { print $2; exit }'
+  )" || return 1
+  if [[ "$minimum_version" != '12.0' ]]; then
+    die "exclusive rename helper has unexpected minimum macOS version: $minimum_version"
+    return 1
+  fi
+}
+
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
 
-  mkdir -p "$package_root/assets" "$package_root/templates"
+  mkdir -p "$package_root/assets" "$package_root/helpers" "$package_root/templates"
   cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
   cp "$source_dir/templates/com.ccswitch.modelhub-env.plist" "$package_root/templates/com.ccswitch.modelhub-env.plist"
   cp "$source_dir/templates/load-modelhub-env.sh" "$package_root/templates/load-modelhub-env.sh"
+  build_rename_helper \
+    "$source_dir/helpers/rename-exclusive.c" \
+    "$package_root/helpers/rename-exclusive"
   chmod 644 \
     "$package_root/assets/models-modelhub-1m.json" \
     "$package_root/templates/modelhub-provider.toml" \
     "$package_root/templates/modelhub-provider-meta.json" \
     "$package_root/templates/com.ccswitch.modelhub-env.plist"
   chmod 755 "$package_root/templates/load-modelhub-env.sh"
+  chmod 755 "$package_root/helpers/rename-exclusive"
 }
 
 main() {
