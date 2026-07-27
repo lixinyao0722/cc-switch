@@ -104,9 +104,10 @@ Release 打包器不以旧私密配置包为输入，而是只打包上述受版
 - `~/.cc-switch/settings.json`
 - `~/Library/LaunchAgents/com.ccswitch.modelhub-env.plist`
 - `~/.local/share/cc-switch-modelhub/load-modelhub-env.sh`
-- `~/.local/share/cc-switch-modelhub/install.sh`
 
 安装器不读取、不复制，也不修改 `~/.codex/auth.json`。
+
+CC Switch 数据库使用系统 `sqlite3 .backup` 生成一致逻辑快照；恢复前删除 `cc-switch.db-wal` 与 `cc-switch.db-shm`，避免新事务 sidecar 重放到旧主库。
 
 备份完成后，如果 App 安装、配置合并、Keychain 设置、launchd 加载或健康检查中的任一步失败，安装器都会根据 manifest 自动回滚。回滚恢复原文件，并删除安装前不存在的目标。若失败流程新建了 Keychain 条目，则删除该条目；若条目此前已经存在，则保留当前条目，不把旧密钥导出到文件。
 
@@ -115,6 +116,8 @@ Release 打包器不以旧私密配置包为输入，而是只打包上述受版
 ```bash
 ~/.local/share/cc-switch-modelhub/install.sh --rollback latest
 ```
+
+该 launcher 是持久回滚入口，不属于用户显式回滚的普通受管目标。每次安装会在事务开始时保存一个仅用于失败恢复的私有 launcher 快照；只有当前事务失败且已替换 launcher 时才恢复旧版本或删除本次新建版本。安装成功后，显式 `--rollback latest` 会保留当前已验证 launcher，因此可重复执行。
 
 ## 增量配置合并
 
