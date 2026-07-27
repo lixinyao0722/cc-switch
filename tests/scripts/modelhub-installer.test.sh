@@ -286,6 +286,147 @@ test_preflight_validates_chatgpt_codex_team_id() {
     validate_chatgpt_codex "$codex_path" '2DC432GLL2'
 }
 
+create_chatgpt_app_fixture() {
+  local app_path="$1"
+  local executable_name="${2:-ChatGPT}"
+
+  mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+  printf '%s\n' \
+    'CFBundleIdentifier=com.openai.codex' \
+    "CFBundleExecutable=$executable_name" \
+    >"$app_path/Contents/Info.plist"
+  : >"$app_path/Contents/MacOS/$executable_name"
+  : >"$app_path/Contents/Resources/codex"
+  chmod +x \
+    "$app_path/Contents/MacOS/$executable_name" \
+    "$app_path/Contents/Resources/codex"
+}
+
+create_chatgpt_validation_stubs() {
+  local case_dir="$1"
+
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[[ "$1" == "-extract" && "$3" == "raw" && "$4" == "-o" && "$5" == "-" ]]' \
+    'awk -F= -v key="$2" '\''$1 == key { print substr($0, index($0, "=") + 1); found = 1; exit } END { exit(found ? 0 : 1) }'\'' "$6"' \
+    >"$case_dir/plutil"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'target="${@: -1}"' \
+    'if [[ "$1" == "--verify" ]]; then' \
+    '  [[ "$2" == "--deep" && "$3" == "--strict" && "$#" == "4" ]]' \
+    '  [[ "${FAKE_APP_STRICT:-pass}" == "pass" ]]' \
+    'elif [[ "$1" == "-dv" ]]; then' \
+    '  if [[ "$target" == */Contents/Resources/codex ]]; then' \
+    '    echo "TeamIdentifier=${FAKE_CODEX_TEAM_ID:-2DC432GLL2}" >&2' \
+    '  else' \
+    '    echo "TeamIdentifier=${FAKE_APP_TEAM_ID:-2DC432GLL2}" >&2' \
+    '  fi' \
+    'else' \
+    '  exit 64' \
+    'fi' \
+    >"$case_dir/codesign"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo "Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    >"$case_dir/file"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo curl >>"$FAKE_MUTATION_LOG"' \
+    'exit 90' \
+    >"$case_dir/curl"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo hdiutil >>"$FAKE_MUTATION_LOG"' \
+    'exit 91' \
+    >"$case_dir/hdiutil"
+  chmod +x \
+    "$case_dir/plutil" \
+    "$case_dir/codesign" \
+    "$case_dir/file" \
+    "$case_dir/curl" \
+    "$case_dir/hdiutil"
+}
+
+test_validates_existing_chatgpt_app() {
+  local case_dir="$TEST_TMP/chatgpt-validation"
+  local app_path="$case_dir/ChatGPT.app"
+  local info_plist="$app_path/Contents/Info.plist"
+  local codex_path="$app_path/Contents/Resources/codex"
+  mkdir -p "$case_dir"
+  create_chatgpt_app_fixture "$app_path" 'OpenAI ChatGPT'
+  create_chatgpt_validation_stubs "$case_dir"
+
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  cp "$info_plist" "$case_dir/Info.plist.valid"
+  printf '%s\n' \
+    'CFBundleIdentifier=com.example.impostor' \
+    'CFBundleExecutable=OpenAI ChatGPT' \
+    >"$info_plist"
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  cp "$case_dir/Info.plist.valid" "$info_plist"
+
+  FAKE_APP_TEAM_ID='WRONGTEAM' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  FAKE_APP_ARCHS='x86_64' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  FAKE_APP_STRICT='fail' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  mv "$codex_path" "$case_dir/codex.saved"
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  mv "$case_dir/codex.saved" "$codex_path"
+  FAKE_CODEX_TEAM_ID='WRONGTEAM' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+}
+
+test_blocks_invalid_existing_chatgpt_without_mutation() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-existing"
+  local app_path="$case_dir/Applications/ChatGPT.app"
+  local mutation_log="$case_dir/mutations.log"
+  local stderr_file="$case_dir/stderr.log"
+  local before_digest
+  local after_digest
+  local status
+  mkdir -p "$case_dir/Applications"
+  create_chatgpt_app_fixture "$app_path"
+  create_chatgpt_validation_stubs "$case_dir"
+  before_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
+
+  set +e
+  FAKE_APP_TEAM_ID='WRONGTEAM' FAKE_MUTATION_LOG="$mutation_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" CC_SWITCH_CURL_BIN="$case_dir/curl" \
+    CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil" \
+    ensure_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex' 2>"$stderr_file"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid existing ChatGPT app was accepted'
+  assert_contains "$stderr_file" 'https://openai.com/chatgpt/download/'
+  assert_contains "$stderr_file" 'official OpenAI download page'
+  [[ ! -e "$mutation_log" ]] || fail 'invalid existing ChatGPT app triggered curl or hdiutil'
+  after_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
+  assert_equals "$after_digest" "$before_digest"
+}
+
 create_expected_resource_tree() {
   local root="$1/modelhub-installer"
   mkdir -p "$root/assets" "$root/templates"
@@ -751,6 +892,15 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/codesign" \
     'if [[ "${1:-}" == "-dv" ]]; then echo "TeamIdentifier=2DC432GLL2" >&2; fi' \
     'exit 0'
+  write_executable_stub "$stub_dir/plutil" \
+    'if [[ "${6:-}" == */ChatGPT.app/Contents/Info.plist ]]; then' \
+    '  [[ "$1" == "-extract" && "$3" == "raw" && "$4" == "-o" && "$5" == "-" ]]' \
+    '  awk -F= -v key="$2" '\''$1 == key { print substr($0, index($0, "=") + 1); found = 1; exit } END { exit(found ? 0 : 1) }'\'' "$6"' \
+    'else' \
+    '  exec /usr/bin/plutil "$@"' \
+    'fi'
+  write_executable_stub "$stub_dir/file" \
+    'echo "Mach-O 64-bit executable arm64"'
   write_executable_stub "$stub_dir/security" \
     'printf "%s\n" "${1:-}" >>"${FAKE_SECURITY_LOG:-/dev/null}"' \
     'case "${1:-}" in' \
@@ -798,6 +948,8 @@ create_transaction_stubs() {
     'exit 22'
 
   export CC_SWITCH_CODESIGN_BIN="$stub_dir/codesign"
+  export CC_SWITCH_PLUTIL_BIN="$stub_dir/plutil"
+  export CC_SWITCH_FILE_BIN="$stub_dir/file"
   export CC_SWITCH_SECURITY_BIN="$stub_dir/security"
   export CC_SWITCH_LAUNCHCTL_BIN="$stub_dir/launchctl"
   export CC_SWITCH_OSASCRIPT_BIN="$stub_dir/osascript"
@@ -852,7 +1004,7 @@ create_transaction_state() {
     "$user_home/.cc-switch" \
     "$user_home/.local/share/cc-switch-modelhub" \
     "$applications_dir/CC Switch.app/Contents/MacOS" \
-    "$applications_dir/ChatGPT.app/Contents/Resources"
+    "$applications_dir"
   printf '%s\n' \
     'approval_policy = "on-request"' \
     '[plugins."browser@openai-bundled"]' \
@@ -868,8 +1020,7 @@ create_transaction_state() {
     '}' \
     >"$user_home/.cc-switch/settings.json"
   printf 'old-app\n' >"$applications_dir/CC Switch.app/Contents/MacOS/cc-switch"
-  printf '%s\n' '#!/bin/bash' 'exit 0' >"$applications_dir/ChatGPT.app/Contents/Resources/codex"
-  chmod +x "$applications_dir/ChatGPT.app/Contents/Resources/codex"
+  create_chatgpt_app_fixture "$applications_dir/ChatGPT.app"
   printf '%s\n' '#!/bin/bash' '# old-local-installer' 'exit 70' \
     >"$user_home/.local/share/cc-switch-modelhub/install.sh"
   chmod +x "$user_home/.local/share/cc-switch-modelhub/install.sh"
@@ -1478,6 +1629,8 @@ run_test "merge validation uses real TOML parser" test_merge_validation_uses_rea
 run_test "merge validation rejects unresolved home placeholder" test_validate_rejects_unresolved_home_placeholder
 run_test "preflight rejects unsupported platforms" test_preflight_rejects_unsupported_platforms
 run_test "preflight validates ChatGPT Codex Team ID" test_preflight_validates_chatgpt_codex_team_id
+run_test "validates existing ChatGPT" test_validates_existing_chatgpt_app
+run_test "blocks invalid existing ChatGPT" test_blocks_invalid_existing_chatgpt_without_mutation
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive

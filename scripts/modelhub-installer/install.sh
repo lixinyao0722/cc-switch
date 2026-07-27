@@ -13,6 +13,9 @@ readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
+readonly CHATGPT_BUNDLE_ID='com.openai.codex'
+readonly CHATGPT_DOWNLOAD_PAGE='https://openai.com/chatgpt/download/'
+readonly CHATGPT_DMG_URL='https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg'
 readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
 readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
 readonly KEYCHAIN_SERVICE='com.ccswitch.modelhub.ak'
@@ -21,6 +24,7 @@ readonly LAUNCH_AGENT_LABEL='com.ccswitch.modelhub-env'
 INSTALL_USER_HOME=''
 INSTALL_APPLICATIONS_DIR=''
 CC_SWITCH_APP_PATH=''
+CHATGPT_APP_PATH=''
 CHATGPT_CODEX_PATH=''
 CODEX_CONFIG_PATH=''
 MODEL_CATALOG_PATH=''
@@ -104,6 +108,99 @@ validate_chatgpt_codex() {
     die "unexpected ChatGPT Codex Team ID"
     return 1
   fi
+}
+
+validate_chatgpt_app() {
+  local app_path="$1"
+  local expected_team_id="$2"
+  local expected_bundle_id="$3"
+  local plutil_bin="${CC_SWITCH_PLUTIL_BIN:-/usr/bin/plutil}"
+  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local file_bin="${CC_SWITCH_FILE_BIN:-/usr/bin/file}"
+  local info_plist="$app_path/Contents/Info.plist"
+  local bundle_id
+  local executable_name
+  local executable_path
+  local details
+  local team_id
+  local file_details
+
+  if [[ ! -d "$app_path" || ! -f "$info_plist" ]]; then
+    die "ChatGPT app bundle is missing or incomplete: $app_path"
+    return 1
+  fi
+  if [[ ! -x "$plutil_bin" ]]; then
+    die "plutil command not found: $plutil_bin"
+    return 1
+  fi
+  if [[ ! -x "$codesign_bin" ]]; then
+    die "codesign command not found: $codesign_bin"
+    return 1
+  fi
+  if [[ ! -x "$file_bin" ]]; then
+    die "file command not found: $file_bin"
+    return 1
+  fi
+
+  if ! bundle_id="$("$plutil_bin" -extract CFBundleIdentifier raw -o - "$info_plist" 2>/dev/null)"; then
+    die "unable to read the ChatGPT bundle identifier"
+    return 1
+  fi
+  if [[ "$bundle_id" != "$expected_bundle_id" ]]; then
+    die "unexpected ChatGPT bundle identifier"
+    return 1
+  fi
+  if ! executable_name="$("$plutil_bin" -extract CFBundleExecutable raw -o - "$info_plist" 2>/dev/null)"; then
+    die "unable to read the ChatGPT main executable name"
+    return 1
+  fi
+  case "$executable_name" in
+    ''|*/*|.|..)
+      die "invalid ChatGPT main executable name"
+      return 1
+      ;;
+  esac
+  executable_path="$app_path/Contents/MacOS/$executable_name"
+  if [[ ! -x "$executable_path" ]]; then
+    die "ChatGPT main executable not found: $executable_path"
+    return 1
+  fi
+
+  if ! details="$("$codesign_bin" -dv --verbose=4 "$app_path" 2>&1)"; then
+    die "unable to inspect the ChatGPT app signature"
+    return 1
+  fi
+  team_id="$(printf '%s\n' "$details" | awk -F= '$1 == "TeamIdentifier" { print $2; exit }')"
+  if [[ "$team_id" != "$expected_team_id" ]]; then
+    die "unexpected ChatGPT app Team ID"
+    return 1
+  fi
+  if ! "$codesign_bin" --verify --deep --strict "$app_path" >/dev/null 2>&1; then
+    die "ChatGPT app strict signature verification failed"
+    return 1
+  fi
+  if ! file_details="$("$file_bin" "$executable_path" 2>/dev/null)"; then
+    die "unable to inspect the ChatGPT main executable architecture"
+    return 1
+  fi
+  if ! printf '%s\n' "$file_details" | grep -Eq '(^|[^[:alnum:]_])arm64([^[:alnum:]_]|$)'; then
+    die "ChatGPT main executable does not contain arm64"
+    return 1
+  fi
+
+  validate_chatgpt_codex "$app_path/Contents/Resources/codex" "$expected_team_id"
+}
+
+ensure_chatgpt_app() {
+  local app_path="$1"
+  local expected_team_id="$2"
+  local expected_bundle_id="$3"
+
+  if validate_chatgpt_app "$app_path" "$expected_team_id" "$expected_bundle_id"; then
+    return 0
+  fi
+  die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
+  return 1
 }
 
 download_release_assets() {
@@ -992,6 +1089,7 @@ configure_install_paths() {
   fi
 
   CC_SWITCH_APP_PATH="$INSTALL_APPLICATIONS_DIR/CC Switch.app"
+  CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
   CHATGPT_CODEX_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
@@ -1944,7 +2042,7 @@ perform_install() {
   architecture="${CC_SWITCH_INSTALLER_TEST_ARCH:-$(/usr/bin/uname -m)}"
   major_version="${CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR:-$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)}"
   validate_platform "$operating_system" "$architecture" "$major_version" || return 1
-  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || return 1
+  ensure_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" || return 1
 
   if ! stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-modelhub-install.XXXXXX")"; then
     die "failed to create the installer staging directory"
