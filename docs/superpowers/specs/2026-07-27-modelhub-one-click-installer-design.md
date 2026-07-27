@@ -19,14 +19,14 @@
 - 增加 ModelHub Codex Provider 和本地代理配置，不删除其他 Provider 或个人 Codex 设置。
 - 安装时根据当前用户的真实主目录解析所有本地路径。
 - 所有非敏感文件安装完成后，通过 macOS Keychain 提示用户输入 `MODELHUB_AK`。
-- 保留由 ChatGPT 管理的 `~/.codex/auth.json`，并使用已安装 ChatGPT App 中带 OpenAI 签名的 Codex 二进制。
+- 保留由 ChatGPT 管理的 `~/.codex/auth.json`；已有 ChatGPT App 时验证后复用，缺失时从 OpenAI 官方 DMG 安装，再使用其中带 OpenAI 签名的 Codex 二进制。
 - 支持失败自动恢复和显式执行 `--rollback latest`。
 - 公开产物中不包含任何用户凭据、请求历史或用户本地路径。
 
 ## 非目标
 
 - 支持 Intel Mac、Windows 或 Linux。
-- 安装或签名 ChatGPT App。
+- 覆盖、修复或重新签名已存在但校验不通过的 ChatGPT App。
 - 分发私有 Codex 回滚二进制。
 - 分发或恢复 Codex OAuth token、bearer token、`auth.json`、CC Switch 请求历史或完整用户数据库。
 - 替换无关的 CC Switch Provider、插件、项目信任、桌面偏好或 Codex 配置章节。
@@ -43,6 +43,8 @@
 
 新增一个正式 GitHub Release，tag 为 `modelhub-installer-20260727`，不标记为 Pre-release。它将成为仓库中第一个可由 `/releases/latest` 解析的 Release。以后发布新版安装器时，无需修改用户侧安装命令。
 
+针对新机权限与 ChatGPT 缺失场景发布 follow-up 正式 Release `modelhub-installer-20260727-r2`。它成为新的 `/releases/latest` 目标；`modelhub-installer-20260727` 和更早的两个 Pre-release 全部保留不变。
+
 新 Release 只包含以下公开资产：
 
 - `install.sh`
@@ -50,7 +52,7 @@
 - `modelhub-installer-resources.tar.gz`
 - `SHA256SUMS.txt`
 
-`install.sh` 内部固定不可变 tag `modelhub-installer-20260727`。用户虽然通过 `/releases/latest` 获取脚本，但该脚本会从自身对应的精确 tag 下载其余资产，避免安装过程中因新版 Release 发布而混用不同版本的文件。
+R2 的 `install.sh` 内部固定不可变 tag `modelhub-installer-20260727-r2`。用户虽然通过 `/releases/latest` 获取脚本，但该脚本会从自身对应的精确 tag 下载其余资产，避免安装过程中因新版 Release 发布而混用不同版本的文件。
 
 通过 stdin 执行的脚本还会从该精确 tag 重新下载一份 `install.sh`，与 App ZIP 和资源包一起使用 `SHA256SUMS.txt` 校验；校验后的副本用于本机回滚入口。
 
@@ -72,20 +74,49 @@ Release 打包器不以旧私密配置包为输入，而是只打包上述受版
 
 ## 前置检查与下载流程
 
-安装器使用 `set -euo pipefail`，并禁用命令跟踪。它只依赖 macOS 系统工具，包括 `/bin/bash`、`curl`、`shasum`、`tar`、`ditto`、`codesign`、`plutil`、`sqlite3`、`security`、`launchctl`、`osascript`、`open`、`mktemp` 和 `sudo`；不要求安装 Homebrew、Node.js、Python、`jq` 或 `rg`。
+安装器使用 `set -euo pipefail`，并禁用命令跟踪。它只依赖 macOS 系统工具，包括 `/bin/bash`、`curl`、`shasum`、`tar`、`ditto`、`codesign`、`plutil`、`sqlite3`、`security`、`launchctl`、`osascript`、`open`、`mktemp`、`hdiutil`、`file` 和 `sudo`；不要求安装 Homebrew、Node.js、Python、`jq` 或 `rg`。
 
 修改系统前，安装器依次执行：
 
-1. 确认 `uname -s` 为 `Darwin`、`uname -m` 为 `arm64`，且 macOS 版本不低于 12。
-2. 确认 `/Applications/ChatGPT.app/Contents/Resources/codex` 存在，且 Team ID 为 `2DC432GLL2`。
+1. 拒绝以 root 身份执行整个安装器；用户必须运行普通的 `curl | bash -s` 命令，由安装器在必要步骤自行请求管理员权限。
+2. 确认 `uname -s` 为 `Darwin`、`uname -m` 为 `arm64`，且 macOS 版本不低于 12。
 3. 使用 `mktemp -d` 创建私有暂存目录，并注册清理 trap。
-4. 从不可变 Release tag 下载 App ZIP、资源包和校验文件。
-5. 解压前校验精确文件名与 SHA-256。
-6. 拒绝资源包中的绝对路径、`..` 路径穿越、符号链接、非预期文件和非预期顶层目录。
-7. 校验所有受管模板，并确认除声明的运行时占位符外不存在未解析占位符。
-8. 仅在 `/Applications` 不可写时通过 `sudo -v` 获取管理员权限。
+4. 检查 `/Applications` 以及已存在的 `/Applications/CC Switch.app`。父目录不可写，或已有 App 及其受保护内容不能由当前用户替换时，先执行 `sudo -v`；后续 CC Switch 删除、安装、隔离属性清理和回滚恢复统一通过权限包装器执行。
+5. 验证或安装官方 ChatGPT App，并确认其内置 Codex 可用，详见下一节。
+6. 从不可变 Release tag 下载 App ZIP、资源包和校验文件。
+7. 解压前校验精确文件名与 SHA-256。
+8. 拒绝资源包中的绝对路径、`..` 路径穿越、符号链接、非预期文件和非预期顶层目录。
+9. 校验所有受管模板，并确认除声明的运行时占位符外不存在未解析占位符。
 
-所有检查通过前，不修改应用、配置、Keychain 或 launchd 状态。
+除“ChatGPT 缺失时安装官方 App”这个独立 bootstrap 外，所有检查通过前不修改 CC Switch、Codex 配置、Keychain 或 launchd 状态。
+
+## ChatGPT 官方应用 bootstrap
+
+OpenAI 官方下载页为 [https://openai.com/chatgpt/download/](https://openai.com/chatgpt/download/)，当前新版 macOS 应用链接为：
+
+```text
+https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+```
+
+该链接与页面中单独列出的 ChatGPT Classic 不同；安装器只使用上面的新版 ChatGPT/Codex 应用。
+
+如果 `/Applications/ChatGPT.app` 已存在，安装器不下载、不覆盖，只执行以下校验；任一失败都阻断后续流程，并提示用户从 OpenAI 官方页面重新安装：
+
+- `CFBundleIdentifier` 为 `com.openai.codex`；
+- App Team ID 为 `2DC432GLL2`；
+- 主可执行文件包含 `arm64`；
+- `codesign --verify --deep --strict` 通过；
+- `/Applications/ChatGPT.app/Contents/Resources/codex` 存在、可执行，且 Team ID 为 `2DC432GLL2`。
+
+如果 ChatGPT App 缺失，安装器执行：
+
+1. 仅从 `persistent.oaistatic.com` 的固定 HTTPS URL 下载 DMG，使用有限次数重试；
+2. 通过 `hdiutil attach -nobrowse -readonly` 挂载到私有临时目录；
+3. 对 DMG 内的 `ChatGPT.app` 执行上述完整 Bundle ID、Team ID、arm64、严格签名和内置 Codex 校验；
+4. 先复制到 `/Applications` 下同卷的私有临时 App 路径，再次校验后原子改名为 `/Applications/ChatGPT.app`，避免安装中断留下半个目标 App；
+5. 无论成功或失败都卸载 DMG 并清理临时文件。
+
+ChatGPT bootstrap 位于 CC Switch 事务之前。若 ChatGPT 安装成功，但后续 CC Switch 安装失败或用户执行 `--rollback latest`，新安装的官方 ChatGPT App 都会保留，不进入 CC Switch 的备份 manifest。安装器不读取 ChatGPT 登录状态；安装结束后用户需要自行打开 ChatGPT 并完成登录。
 
 ## 备份与事务边界
 
@@ -123,7 +154,7 @@ CC Switch 数据库使用系统 `sqlite3 .backup` 生成一致逻辑快照；恢
 
 ### CC Switch App
 
-在暂存目录中解压已校验的 App ZIP，并执行 `codesign --verify --deep --strict`。随后使用 `ditto` 替换现有 App。安装器不修改或重新签名 ChatGPT App 及其内置 Codex 二进制。
+在暂存目录中解压已校验的 App ZIP，并执行 `codesign --verify --deep --strict`。随后使用权限包装器替换现有 App。安装器不修改或重新签名 ChatGPT App 及其内置 Codex 二进制。
 
 ### Codex 配置
 
@@ -196,6 +227,8 @@ security add-generic-password \
 - 重复运行同一安装器会创建新备份并更新同一受管 Provider，不会重复新增 Provider。
 - 既有非受管 Codex 设置和 CC Switch 数据行保持不变。
 - 下载使用有限次数重试，SHA 或归档校验失败时立即终止。
+- 已存在但签名、Bundle ID、架构或内置 Codex 不符合约束的 ChatGPT App 会阻断安装，不自动覆盖。
+- 本次新安装的官方 ChatGPT App 不参与 CC Switch 失败回滚或显式回滚。
 - Keychain 输入为空或取消时，安装失败并触发自动回滚。
 - 健康检查设置有限超时时间，且只输出不含敏感信息的诊断内容。
 - 安装器不打印 AK、OAuth 信息、完整 Provider JSON、完整 Codex 配置或数据库内容。
@@ -207,7 +240,11 @@ security add-generic-password \
 
 自动化用例覆盖：
 
-- 拒绝非 macOS、非 arm64、不支持的 macOS 版本和错误的 ChatGPT Team ID。
+- 拒绝 root 运行、非 macOS、非 arm64 和不支持的 macOS 版本。
+- `/Applications` 可写但已有 root-owned CC Switch App 不可写时，仍会预先获取 sudo，并让删除、安装和失败回滚走同一权限包装器。
+- ChatGPT 已存在且有效时不下载；已存在但 Bundle ID、Team ID、架构、严格签名或内置 Codex 不符时阻断。
+- ChatGPT 缺失时从固定 OpenAI 官方 DMG 下载、挂载、验签、同卷临时安装并原子改名。
+- ChatGPT 下载失败、DMG 挂载失败或验签失败时不留下目标 App；ChatGPT 安装成功后即使 CC Switch 后续失败也会保留。
 - 在首次修改前拒绝 SHA 不匹配、归档路径穿越、符号链接、非预期资产或未解析占位符。
 - 不存在 CC Switch 数据库或 Codex 配置时的首次安装。
 - 增量合并既有 Codex 配置并保留无关章节。
@@ -236,7 +273,7 @@ Release 验证还包括：
 
 1. 在 `feat/modelhub-one-click-installer` 提交安装器、模板、测试、打包逻辑和文档。
 2. 推送分支并创建以 `main` 为目标的草稿 GitHub PR。
-3. 创建 tag 为 `modelhub-installer-20260727`、指向已验证功能分支提交的草稿 GitHub Release。
+3. R2 follow-up 创建 tag 为 `modelhub-installer-20260727-r2`、指向已验证功能分支提交的草稿 GitHub Release；旧 Release 保留。
 4. 上传四个声明的资产，并对比 GitHub 资产摘要与本地 SHA-256。
 5. 发布为正式 Release，使 `/releases/latest/download/install.sh` 可以解析。
 6. 下载并验证已发布资产，执行最终沙箱冒烟测试。
@@ -247,8 +284,8 @@ Release 说明需要注明：App 只支持 Apple Silicon，使用 ad-hoc 签名�
 
 将文档 `LPm1dcaQuogMRFx5UPMlf5KPg6P` 精简为四个章节：
 
-1. 前置条件：Apple Silicon Mac、已安装并登录 ChatGPT App，以及能够获取管理员提供的 ModelHub AK。
-2. 一键安装：无版本号 `curl | bash` 命令和预期出现的 Keychain 输入提示。
+1. 前置条件：Apple Silicon Mac，以及能够获取管理员提供的 ModelHub AK；ChatGPT 缺失时安装器会从 OpenAI 官方来源自动安装。
+2. 一键安装：无版本号 `curl | bash` 命令、明确禁止给管道添加 sudo，以及预期出现的管理员权限/Keychain 输入提示。
 3. 验收：CC Switch 健康检查、普通 ModelHub 请求、fork/“接续自任务”、Computer Use、Browser 和 Chrome。
 4. 回滚：本地 `--rollback latest` 命令，以及必要时重新打开原 App。
 
