@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
+PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
 if [[ "${1:-}" == "--" ]]; then
@@ -870,6 +871,124 @@ test_transaction_corrupt_backup_fails_before_restore_writes() {
   assert_equals "$after" "$before"
 }
 
+create_packager_source() {
+  local source_dir="$1"
+  mkdir -p "$source_dir/assets" "$source_dir/templates"
+  cp "$INSTALLER" "$source_dir/install.sh"
+  cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
+  cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
+  cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
+    "$source_dir/templates/com.ccswitch.modelhub-env.plist"
+  cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
+    "$source_dir/templates/load-modelhub-env.sh"
+  printf '{"models":{}}\n' >"$source_dir/assets/models-modelhub-1m.json"
+}
+
+run_packager() {
+  local source_dir="$1"
+  local app_zip="$2"
+  local output_dir="$3"
+  CC_SWITCH_PACKAGE_SOURCE_DIR="$source_dir" \
+    /bin/bash "$PACKAGER" --app-zip "$app_zip" --output-dir "$output_dir"
+}
+
+test_package_builds_exact_allowlisted_release_assets() {
+  local case_dir="$TEST_TMP/package-success"
+  local source_dir="$case_dir/source"
+  local output_dir="$case_dir/output"
+  local actual_files
+  local expected_files
+  mkdir -p "$case_dir"
+  create_packager_source "$source_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+
+  actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
+  expected_files="$(printf '%s\n' \
+    'CC-Switch-ModelHub-3.18.0-arm64.app.zip' \
+    'SHA256SUMS.txt' \
+    'install.sh' \
+    'modelhub-installer-resources.tar.gz' \
+    | LC_ALL=C sort)"
+  assert_equals "$actual_files" "$expected_files"
+  verify_release_assets "$output_dir"
+  validate_resource_archive "$output_dir/modelhub-installer-resources.tar.gz"
+  assert_equals "$(awk 'NF { count += 1 } END { print count + 0 }' "$output_dir/SHA256SUMS.txt")" '3'
+}
+
+test_package_rejects_sensitive_content() {
+  local case_dir="$TEST_TMP/package-sensitive-content"
+  local source_dir
+  local output_dir
+  local index=0
+  local secret
+  local secrets=(
+    '/Users/shopee/private/path'
+    'access_token = "secret"'
+    'refresh_token = "secret"'
+    'id_token = "secret"'
+    'experimental_bearer_token = "secret"'
+    'OPENAI_API_KEY = "secret"'
+    'MODELHUB_AK = "real-value"'
+  )
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  for secret in "${secrets[@]}"; do
+    index=$((index + 1))
+    source_dir="$case_dir/source-$index"
+    output_dir="$case_dir/output-$index"
+    create_packager_source "$source_dir"
+    printf '\n%s\n' "$secret" >>"$source_dir/templates/modelhub-provider.toml"
+
+    assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+    [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
+      || fail "sensitive package case $index left a publishable tarball"
+  done
+}
+
+test_package_rejects_sensitive_file_types() {
+  local case_dir="$TEST_TMP/package-sensitive-files"
+  local source_dir="$case_dir/source-auth"
+  local output_dir="$case_dir/output-auth"
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  create_packager_source "$source_dir"
+  printf '{}\n' >"$source_dir/auth.json"
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+
+  source_dir="$case_dir/source-db"
+  output_dir="$case_dir/output-db"
+  create_packager_source "$source_dir"
+  sqlite3 "$source_dir/cc-switch.db" 'create table secret(value text);'
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+}
+
+test_package_rejects_output_inside_source_tree() {
+  local case_dir="$TEST_TMP/package-output-scope"
+  local source_dir="$case_dir/source"
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  create_packager_source "$source_dir"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$source_dir"
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$source_dir/nested-output"
+  [[ ! -e "$source_dir/modelhub-installer-resources.tar.gz" ]] || fail 'unsafe package run wrote into source tree'
+  [[ ! -e "$source_dir/nested-output" ]] || fail 'unsafe package run created nested output'
+}
+
+test_package_rejects_source_symlinks() {
+  local case_dir="$TEST_TMP/package-source-symlink"
+  local source_dir="$case_dir/source"
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  create_packager_source "$source_dir"
+  ln -s /tmp "$source_dir/unexpected-link"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$case_dir/output"
+}
+
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -897,6 +1016,11 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
+run_test "package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "package rejects sensitive content" test_package_rejects_sensitive_content
+run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
+run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
+run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2
