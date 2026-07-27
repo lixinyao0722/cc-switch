@@ -5,6 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
+META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -59,6 +60,15 @@ assert_equals() {
   local actual="$1"
   local expected="$2"
   [[ "$actual" == "$expected" ]] || fail "expected '$expected', got '$actual'"
+}
+
+assert_sql() {
+  local database="$1"
+  local query="$2"
+  local expected="$3"
+  local actual
+  actual="$(sqlite3 "$database" "$query")"
+  assert_equals "$actual" "$expected"
 }
 
 assert_command_fails() {
@@ -361,6 +371,201 @@ test_preflight_downloads_from_immutable_release_tag() {
   assert_contains "$output_dir/SHA256SUMS.txt" 'checksums'
 }
 
+create_provider_database() {
+  local database="$1"
+  sqlite3 "$database" <<'SQL'
+CREATE TABLE providers (
+  id TEXT NOT NULL,
+  app_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  settings_config TEXT NOT NULL,
+  website_url TEXT,
+  category TEXT,
+  created_at INTEGER,
+  sort_index INTEGER,
+  notes TEXT,
+  icon TEXT,
+  icon_color TEXT,
+  meta TEXT NOT NULL DEFAULT '{}',
+  is_current BOOLEAN NOT NULL DEFAULT 0,
+  in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+  cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+  limit_daily_usd TEXT,
+  limit_monthly_usd TEXT,
+  provider_type TEXT,
+  PRIMARY KEY (id, app_type)
+);
+CREATE TABLE proxy_config (
+  app_type TEXT PRIMARY KEY,
+  proxy_enabled INTEGER NOT NULL DEFAULT 0,
+  listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+  listen_port INTEGER NOT NULL DEFAULT 15721,
+  enable_logging INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 3,
+  streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+  streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+  non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+  circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+  circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+  circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+  circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+  circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+  default_cost_multiplier TEXT NOT NULL DEFAULT '1',
+  pricing_model_source TEXT NOT NULL DEFAULT 'response',
+  live_takeover_active INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE sentinel (value TEXT NOT NULL);
+INSERT INTO sentinel(value) VALUES ('keep-me');
+INSERT INTO providers (
+  id, app_type, name, settings_config, category, meta, is_current
+) VALUES (
+  'existing-provider', 'codex', 'Existing Provider',
+  '{"auth":{"OPENAI_API_KEY":"keep-existing"},"config":"model = \"keep\""}',
+  'third_party', '{}', 1
+);
+SQL
+}
+
+create_merged_config_fixture() {
+  local output="$1"
+  local user_home="$2"
+  local empty_source="$TEST_TMP/empty-config.toml"
+  : >"$empty_source"
+  merge_codex_config "$empty_source" "$TEMPLATE" "$output" "$user_home"
+}
+
+test_database_merge_is_idempotent_and_preserves_unrelated_rows() {
+  local case_dir="$TEST_TMP/database-merge"
+  local database="$case_dir/cc-switch.db"
+  local config="$case_dir/config.toml"
+  local provider_id
+  mkdir -p "$case_dir"
+  create_provider_database "$database"
+  create_merged_config_fixture "$config" '/Users/Test User'
+
+  provider_id="$(merge_provider_database "$database" "$config" "$META_TEMPLATE")"
+  assert_equals "$provider_id" 'bytedance-modelhub-official-cli'
+  provider_id="$(merge_provider_database "$database" "$config" "$META_TEMPLATE")"
+  assert_equals "$provider_id" 'bytedance-modelhub-official-cli'
+
+  assert_sql "$database" "select count(*) from providers where app_type='codex' and name='Bytedance ModelHub - 官方CLI'" '1'
+  assert_sql "$database" "select count(*) from providers where id='existing-provider'" '1'
+  assert_sql "$database" "select is_current from providers where id='existing-provider' and app_type='codex'" '0'
+  assert_sql "$database" "select count(*) from sentinel where value='keep-me'" '1'
+  assert_sql "$database" "select json_type(settings_config, '$.auth') from providers where id='bytedance-modelhub-official-cli'" 'object'
+  assert_sql "$database" "select count(*) from providers, json_each(settings_config, '$.auth') where providers.id='bytedance-modelhub-official-cli'" '0'
+  assert_sql "$database" "select json_extract(meta, '$.localProxyRequestOverrides.codexSessionHeaderAdapter') from providers where id='bytedance-modelhub-official-cli'" 'modelhub'
+  assert_sql "$database" "select instr(settings_config, 'access_token') + instr(settings_config, 'refresh_token') + instr(settings_config, 'experimental_bearer_token') from providers where id='bytedance-modelhub-official-cli'" '0'
+  assert_sql "$database" "select proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port from proxy_config where app_type='codex'" '1:1:0:127.0.0.1:15721'
+}
+
+test_database_merge_reuses_existing_modelhub_provider_id() {
+  local case_dir="$TEST_TMP/database-reuse"
+  local database="$case_dir/cc-switch.db"
+  local config="$case_dir/config.toml"
+  local provider_id
+  mkdir -p "$case_dir"
+  create_provider_database "$database"
+  create_merged_config_fixture "$config" '/Users/Test User'
+  sqlite3 "$database" <<'SQL'
+INSERT INTO providers (
+  id, app_type, name, settings_config, category, meta, is_current
+) VALUES (
+  'legacy-modelhub-id', 'codex', 'Bytedance ModelHub - 官方CLI',
+  '{"auth":{"OPENAI_API_KEY":"remove-me"},"config":"stale"}',
+  'third_party', '{}', 0
+);
+SQL
+
+  provider_id="$(merge_provider_database "$database" "$config" "$META_TEMPLATE")"
+
+  assert_equals "$provider_id" 'legacy-modelhub-id'
+  assert_sql "$database" "select count(*) from providers where id='bytedance-modelhub-official-cli'" '0'
+  assert_sql "$database" "select is_current from providers where id='legacy-modelhub-id'" '1'
+  assert_sql "$database" "select count(*) from providers, json_each(settings_config, '$.auth') where providers.id='legacy-modelhub-id'" '0'
+}
+
+test_database_schema_initializes_missing_database_with_hidden_app() {
+  local case_dir="$TEST_TMP/database-schema-init"
+  local database="$case_dir/home/.cc-switch/cc-switch.db"
+  local schema_source="$case_dir/schema-source.db"
+  local app_path="$case_dir/Applications/CC Switch.app"
+  local open_stub="$case_dir/open"
+  local osascript_stub="$case_dir/osascript"
+  mkdir -p "$(dirname "$database")" "$app_path"
+  create_provider_database "$schema_source"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'cp "$FAKE_SCHEMA_SOURCE" "$FAKE_DB_PATH"' \
+    >"$open_stub"
+  printf '%s\n' '#!/bin/bash' 'exit 0' >"$osascript_stub"
+  chmod +x "$open_stub" "$osascript_stub"
+
+  FAKE_SCHEMA_SOURCE="$schema_source" \
+    FAKE_DB_PATH="$database" \
+    CC_SWITCH_OPEN_BIN="$open_stub" \
+    CC_SWITCH_OSASCRIPT_BIN="$osascript_stub" \
+    ensure_cc_switch_schema "$database" "$app_path"
+
+  assert_sql "$database" "select count(*) from pragma_table_info('providers') where name='meta'" '1'
+  assert_sql "$database" "select count(*) from pragma_table_info('proxy_config') where name='auto_failover_enabled'" '1'
+}
+
+test_settings_merge_changes_only_managed_keys() {
+  local case_dir="$TEST_TMP/settings-merge"
+  local settings="$case_dir/settings.json"
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    '{' \
+    '  "language": "zh",' \
+    '  "showInTray": false,' \
+    '  "currentProviderCodex": "old-provider",' \
+    '  "enableLocalProxy": false,' \
+    '  "preserveCodexOfficialAuthOnSwitch": false' \
+    '}' \
+    >"$settings"
+
+  update_settings_json "$settings" 'bytedance-modelhub-official-cli'
+
+  assert_equals "$(plutil -extract language raw -o - "$settings")" 'zh'
+  assert_equals "$(plutil -extract showInTray raw -o - "$settings")" 'false'
+  assert_equals "$(plutil -extract currentProviderCodex raw -o - "$settings")" 'bytedance-modelhub-official-cli'
+  assert_equals "$(plutil -extract enableLocalProxy raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
+}
+
+test_settings_merge_rejects_invalid_json_without_overwrite() {
+  local case_dir="$TEST_TMP/settings-invalid"
+  local settings="$case_dir/settings.json"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  printf '{invalid json\n' >"$settings"
+  before="$(shasum -a 256 "$settings" | awk '{print $1}')"
+
+  assert_command_fails update_settings_json "$settings" 'bytedance-modelhub-official-cli'
+
+  after="$(shasum -a 256 "$settings" | awk '{print $1}')"
+  assert_equals "$after" "$before"
+}
+
+test_settings_merge_creates_missing_file() {
+  local case_dir="$TEST_TMP/settings-new"
+  local settings="$case_dir/settings.json"
+  mkdir -p "$case_dir"
+
+  update_settings_json "$settings" 'bytedance-modelhub-official-cli'
+
+  assert_equals "$(plutil -extract currentProviderCodex raw -o - "$settings")" 'bytedance-modelhub-official-cli'
+  assert_equals "$(plutil -extract enableLocalProxy raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
+}
+
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -375,6 +580,12 @@ run_test "preflight rejects archive symlink and extra file" test_preflight_rejec
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
 run_test "preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
+run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
+run_test "database schema initializes missing database with hidden app" test_database_schema_initializes_missing_database_with_hidden_app
+run_test "settings merge changes only managed keys" test_settings_merge_changes_only_managed_keys
+run_test "settings merge rejects invalid JSON without overwrite" test_settings_merge_rejects_invalid_json_without_overwrite
+run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2

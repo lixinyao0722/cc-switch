@@ -10,6 +10,8 @@ readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
+readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
+readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
 
 die() {
   echo "error: $*" >&2
@@ -227,6 +229,277 @@ validate_resource_archive() {
   fi
 
   rm -rf "$work_dir"
+}
+
+validate_provider_id() {
+  local provider_id="$1"
+  case "$provider_id" in
+    ""|*[!A-Za-z0-9._-]*)
+      die "unsafe provider ID: $provider_id"
+      return 1
+      ;;
+  esac
+}
+
+sql_quote() {
+  local value="$1"
+  local escaped
+
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      die "SQL value contains a newline"
+      return 1
+      ;;
+  esac
+  escaped="$(printf '%s' "$value" | sed "s/'/''/g")"
+  printf "'%s'" "$escaped"
+}
+
+cc_switch_schema_ready() {
+  local database="$1"
+  local sqlite_bin="${CC_SWITCH_SQLITE3_BIN:-/usr/bin/sqlite3}"
+  local table_name
+  local column_name
+  local count
+
+  [[ -f "$database" && -x "$sqlite_bin" ]] || return 1
+
+  while IFS=: read -r table_name column_name; do
+    if ! count="$(
+      "$sqlite_bin" "$database" \
+        "SELECT count(*) FROM pragma_table_info('$table_name') WHERE name='$column_name';" \
+        2>/dev/null
+    )"; then
+      return 1
+    fi
+    [[ "$count" == "1" ]] || return 1
+  done <<'EOF'
+providers:id
+providers:app_type
+providers:name
+providers:settings_config
+providers:website_url
+providers:category
+providers:notes
+providers:icon
+providers:meta
+providers:is_current
+providers:in_failover_queue
+proxy_config:app_type
+proxy_config:proxy_enabled
+proxy_config:enabled
+proxy_config:auto_failover_enabled
+proxy_config:listen_address
+proxy_config:listen_port
+proxy_config:enable_logging
+proxy_config:updated_at
+EOF
+}
+
+ensure_cc_switch_schema() {
+  local database="$1"
+  local app_path="$2"
+  local open_bin="${CC_SWITCH_OPEN_BIN:-/usr/bin/open}"
+  local osascript_bin="${CC_SWITCH_OSASCRIPT_BIN:-/usr/bin/osascript}"
+  local sleep_bin="${CC_SWITCH_SLEEP_BIN:-/bin/sleep}"
+  local attempt
+
+  if cc_switch_schema_ready "$database"; then
+    return 0
+  fi
+  if [[ ! -d "$app_path" ]]; then
+    die "CC Switch app is unavailable for database initialization: $app_path"
+    return 1
+  fi
+  if [[ ! -x "$open_bin" || ! -x "$osascript_bin" || ! -x "$sleep_bin" ]]; then
+    die "required application initialization command is unavailable"
+    return 1
+  fi
+
+  if ! "$open_bin" -gj "$app_path"; then
+    die "failed to start CC Switch for database initialization"
+    return 1
+  fi
+
+  attempt=1
+  while [[ "$attempt" -le 30 ]]; do
+    if cc_switch_schema_ready "$database"; then
+      "$osascript_bin" -e 'quit app "CC Switch"' >/dev/null 2>&1 || true
+      return 0
+    fi
+    "$sleep_bin" 1
+    attempt=$((attempt + 1))
+  done
+
+  "$osascript_bin" -e 'quit app "CC Switch"' >/dev/null 2>&1 || true
+  die "CC Switch database schema was not initialized within 30 seconds"
+  return 1
+}
+
+merge_provider_database() {
+  local database="$1"
+  local config_path="$2"
+  local meta_path="$3"
+  local sqlite_bin="${CC_SWITCH_SQLITE3_BIN:-/usr/bin/sqlite3}"
+  local provider_id
+  local database_sql
+  local config_sql
+  local meta_sql
+  local provider_id_sql
+  local meta_valid
+
+  if ! cc_switch_schema_ready "$database"; then
+    die "CC Switch database schema is not ready: $database"
+    return 1
+  fi
+  if [[ ! -f "$config_path" || ! -f "$meta_path" ]]; then
+    die "ModelHub provider config or metadata is missing"
+    return 1
+  fi
+
+  meta_sql="$(sql_quote "$meta_path")"
+  if ! meta_valid="$(
+    "$sqlite_bin" :memory: \
+      "SELECT json_valid(CAST(readfile($meta_sql) AS TEXT));" \
+      2>/dev/null
+  )"; then
+    die "unable to validate ModelHub provider metadata"
+    return 1
+  fi
+  if [[ "$meta_valid" != "1" ]]; then
+    die "ModelHub provider metadata is not valid JSON"
+    return 1
+  fi
+
+  if ! provider_id="$(
+    "$sqlite_bin" "$database" \
+      "SELECT id FROM providers WHERE app_type='codex' AND name='$MODELHUB_PROVIDER_NAME' ORDER BY is_current DESC, created_at DESC LIMIT 1;"
+  )"; then
+    die "unable to query existing ModelHub provider"
+    return 1
+  fi
+  provider_id="${provider_id:-$MODELHUB_PROVIDER_ID}"
+  validate_provider_id "$provider_id" || return 1
+
+  database_sql="$(sql_quote "$database")"
+  config_sql="$(sql_quote "$config_path")"
+  provider_id_sql="$(sql_quote "$provider_id")"
+
+  if ! "$sqlite_bin" "$database" <<SQL
+BEGIN IMMEDIATE;
+UPDATE providers SET is_current = 0 WHERE app_type = 'codex';
+INSERT INTO providers (
+  id, app_type, name, settings_config, website_url, category,
+  notes, icon, meta, is_current, in_failover_queue
+) VALUES (
+  $provider_id_sql,
+  'codex',
+  '$MODELHUB_PROVIDER_NAME',
+  json_object('auth', json('{}'), 'config', CAST(readfile($config_sql) AS TEXT)),
+  'https://aidp.bytedance.net',
+  'third_party',
+  'ModelHub Responses via official ChatGPT Codex CLI',
+  'openai',
+  CAST(readfile($meta_sql) AS TEXT),
+  1,
+  0
+)
+ON CONFLICT(id, app_type) DO UPDATE SET
+  name = excluded.name,
+  settings_config = excluded.settings_config,
+  website_url = excluded.website_url,
+  category = excluded.category,
+  notes = excluded.notes,
+  icon = excluded.icon,
+  meta = excluded.meta,
+  is_current = 1,
+  in_failover_queue = 0;
+
+INSERT INTO proxy_config (
+  app_type, proxy_enabled, listen_address, listen_port,
+  enable_logging, enabled, auto_failover_enabled
+) VALUES (
+  'codex', 1, '127.0.0.1', 15721, 1, 1, 0
+)
+ON CONFLICT(app_type) DO UPDATE SET
+  proxy_enabled = 1,
+  listen_address = '127.0.0.1',
+  listen_port = 15721,
+  enable_logging = 1,
+  enabled = 1,
+  auto_failover_enabled = 0,
+  updated_at = datetime('now');
+COMMIT;
+SQL
+  then
+    die "failed to merge ModelHub provider into CC Switch database: $database_sql"
+    return 1
+  fi
+
+  printf '%s' "$provider_id"
+}
+
+plutil_set_value() {
+  local plutil_bin="$1"
+  local file="$2"
+  local key="$3"
+  local type_flag="$4"
+  local value="$5"
+
+  if "$plutil_bin" -replace "$key" "$type_flag" "$value" "$file" >/dev/null 2>&1; then
+    return 0
+  fi
+  "$plutil_bin" -insert "$key" "$type_flag" "$value" "$file" >/dev/null
+}
+
+update_settings_json() {
+  local settings_path="$1"
+  local provider_id="$2"
+  local plutil_bin="${CC_SWITCH_PLUTIL_BIN:-/usr/bin/plutil}"
+  local work_dir
+  local work_file
+
+  validate_provider_id "$provider_id" || return 1
+  if [[ ! -x "$plutil_bin" ]]; then
+    die "plutil command not found: $plutil_bin"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$settings_path")"
+  work_dir="$(mktemp -d "$(dirname "$settings_path")/.cc-switch-settings.XXXXXX")"
+  work_file="$work_dir/settings.json"
+  if [[ -f "$settings_path" ]]; then
+    if ! "$plutil_bin" -convert xml1 -o /dev/null "$settings_path" >/dev/null 2>&1; then
+      rm -rf "$work_dir"
+      die "CC Switch settings file is not valid JSON: $settings_path"
+      return 1
+    fi
+    cp -p "$settings_path" "$work_file"
+  else
+    printf '{\n  "currentProviderCodex": "%s",\n  "enableLocalProxy": true,\n  "preserveCodexOfficialAuthOnSwitch": true\n}\n' \
+      "$provider_id" \
+      >"$work_file"
+    if ! "$plutil_bin" -convert xml1 -o /dev/null "$work_file" >/dev/null 2>&1; then
+      rm -rf "$work_dir"
+      die "failed to create CC Switch settings"
+      return 1
+    fi
+    mv "$work_file" "$settings_path"
+    rmdir "$work_dir"
+    return 0
+  fi
+
+  if ! plutil_set_value "$plutil_bin" "$work_file" currentProviderCodex -string "$provider_id" \
+    || ! plutil_set_value "$plutil_bin" "$work_file" enableLocalProxy -bool true \
+    || ! plutil_set_value "$plutil_bin" "$work_file" preserveCodexOfficialAuthOnSwitch -bool true \
+    || ! "$plutil_bin" -convert xml1 -o /dev/null "$work_file" >/dev/null 2>&1; then
+    rm -rf "$work_dir"
+    die "failed to update CC Switch settings"
+    return 1
+  fi
+
+  mv "$work_file" "$settings_path"
+  rmdir "$work_dir"
 }
 
 toml_escape_basic_string() {
