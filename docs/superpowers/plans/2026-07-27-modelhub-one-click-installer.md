@@ -312,13 +312,12 @@ fn provider_without_stored_key_reads_active_env_key() {
         )
     }));
 
-    let auth = CodexAdapter::new()
-        .extract_auth(&provider)
-        .expect("env_key should supply bearer auth");
+    let auth = CodexAdapter::new().extract_auth(&provider);
+    std::env::remove_var(ENV_NAME);
+
+    let auth = auth.expect("env_key should supply bearer auth");
     assert_eq!(auth.api_key, "ak-from-environment");
     assert_eq!(auth.strategy, AuthStrategy::Bearer);
-
-    std::env::remove_var(ENV_NAME);
 }
 ```
 
@@ -592,7 +591,7 @@ git commit -m "feat(installer): 支持事务安装与回滚"
 
 - [ ] **Step 1: 写打包与凭据泄露失败测试**
 
-测试复制安全源目录到临时目录，运行 packager 后断言资产名精确匹配四项、tar 清单精确匹配模板和模型目录、checksum 两项均通过。然后分别注入 `/Users/shopee`、`auth.json`、`access_token`、`refresh_token`、`id_token`、`experimental_bearer_token`、`OPENAI_API_KEY` 和 SQLite 文件，断言打包失败且输出目录没有可发布 tarball。
+测试复制安全源目录到临时目录，运行 packager 后断言资产名精确匹配四项、tar 清单精确匹配模板和模型目录、checksum 三项均通过。然后分别注入 `/Users/shopee`、`auth.json`、`access_token`、`refresh_token`、`id_token`、`experimental_bearer_token`、`OPENAI_API_KEY` 和 SQLite 文件，断言打包失败且输出目录没有可发布 tarball。
 
 - [ ] **Step 2: 运行打包测试确认 RED**
 
@@ -894,4 +893,4 @@ EOF
 
 ## 执行方式
 
-用户已明确要求按方案执行。当前会话采用 `superpowers:executing-plans` 串行执行各任务并在每个任务后核对 diff 与测试；不使用并行子任务。
+用户已明确要求按方案执行。当前会话采用 `superpowers:subagent-driven-development` 串行派发各任务，并在每个任务后执行规格与质量复核；实现任务不并行修改共享文件。
