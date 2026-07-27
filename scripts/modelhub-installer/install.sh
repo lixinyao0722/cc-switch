@@ -16,6 +16,7 @@ readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
 readonly CHATGPT_BUNDLE_ID='com.openai.codex'
 readonly CHATGPT_DOWNLOAD_PAGE='https://openai.com/chatgpt/download/'
 readonly CHATGPT_DMG_URL='https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg'
+readonly RENAME_HELPER_SHA256='__RENAME_HELPER_SHA256__'
 readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
 readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
 readonly KEYCHAIN_SERVICE='com.ccswitch.modelhub.ak'
@@ -45,16 +46,65 @@ TRANSACTION_STAGE_DIR=''
 LAUNCHER_FAILURE_SNAPSHOT_READY=0
 LAUNCHER_REPLACED_BY_RUN=0
 CHATGPT_BOOTSTRAP_MOUNT_DIR=''
-CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=0
+CHATGPT_BOOTSTRAP_MOUNT_STATE='none'
 CHATGPT_BOOTSTRAP_TEMP_DIR=''
 CHATGPT_BOOTSTRAP_STAGE_DIR=''
-CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
+CHATGPT_TRUSTED_HELPER_DIR=''
+CHATGPT_TRUSTED_HELPER_PATH=''
 CHATGPT_INSTALLED_BY_RUN=0
 
 die() {
   echo "error: $*" >&2
   return 1
+}
+
+installer_tool_path() {
+  local variable_name="$1"
+  local default_path="$2"
+  local override=''
+
+  case "$variable_name" in
+    CC_SWITCH_*_BIN) ;;
+    *)
+      die "invalid installer tool variable: $variable_name"
+      return 1
+      ;;
+  esac
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    eval "override=\${$variable_name:-}"
+  fi
+  printf '%s' "${override:-$default_path}"
+}
+
+expected_rename_helper_sha256() {
+  local expected_sha="$RENAME_HELPER_SHA256"
+
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" \
+    && -n "${CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256:-}" ]]; then
+    expected_sha="$CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256"
+  fi
+  case "$expected_sha" in
+    ''|*[!0-9a-f]*)
+      die "exclusive rename helper pinned SHA-256 is invalid"
+      return 1
+      ;;
+  esac
+  if [[ "${#expected_sha}" -ne 64 ]]; then
+    die "exclusive rename helper pinned SHA-256 must contain 64 lowercase hex characters"
+    return 1
+  fi
+  printf '%s' "$expected_sha"
+}
+
+file_sha256() {
+  local file_path="$1"
+  local shasum_bin='/usr/bin/shasum'
+  local digest
+
+  if ! digest="$("$shasum_bin" -a 256 "$file_path" | awk '{ print $1 }')"; then
+    return 1
+  fi
+  printf '%s' "$digest"
 }
 
 validate_non_root() {
@@ -134,7 +184,7 @@ path_exists() {
 validate_chatgpt_codex() {
   local codex_path="$1"
   local expected_team_id="$2"
-  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
   local details
   local team_id
 
@@ -161,9 +211,9 @@ validate_chatgpt_app() {
   local app_path="$1"
   local expected_team_id="$2"
   local expected_bundle_id="$3"
-  local plutil_bin="${CC_SWITCH_PLUTIL_BIN:-/usr/bin/plutil}"
-  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
-  local file_bin="${CC_SWITCH_FILE_BIN:-/usr/bin/file}"
+  local plutil_bin="$(installer_tool_path CC_SWITCH_PLUTIL_BIN /usr/bin/plutil)"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
+  local file_bin="$(installer_tool_path CC_SWITCH_FILE_BIN /usr/bin/file)"
   local info_plist="$app_path/Contents/Info.plist"
   local bundle_id
   local executable_name
@@ -347,9 +397,11 @@ validate_staged_chatgpt_source() {
 
 validate_rename_helper() {
   local helper_path="$1"
-  local codesign_bin="${CC_SWITCH_HELPER_CODESIGN_BIN:-/usr/bin/codesign}"
-  local lipo_bin="${CC_SWITCH_LIPO_BIN:-/usr/bin/lipo}"
+  local expected_sha="$2"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_HELPER_CODESIGN_BIN /usr/bin/codesign)"
+  local lipo_bin="$(installer_tool_path CC_SWITCH_LIPO_BIN /usr/bin/lipo)"
   local architectures
+  local actual_sha
 
   if [[ -z "$helper_path" || "$helper_path" != /* \
     || ! -f "$helper_path" || ! -x "$helper_path" || -L "$helper_path" ]]; then
@@ -369,6 +421,11 @@ validate_rename_helper() {
     die "exclusive rename helper must contain only arm64"
     return 1
   fi
+  actual_sha="$(file_sha256 "$helper_path")" || return 1
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    die "exclusive rename helper does not match the pinned SHA-256"
+    return 1
+  fi
 }
 
 validate_packaged_rename_helper() {
@@ -377,6 +434,7 @@ validate_packaged_rename_helper() {
   local helper_path="$resources_dir/helpers/rename-exclusive"
   local canonical_stage
   local canonical_resources
+  local expected_sha
 
   if [[ "$resources_dir" != "$stage_dir/resources/modelhub-installer" \
     || -L "$resources_dir" || -L "$resources_dir/helpers" ]]; then
@@ -389,15 +447,36 @@ validate_packaged_rename_helper() {
     die "exclusive rename helper resource path is not canonically contained"
     return 1
   fi
-  validate_rename_helper "$helper_path"
+  expected_sha="$(expected_rename_helper_sha256)" || return 1
+  validate_rename_helper "$helper_path" "$expected_sha"
 }
 
 chatgpt_path_identity() {
   run_with_privilege /usr/bin/stat -f '%d:%i' "$1"
 }
 
+chatgpt_mount_is_active() {
+  local mount_dir="$1"
+  local mount_bin="$(installer_tool_path CC_SWITCH_MOUNT_BIN /sbin/mount)"
+  local mount_output
+
+  if [[ ! -x "$mount_bin" ]]; then
+    die "mount command not found: $mount_bin"
+    return 1
+  fi
+  if ! mount_output="$("$mount_bin")"; then
+    die "failed to inspect active mounts"
+    return 2
+  fi
+  if printf '%s\n' "$mount_output" | /usr/bin/grep -Fq -- " on $mount_dir ("; then
+    return 0
+  fi
+  return 1
+}
+
 cleanup_chatgpt_mount() {
-  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
+  local rm_bin="$(installer_tool_path CC_SWITCH_RM_BIN /bin/rm)"
+  local mount_status
 
   if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ]]; then
     return 0
@@ -409,11 +488,33 @@ cleanup_chatgpt_mount() {
       return 1
       ;;
   esac
-  if [[ "$CHATGPT_BOOTSTRAP_MOUNT_ATTACHED" == "1" ]]; then
+  case "$CHATGPT_BOOTSTRAP_MOUNT_STATE" in
+    pending)
+      if chatgpt_mount_is_active "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+        CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+      else
+        mount_status=$?
+        if [[ "$mount_status" == "1" ]]; then
+          CHATGPT_BOOTSTRAP_MOUNT_STATE='detached'
+        else
+          return 1
+        fi
+      fi
+      ;;
+    attached)
+      ;;
+    detached)
+      ;;
+    *)
+      die "invalid ChatGPT mount lifecycle state: $CHATGPT_BOOTSTRAP_MOUNT_STATE"
+      return 1
+      ;;
+  esac
+  if [[ "$CHATGPT_BOOTSTRAP_MOUNT_STATE" == "attached" ]]; then
     if ! detach_chatgpt_dmg "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
       return 1
     fi
-    CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=0
+    CHATGPT_BOOTSTRAP_MOUNT_STATE='detached'
   fi
   if [[ ! -x "$rm_bin" ]]; then
     die "rm command not found: $rm_bin"
@@ -424,10 +525,11 @@ cleanup_chatgpt_mount() {
     return 1
   fi
   CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='none'
 }
 
 cleanup_chatgpt_temp() {
-  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
+  local rm_bin="$(installer_tool_path CC_SWITCH_RM_BIN /bin/rm)"
 
   if [[ -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" ]]; then
     return 0
@@ -450,55 +552,76 @@ cleanup_chatgpt_temp() {
   CHATGPT_BOOTSTRAP_TEMP_DIR=''
 }
 
-cleanup_chatgpt_published_target() {
-  local rm_bin="${CC_SWITCH_RM_BIN:-/bin/rm}"
-  local current_identity
+cleanup_trusted_rename_helper() {
+  if [[ -z "$CHATGPT_TRUSTED_HELPER_DIR" ]]; then
+    CHATGPT_TRUSTED_HELPER_PATH=''
+    return 0
+  fi
+  case "$CHATGPT_TRUSTED_HELPER_DIR" in
+    "$INSTALL_APPLICATIONS_DIR"/.chatgpt-helper.*) ;;
+    *)
+      die "refusing to remove an unsafe trusted helper directory"
+      return 1
+      ;;
+  esac
+  if ! run_with_privilege /bin/rm -rf -- "$CHATGPT_TRUSTED_HELPER_DIR"; then
+    die "failed to remove the trusted helper directory"
+    return 1
+  fi
+  CHATGPT_TRUSTED_HELPER_DIR=''
+  CHATGPT_TRUSTED_HELPER_PATH=''
+}
 
-  if [[ -z "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" ]]; then
-    return 0
-  fi
-  if [[ "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" != "$CHATGPT_APP_PATH" \
-    || -z "$CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY" ]]; then
-    die "refusing to remove an unproven ChatGPT target"
+privileged_file_sha256() {
+  local file_path="$1"
+  local digest
+
+  if ! digest="$(run_with_privilege /usr/bin/shasum -a 256 "$file_path" | awk '{ print $1 }')"; then
     return 1
   fi
-  if ! path_exists "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" \
-    && ! path_is_symlink "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET"; then
-    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
-    return 0
+  printf '%s' "$digest"
+}
+
+prepare_trusted_rename_helper() {
+  local source_helper="$1"
+  local expected_sha="$2"
+  local actual_sha
+
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    if ! CHATGPT_TRUSTED_HELPER_DIR="$(
+      run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-helper.XXXXXX"
+    )"; then
+      CHATGPT_TRUSTED_HELPER_DIR=''
+      die "failed to create the trusted helper directory"
+      return 1
+    fi
+    CHATGPT_TRUSTED_HELPER_PATH="$CHATGPT_TRUSTED_HELPER_DIR/rename-exclusive"
+    if ! run_with_privilege /bin/cp "$source_helper" "$CHATGPT_TRUSTED_HELPER_PATH" \
+      || ! run_with_privilege /bin/chmod 0500 "$CHATGPT_TRUSTED_HELPER_PATH" \
+      || ! run_with_privilege /bin/chmod 0500 "$CHATGPT_TRUSTED_HELPER_DIR"; then
+      die "failed to protect the trusted helper copy"
+      return 1
+    fi
+    actual_sha="$(privileged_file_sha256 "$CHATGPT_TRUSTED_HELPER_PATH")" || return 1
+  else
+    CHATGPT_TRUSTED_HELPER_PATH="$source_helper"
+    actual_sha="$(file_sha256 "$CHATGPT_TRUSTED_HELPER_PATH")" || return 1
   fi
-  current_identity="$(chatgpt_path_identity "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" 2>/dev/null)" || {
-    die "unable to confirm ownership of the published ChatGPT target"
-    return 1
-  }
-  if [[ "$current_identity" != "$CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY" ]]; then
-    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
-    die "published ChatGPT target changed before cleanup"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    die "trusted rename helper does not match the pinned SHA-256"
     return 1
   fi
-  if [[ ! -x "$rm_bin" ]]; then
-    die "rm command not found: $rm_bin"
-    return 1
-  fi
-  if ! run_with_privilege "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET"; then
-    die "failed to remove the run-owned ChatGPT target"
-    return 1
-  fi
-  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
 }
 
 cleanup_chatgpt_bootstrap() {
   local cleanup_status=0
 
   cleanup_chatgpt_mount || cleanup_status=1
-  cleanup_chatgpt_published_target || cleanup_status=1
+  cleanup_trusted_rename_helper || cleanup_status=1
   cleanup_chatgpt_temp || cleanup_status=1
   if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
     && -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" \
-    && -z "$CHATGPT_BOOTSTRAP_PUBLISHED_TARGET" ]]; then
+    && -z "$CHATGPT_TRUSTED_HELPER_DIR" ]]; then
     CHATGPT_BOOTSTRAP_STAGE_DIR=''
   fi
   return "$cleanup_status"
@@ -506,7 +629,7 @@ cleanup_chatgpt_bootstrap() {
 
 stage_verified_chatgpt_app() {
   local source_app="$1"
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
   local temp_app
 
   if [[ ! -x "$ditto_bin" ]]; then
@@ -535,6 +658,10 @@ install_verified_chatgpt_app() {
   local helper_path="$3"
   local helper_status
   local source_identity
+  local source_device
+  local source_inode
+  local expected_sha
+  local trusted_cleanup_status=0
 
   validate_staged_chatgpt_source "$source_app" || return 1
   if [[ "$target_app" != "$CHATGPT_APP_PATH" ]]; then
@@ -545,37 +672,40 @@ install_verified_chatgpt_app() {
     die "ChatGPT appeared before the official app could be installed"
     return 1
   fi
-  validate_rename_helper "$helper_path" || return 1
+  expected_sha="$(expected_rename_helper_sha256)" || return 1
+  validate_rename_helper "$helper_path" "$expected_sha" || return 1
   source_identity="$(chatgpt_path_identity "$source_app")" || {
     die "unable to record the staged ChatGPT app identity"
     return 1
   }
-  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY="$source_identity"
-  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET="$target_app"
-  if run_with_privilege "$helper_path" "$source_app" "$target_app"; then
+  source_device="${source_identity%%:*}"
+  source_inode="${source_identity#*:}"
+  prepare_trusted_rename_helper "$helper_path" "$expected_sha" || return 1
+  if run_with_privilege \
+    "$CHATGPT_TRUSTED_HELPER_PATH" \
+    "$source_app" \
+    "$target_app" \
+    "$source_device" \
+    "$source_inode"; then
     helper_status=0
   else
     helper_status=$?
   fi
+  cleanup_trusted_rename_helper || trusted_cleanup_status=1
   if [[ "$helper_status" != "0" ]]; then
-    CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-    CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
     if [[ "$helper_status" == "17" ]]; then
       die "ChatGPT appeared during the exclusive app publication"
+    elif [[ "$helper_status" == "18" ]]; then
+      die "staged ChatGPT app identity changed before publication"
     else
       die "failed to atomically publish the verified ChatGPT app"
     fi
     return 1
   fi
-  if path_is_symlink "$target_app" \
-    || ! validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
-    cleanup_chatgpt_published_target || true
+  CHATGPT_INSTALLED_BY_RUN=1
+  if [[ "$trusted_cleanup_status" != "0" ]]; then
     return 1
   fi
-
-  CHATGPT_INSTALLED_BY_RUN=1
-  CHATGPT_BOOTSTRAP_PUBLISHED_TARGET=''
-  CHATGPT_BOOTSTRAP_PUBLISHED_IDENTITY=''
   cleanup_chatgpt_temp
 }
 
@@ -612,10 +742,14 @@ ensure_chatgpt_app() {
     die "failed to create the ChatGPT disk image mount directory"
     return 1
   fi
-  CHATGPT_BOOTSTRAP_MOUNT_ATTACHED=1
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='pending'
   mounted_app="$CHATGPT_BOOTSTRAP_MOUNT_DIR/ChatGPT.app"
-  if ! attach_chatgpt_dmg "$dmg_path" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
-    || ! validate_mounted_chatgpt_source "$mounted_app" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+  if ! attach_chatgpt_dmg "$dmg_path" "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+  if ! validate_mounted_chatgpt_source "$mounted_app" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
     || ! validate_chatgpt_app "$mounted_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" \
     || ! stage_verified_chatgpt_app "$mounted_app"; then
     cleanup_chatgpt_bootstrap || true
@@ -1573,7 +1707,7 @@ managed_relative_for_target() {
 }
 
 sudo_command() {
-  printf '%s' "${CC_SWITCH_SUDO_BIN:-/usr/bin/sudo}"
+  installer_tool_path CC_SWITCH_SUDO_BIN /usr/bin/sudo
 }
 
 run_with_privilege() {
@@ -1641,7 +1775,7 @@ create_backup() {
   local target
   local relative
   local counter=1
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
 
   if [[ -n "${CC_SWITCH_INSTALLER_TIMESTAMP:-}" ]]; then
     timestamp="$CC_SWITCH_INSTALLER_TIMESTAMP"
@@ -1812,7 +1946,7 @@ restore_backup() {
   local existed
   local relative
   local backup_path
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
 
   validate_backup_manifest "$backup_dir" || return 1
 
@@ -1872,9 +2006,9 @@ restore_backup() {
 
 install_app() {
   local app_zip="$1"
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
-  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
-  local xattr_bin="${CC_SWITCH_XATTR_BIN:-/usr/bin/xattr}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
+  local xattr_bin="$(installer_tool_path CC_SWITCH_XATTR_BIN /usr/bin/xattr)"
   local work_dir
   local extracted_app
 

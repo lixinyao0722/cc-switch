@@ -122,6 +122,39 @@ build_rename_helper() {
   fi
 }
 
+render_installer_with_helper_hash() {
+  local source_installer="$1"
+  local helper_path="$2"
+  local output_installer="$3"
+  local helper_sha
+
+  helper_sha="$(/usr/bin/shasum -a 256 "$helper_path" | awk '{ print $1 }')" || return 1
+  case "$helper_sha" in
+    ''|*[!0-9a-f]* )
+      die 'exclusive rename helper SHA-256 is invalid'
+      return 1
+      ;;
+  esac
+  if [[ "${#helper_sha}" -ne 64 ]]; then
+    die 'exclusive rename helper SHA-256 must contain 64 lowercase hex characters'
+    return 1
+  fi
+  if ! awk -v sha="$helper_sha" '
+    {
+      replacements += gsub(/__RENAME_HELPER_SHA256__/, sha)
+      print
+    }
+    END { if (replacements != 1) exit 1 }
+  ' "$source_installer" >"$output_installer"; then
+    die 'installer must contain exactly one rename helper SHA placeholder'
+    return 1
+  fi
+  if grep -Fq -- '__RENAME_HELPER_SHA256__' "$output_installer"; then
+    die 'rendered installer still contains the rename helper SHA placeholder'
+    return 1
+  fi
+}
+
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
@@ -236,7 +269,10 @@ main() {
 
   COPYFILE_DISABLE=1 tar -czf "$staged_output/$OUTPUT_RESOURCES_NAME" \
     -C "$package_dir" modelhub-installer
-  cp "$source_dir/install.sh" "$staged_output/$OUTPUT_INSTALLER_NAME"
+  render_installer_with_helper_hash \
+    "$source_dir/install.sh" \
+    "$package_dir/modelhub-installer/helpers/rename-exclusive" \
+    "$staged_output/$OUTPUT_INSTALLER_NAME"
   chmod 755 "$staged_output/$OUTPUT_INSTALLER_NAME"
   cp "$app_zip" "$staged_output/$OUTPUT_APP_NAME"
 
