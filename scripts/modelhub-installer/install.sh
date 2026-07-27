@@ -117,6 +117,16 @@ validate_non_root() {
   fi
 }
 
+validate_execution_identity() {
+  local actual_uid="$1"
+  local test_uid="${2:-$actual_uid}"
+
+  validate_non_root "$actual_uid" || return 1
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    validate_non_root "$test_uid" || return 1
+  fi
+}
+
 validate_platform() {
   local operating_system="$1"
   local architecture="$2"
@@ -774,6 +784,10 @@ install_verified_chatgpt_app() {
     return 1
   fi
   CHATGPT_INSTALLED_BY_RUN=1
+  if ! validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
+    die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
+    return 1
+  fi
   if [[ "$trusted_cleanup_status" != "0" ]]; then
     return 1
   fi
@@ -1781,11 +1795,41 @@ sudo_command() {
   installer_tool_path CC_SWITCH_SUDO_BIN /usr/bin/sudo
 }
 
+is_system_sudo_command() {
+  local candidate="$1"
+  local candidate_identity
+  local system_identity
+
+  candidate_identity="$(/usr/bin/stat -L -f '%d:%i' "$candidate" 2>/dev/null)" || return 1
+  system_identity="$(/usr/bin/stat -L -f '%d:%i' /usr/bin/sudo 2>/dev/null)" || return 1
+  [[ "$candidate_identity" == "$system_identity" ]]
+}
+
+validate_privileged_command() {
+  local command_path="$1"
+
+  case "$command_path" in
+    /bin/chmod|/bin/cp|/bin/rm|/bin/test \
+      |/usr/bin/codesign|/usr/bin/ditto|/usr/bin/file|/usr/bin/mktemp \
+      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr)
+      return 0
+      ;;
+  esac
+  if [[ -n "$CHATGPT_TRUSTED_HELPER_PATH" \
+    && "$command_path" == "$CHATGPT_TRUSTED_HELPER_PATH" ]]; then
+    return 0
+  fi
+  die "refusing to run a non-allowlisted command with administrator permission"
+}
+
 run_with_privilege() {
   local sudo_bin
 
   if [[ "$NEEDS_SUDO" == "1" ]]; then
     sudo_bin="$(sudo_command)"
+    if is_system_sudo_command "$sudo_bin"; then
+      validate_privileged_command "$1" || return 1
+    fi
     "$sudo_bin" "$@"
   else
     "$@"
@@ -2547,14 +2591,16 @@ wait_for_health() {
 
 path_tree_requires_privilege() {
   local target="$1"
-  local directory
 
   [[ -e "$target" ]] || return 1
   [[ -w "$target" ]] || return 0
-  while IFS= read -r -d '' directory; do
-    [[ -w "$directory" ]] || return 0
-  done < <(/usr/bin/find "$target" -type d -print0)
-  return 1
+  if /usr/bin/find "$target" -type d -print0 2>/dev/null \
+    | while IFS= read -r -d '' directory; do
+      [[ -w "$directory" && -x "$directory" ]] || exit 1
+    done; then
+    return 1
+  fi
+  return 0
 }
 
 prepare_application_permissions() {
@@ -2677,7 +2723,10 @@ perform_install() {
   local resources_dir
   local rollback_status
 
-  validate_non_root "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" || return 1
+  validate_execution_identity \
+    "$EUID" \
+    "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" \
+    || return 1
   LAUNCHER_FAILURE_SNAPSHOT_READY=0
   LAUNCHER_REPLACED_BY_RUN=0
 
@@ -2696,6 +2745,12 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
+  if [[ -e "$CHATGPT_APP_PATH" || -L "$CHATGPT_APP_PATH" ]]; then
+    ensure_chatgpt_app "$stage_dir" || {
+      cleanup_transaction_stage || true
+      return 1
+    }
+  fi
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -2795,7 +2850,10 @@ rollback_latest() {
   local latest_backup
   local keychain_existed
 
-  validate_non_root "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" || return 1
+  validate_execution_identity \
+    "$EUID" \
+    "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" \
+    || return 1
   configure_install_paths || return 1
   latest_backup="$(
     { /usr/bin/find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/install-completed' \; -print \

@@ -573,6 +573,40 @@ test_blocks_invalid_existing_chatgpt_symlink_without_download() {
   [[ ! -e "$mutation_log" ]] || fail 'invalid ChatGPT symlink triggered curl or hdiutil'
 }
 
+test_preflight_blocks_invalid_existing_chatgpt_before_release_assets() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-before-release"
+  local app_path="$case_dir/Applications/ChatGPT.app"
+  local output
+  local status
+  mkdir -p "$case_dir/Applications" "$case_dir/tmp"
+  create_chatgpt_app_fixture "$app_path"
+  create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_EUID=501
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/missing-release-assets"
+  export CC_SWITCH_INSTALLER_TEST_OS=Darwin
+  export CC_SWITCH_INSTALLER_TEST_ARCH=arm64
+  export CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR=15
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/file"
+  export FAKE_APP_TEAM_ID=WRONGTEAM
+  export TMPDIR="$case_dir/tmp"
+
+  set +e
+  output="$(perform_install 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid existing ChatGPT app passed top-level preflight'
+  [[ "$output" == *'official OpenAI download page'* ]] \
+    || fail "release assets were accessed before ChatGPT preflight: $output"
+  [[ "$output" != *'release asset'* ]] \
+    || fail "invalid ChatGPT preflight reported a release asset error: $output"
+}
+
 create_chatgpt_bootstrap_stubs() {
   local case_dir="$1"
 
@@ -970,15 +1004,22 @@ test_chatgpt_bootstrap_detach_failure_prevents_publication() {
   cleanup_chatgpt_bootstrap
 }
 
-test_chatgpt_bootstrap_commit_point_skips_destructive_post_validation() {
+test_chatgpt_bootstrap_final_validation_failure_preserves_target_and_fails() {
   local case_dir="$TEST_TMP/chatgpt-final-validation-failure"
+  local output
   local status
   prepare_chatgpt_bootstrap_case "$case_dir"
   export FAKE_FINAL_APP_STRICT=fail
 
-  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+  set +e
+  output="$(ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" 2>&1)"
+  status=$?
+  set -e
 
-  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'commit point did not retain the prevalidated ChatGPT target'
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a final ChatGPT signature failure'
+  [[ "$output" == *'official OpenAI download page'* ]] \
+    || fail "final ChatGPT validation failure omitted recovery guidance: $output"
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'final validation failure removed the committed ChatGPT target'
   assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
   assert_chatgpt_bootstrap_scratch_clean "$case_dir"
 }
@@ -1089,6 +1130,23 @@ test_production_mode_ignores_privileged_tool_overrides() {
   assert_equals "$(installer_tool_path CC_SWITCH_HELPER_CODESIGN_BIN /usr/bin/codesign)" '/usr/bin/codesign'
   assert_equals "$(installer_tool_path CC_SWITCH_LIPO_BIN /usr/bin/lipo)" '/usr/bin/lipo'
   assert_equals "$(installer_tool_path CC_SWITCH_MOUNT_BIN /sbin/mount)" '/sbin/mount'
+}
+
+test_real_sudo_rejects_non_allowlisted_privileged_commands() {
+  local case_dir="$TEST_TMP/privileged-command-allowlist"
+  local malicious="$case_dir/malicious"
+  local sudo_symlink="$case_dir/system-sudo"
+  mkdir -p "$case_dir"
+  write_executable_stub "$malicious" 'exit 99'
+  ln -s /usr/bin/sudo "$sudo_symlink"
+
+  is_system_sudo_command /usr/bin/sudo
+  is_system_sudo_command "$sudo_symlink"
+  assert_command_fails is_system_sudo_command "$malicious"
+  validate_privileged_command /usr/bin/ditto
+  validate_privileged_command /usr/bin/codesign
+  validate_privileged_command /bin/rm
+  assert_command_fails validate_privileged_command "$malicious"
 }
 
 test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege() {
@@ -1582,9 +1640,37 @@ test_existing_nonwritable_app_requires_privilege() {
   assert_contains "$FAKE_SUDO_LOG" "/bin/rm -rf -- $CC_SWITCH_APP_PATH"
 }
 
+test_existing_nontraversable_app_requires_privilege() {
+  local case_dir="$TEST_TMP/existing-nontraversable-app"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  mkdir -p "$applications_dir/CC Switch.app/Contents"
+  chmod 0775 "$applications_dir"
+  chmod 0666 "$applications_dir/CC Switch.app"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    '[[ "${1:-}" == "-v" ]]'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_SUDO_BIN="$sudo_bin"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  configure_install_paths
+
+  prepare_application_permissions
+  chmod 0775 "$applications_dir/CC Switch.app"
+
+  assert_equals "$NEEDS_SUDO" '1'
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+}
+
 test_rejects_root_execution_validation_contract() {
   assert_command_fails validate_non_root 0
   validate_non_root 501
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  assert_command_fails validate_execution_identity 0 501
+  assert_command_fails validate_execution_identity 501 0
+  validate_execution_identity 501 501
 }
 
 test_rejects_root_execution_before_install_work() {
@@ -2477,6 +2563,7 @@ run_test "preflight validates ChatGPT Codex Team ID" test_preflight_validates_ch
 run_test "validates existing ChatGPT" test_validates_existing_chatgpt_app
 run_test "blocks invalid existing ChatGPT" test_blocks_invalid_existing_chatgpt_without_mutation
 run_test "blocks invalid existing ChatGPT symlink" test_blocks_invalid_existing_chatgpt_symlink_without_download
+run_test "preflight blocks invalid existing ChatGPT before release assets" test_preflight_blocks_invalid_existing_chatgpt_before_release_assets
 run_test "bootstraps missing ChatGPT from official DMG" test_bootstraps_missing_chatgpt_from_official_dmg
 run_test "bootstraps missing ChatGPT cleans all failure paths" test_bootstraps_missing_chatgpt_cleans_all_failure_paths
 run_test "bootstraps missing ChatGPT rejects final target race" test_bootstraps_missing_chatgpt_rejects_final_target_race
@@ -2484,12 +2571,13 @@ run_test "ChatGPT bootstrap cleanup retries detach" test_chatgpt_bootstrap_clean
 run_test "ChatGPT bootstrap cleanup preserves pending mount on inspection failure" test_chatgpt_bootstrap_cleanup_preserves_pending_mount_when_inspection_fails
 run_test "ChatGPT bootstrap cleanup retries mount and temp removal" test_chatgpt_bootstrap_cleanup_retries_mount_and_temp_removal
 run_test "ChatGPT bootstrap detach failure prevents publication" test_chatgpt_bootstrap_detach_failure_prevents_publication
-run_test "ChatGPT bootstrap commit point skips destructive post validation" test_chatgpt_bootstrap_commit_point_skips_destructive_post_validation
+run_test "ChatGPT bootstrap final validation failure preserves target" test_chatgpt_bootstrap_final_validation_failure_preserves_target_and_fails
 run_test "ChatGPT bootstrap rejects modified re-signed helper by pinned hash" test_chatgpt_bootstrap_rejects_modified_resigned_helper_by_pinned_hash
 run_test "ChatGPT bootstrap rejects tampered trusted copy before exec" test_chatgpt_bootstrap_rejects_tampered_trusted_copy_before_exec
 run_test "ChatGPT bootstrap trusted parent blocks post-hash replacement" test_chatgpt_bootstrap_trusted_parent_blocks_post_hash_replacement
 run_test "ChatGPT bootstrap requires root sticky trusted parent" test_chatgpt_bootstrap_requires_root_sticky_trusted_parent
 run_test "production mode ignores privileged tool overrides" test_production_mode_ignores_privileged_tool_overrides
+run_test "real sudo rejects non-allowlisted privileged commands" test_real_sudo_rejects_non_allowlisted_privileged_commands
 run_test "ChatGPT bootstrap validates root-owned staging through privilege" test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege
 run_test "ChatGPT bootstrap rejects unverified packaged helper" test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download
 run_test "ChatGPT bootstrap rejects signed helper outside verified resources" test_chatgpt_bootstrap_rejects_signed_helper_outside_verified_resource_root
@@ -2511,6 +2599,7 @@ run_test "settings merge changes only managed keys" test_settings_merge_changes_
 run_test "settings merge rejects invalid JSON without overwrite" test_settings_merge_rejects_invalid_json_without_overwrite
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
 run_test "existing nonwritable app requires privilege" test_existing_nonwritable_app_requires_privilege
+run_test "existing nontraversable app requires privilege" test_existing_nontraversable_app_requires_privilege
 run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
 run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files

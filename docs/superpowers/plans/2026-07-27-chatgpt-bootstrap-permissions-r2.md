@@ -111,13 +111,13 @@ run_with_privilege() {
 }
 ```
 
-`path_tree_requires_privilege` 对不存在目标返回 false；目标存在时，只要目标本身或其目录树中的任一目录不可写即返回 true。`prepare_application_permissions` 在以下任一条件为真时设置 `NEEDS_SUDO=1` 并执行可注入的 `sudo -v`：
+`path_tree_requires_privilege` 对不存在目标返回 false；目标存在时，只要目标本身不可写、目录树中的任一目录不可写/不可遍历，或遍历本身失败即返回 true。`prepare_application_permissions` 在以下任一条件为真时设置 `NEEDS_SUDO=1` 并执行可注入的 `sudo -v`：
 
 - `/Applications` 不可写；
 - 已有 `CC Switch.app` 目录树不可替换；
 - 后续 ChatGPT 缺失安装需要向不可写 `/Applications` 写入。
 
-`validate_non_root` 在 `perform_install` 和 `rollback_latest` 的最前面检查 `${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}`；0 时给出“不应使用 sudo 运行整条脚本”的明确错误。
+`perform_install` 和 `rollback_latest` 最前面必须直接检查真实 `$EUID`；测试 UID 只能在真实 UID 通过后追加模拟校验，不能覆盖真实身份。0 时给出“不应使用 sudo 运行整条脚本”的明确错误。真实 `/usr/bin/sudo` 路径还必须拒绝任何不在固定系统工具/helper allowlist 中的命令，测试二进制 override 不得进入生产提权边界。
 
 - [ ] **Step 4: 验证 GREEN 与回滚权限**
 
@@ -245,7 +245,7 @@ Expected: FAIL，缺少 bootstrap 函数。
 3. 验证临时 App，并记录其 device/inode；
 4. 验证资源包内 helper 的严格签名、单一 `arm64` 架构和 `install.sh` 固定 SHA-256；需要 sudo 时，将其复制到 `/private/var/tmp/.cc-switch-modelhub-helper.*` 的 root-owned 私有目录，收紧目录/文件权限并重新核对哈希；
 5. 由 helper 调用 `renamex_np(..., RENAME_EXCL)` 发布到目标；若并发出现目标或源身份变化则失败并清理，不覆盖；
-6. 验证最终目标并清理临时目录与受信 helper 副本。
+6. 对最终目标重新执行完整 Bundle ID、Team ID、arm64、strict codesign 和内置 Codex 验证，再清理临时目录与受信 helper 副本；验证失败时保留已原子提交的 App，但安装流程失败并提示从官方页面重装。
 
 `ensure_chatgpt_app` 已存在时只验证；缺失时下载、挂载、安装、卸载并验证，设置 `CHATGPT_INSTALLED_BY_RUN=1` 仅用于报告，不加入 `managed_targets`。
 
@@ -258,7 +258,7 @@ CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
 CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
 ```
 
-`perform_install` 顺序调整为：root/platform 检查 → stage → `prepare_application_permissions` → `ensure_chatgpt_app "$stage_dir"` → `validate_chatgpt_codex` → Release 资产下载/校验 → 原有 CC Switch 事务。
+`perform_install` 顺序调整为：root/platform 检查 → stage → `prepare_application_permissions` → 已有 ChatGPT 完整预检（异常时在 Release 下载前阻断）→ Release 资产下载/校验并提取 helper → `ensure_chatgpt_app`（缺失时 bootstrap，已有时再次验证）→ `validate_chatgpt_codex` → 原有 CC Switch 事务。
 
 ChatGPT 成功安装后，无论后续结果如何都不删除。
 

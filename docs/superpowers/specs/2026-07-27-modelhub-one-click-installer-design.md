@@ -115,11 +115,12 @@ https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
 2. 通过 `hdiutil attach -nobrowse -readonly` 挂载到私有临时目录；
 3. 对 DMG 内的 `ChatGPT.app` 执行上述完整 Bundle ID、Team ID、arm64、严格签名和内置 Codex 校验；
 4. 先复制到 `/Applications` 下同卷的私有临时 App 路径并再次校验，记录暂存 App 的 device/inode，再通过最小 helper 调用 `renamex_np(..., RENAME_EXCL)` 排他发布为 `/Applications/ChatGPT.app`；目标在并发窗口出现或暂存源身份改变时失败，不覆盖任何既有目标；
-5. 无论成功或失败都卸载 DMG 并清理临时文件。
+5. 发布后对最终目标重新执行完整 Bundle ID、Team ID、arm64、strict codesign 和内置 Codex 校验；若失败则保留已提交 App、终止流程并提示从官方页面重装；
+6. 无论成功或失败都卸载 DMG 并清理临时文件。
 
 ChatGPT bootstrap 位于 CC Switch 事务之前。若 ChatGPT 安装成功，但后续 CC Switch 安装失败或用户执行 `--rollback latest`，新安装的官方 ChatGPT App 都会保留，不进入 CC Switch 的备份 manifest。安装器不读取 ChatGPT 登录状态；安装结束后用户需要自行打开 ChatGPT 并完成登录。
 
-helper 的信任链由打包器和安装器共同固定：打包器以 `arm64`、macOS 12 最低版本编译并 ad-hoc 签名 helper，把其 SHA-256 精确写入本次 Release 的 `install.sh`；安装器先验证资源包 allowlist、helper 严格签名、单一 `arm64` 架构和固定哈希。需要管理员权限时，安装器只把已验证 helper 复制到 `/private/var/tmp` 下由 root 创建的随机私有目录；执行前再次确认父目录为 root-owned sticky namespace、子目录和文件均为 root 所有且不可由普通用户写入，并重新核对固定哈希。helper 执行后立即清理该隔离目录。
+helper 的信任链由打包器和安装器共同固定：打包器以 `arm64`、macOS 12 最低版本编译并 ad-hoc 签名 helper，把其 SHA-256 精确写入本次 Release 的 `install.sh`；安装器先验证资源包 allowlist、helper 严格签名、单一 `arm64` 架构和固定哈希。需要管理员权限时，安装器只把已验证 helper 复制到 `/private/var/tmp` 下由 root 创建的随机私有目录；执行前再次确认父目录为 root-owned sticky namespace、子目录和文件均为 root 所有且不可由普通用户写入，并重新核对固定哈希。helper 执行后立即清理该隔离目录。安装器始终直接检查真实 `$EUID`，测试身份不能覆盖该结果；真实 `/usr/bin/sudo` 只允许执行固定系统工具及当前受信 helper，测试工具 override 不会跨入生产提权边界。
 
 ## 备份与事务边界
 

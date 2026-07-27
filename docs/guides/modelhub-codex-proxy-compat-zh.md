@@ -21,7 +21,7 @@ ChatGPT App
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会先验证或安装官方 ChatGPT App，再下载并校验固定 Release 资产，最后备份和增量合并现有 CC Switch/Codex 配置。写入 `/Applications` 或替换受保护的 CC Switch App 时，安装器会按需提示输入管理员密码；`MODELHUB_AK` 则由 macOS Keychain 单独提示输入。公开 Release、脚本、plist 和配置文件均不包含该密钥或 Codex OAuth 信息。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会先校验已有 ChatGPT App，再下载并校验固定 Release 资产；如果 ChatGPT 缺失，则使用其中已校验的原子安装 helper 完成官方 DMG 安装，最后备份和增量合并现有 CC Switch/Codex 配置。写入 `/Applications` 或替换受保护的 CC Switch App 时，安装器会按需提示输入管理员密码；`MODELHUB_AK` 则由 macOS Keychain 单独提示输入。公开 Release、脚本、plist 和配置文件均不包含该密钥或 Codex OAuth 信息。
 
 如果 `/Applications/ChatGPT.app` 已存在，安装器只校验其 Bundle ID、OpenAI Team ID、arm64 主程序、严格代码签名及内置 Codex，不会下载或覆盖。任一校验失败都会阻断安装，并提示用户从 OpenAI 官方页面重新安装，避免把异常 App 当成受信运行时。
 
