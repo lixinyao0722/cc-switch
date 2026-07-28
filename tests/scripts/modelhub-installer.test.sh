@@ -1788,6 +1788,10 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/sleep" 'exit 0'
   write_executable_stub "$stub_dir/curl" \
     'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '  if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
+    '    /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '  fi' \
     '  if [[ -n "${FAKE_COMPLETION_MARKER_DIR:-}" ]]; then chmod 500 "$FAKE_COMPLETION_MARKER_DIR"; fi' \
     '  printf "{\"status\":\"healthy\",\"timestamp\":\"test\"}\n"' \
     '  exit 0' \
@@ -1820,11 +1824,23 @@ create_transaction_assets() {
   local case_dir="$1"
   local asset_dir="$case_dir/assets"
   local resource_root="$case_dir/resource-build/modelhub-installer"
-  mkdir -p "$asset_dir" "$resource_root/assets" "$resource_root/helpers" "$resource_root/templates"
+  mkdir -p \
+    "$asset_dir" \
+    "$resource_root/assets" \
+    "$resource_root/golden" \
+    "$resource_root/helpers" \
+    "$resource_root/templates"
   ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
   printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$GOLDEN_CODEX_CONFIG" "$resource_root/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$resource_root/golden/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$resource_root/golden/cc-switch.db" >/dev/null
   cp "$TEST_RENAME_HELPER" "$resource_root/helpers/rename-exclusive"
   cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
@@ -1934,6 +1950,8 @@ prepare_transaction_case() {
   export FAKE_SECURITY_MODE=success
   export FAKE_SECURITY_FIND_STATUS=''
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_COMPLETION_MARKER_DIR=''
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
   export FAKE_PGREP_MODE=stopped
@@ -2231,7 +2249,8 @@ test_transaction_success_and_repeat_are_idempotent() {
   /bin/bash "$INSTALLER"
 
   assert_contains "$case_dir/home/.codex/config.toml" 'model_provider = "modelhub"'
-  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
+  assert_not_contains "$case_dir/home/.codex/config.toml" '[plugins."browser@openai-bundled"]'
   assert_contains "$case_dir/Applications/CC Switch.app/Contents/MacOS/cc-switch" 'new-app'
   assert_contains "$case_dir/home/.codex/auth.json" 'user-owned'
   assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
@@ -2242,6 +2261,82 @@ test_transaction_success_and_repeat_are_idempotent() {
   [[ -f "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'local installer was not saved'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'MODELHUB_AK was not loaded into launchd'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'CODEX_CLI_PATH was not loaded into launchd'
+}
+
+test_transaction_overwrites_golden_configuration_and_rolls_back() {
+  local case_dir="$TEST_TMP/transaction-golden-overwrite"
+  local auth_path
+  local auth_before
+  local before
+  local after_rollback
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  auth_path="$case_dir/home/.codex/auth.json"
+  auth_before="$(shasum -a 256 "$auth_path" | awk '{ print $1 }')"
+  before="$(managed_state_digest "$case_dir")"
+
+  perform_install
+
+  assert_not_contains "$case_dir/home/.codex/config.toml" '[plugins."browser@openai-bundled"]'
+  assert_not_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
+  assert_contains \
+    "$case_dir/home/.codex/config.toml" \
+    "model_catalog_json = \"$case_dir/home/.codex/models-modelhub-1m.json\""
+  assert_equals "$(shasum -a 256 "$auth_path" | awk '{ print $1 }')" "$auth_before"
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" 'SELECT count(*) FROM providers' '1'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    'SELECT id FROM providers' 'bytedance-modelhub-official-cli'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sentinel'" '0'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    'SELECT count(*) FROM proxy_request_logs' '0'
+  assert_equals \
+    "$(jq -r 'has("language") or has("showInTray")' "$case_dir/home/.cc-switch/settings.json")" \
+    'false'
+  assert_equals \
+    "$(jq -r '.currentProviderCodex' "$case_dir/home/.cc-switch/settings.json")" \
+    'bytedance-modelhub-official-cli'
+
+  rollback_latest
+  after_rollback="$(managed_state_digest "$case_dir")"
+  assert_equals "$after_rollback" "$before"
+}
+
+test_golden_routing_verification_rejects_reversed_routes() {
+  local case_dir="$TEST_TMP/golden-routing-verification"
+  local live_config="$case_dir/config.toml"
+  local database="$case_dir/cc-switch.db"
+  mkdir -p "$case_dir"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$database" >/dev/null
+  /usr/bin/sed \
+    -e "s#__USER_HOME__#$case_dir/home#g" \
+    -e 's#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g' \
+    "$GOLDEN_CODEX_CONFIG" >"$live_config"
+  export CC_SWITCH_SLEEP_BIN=/usr/bin/true
+
+  wait_for_golden_routing_state "$database" "$live_config" 1
+
+  sqlite3 "$database" <<'SQL'
+UPDATE providers
+SET settings_config = json_set(
+  settings_config,
+  '$.config',
+  replace(
+    json_extract(settings_config, '$.config'),
+    'https://aidp.bytedance.net/api/modelhub/online',
+    'http://127.0.0.1:15721/v1'
+  )
+);
+SQL
+  assert_command_fails wait_for_golden_routing_state "$database" "$live_config" 1
+
+  /bin/cp "$GOLDEN_CODEX_CONFIG" "$live_config"
+  assert_command_fails wait_for_golden_routing_state "$database" "$live_config" 1
 }
 
 test_transaction_rollback_latest_restores_and_removes_files() {
@@ -2733,6 +2828,8 @@ run_test "transaction waits for CC Switch exit before backup" test_transaction_w
 run_test "transaction WAL snapshot restores committed sentinel and cleans sidecars" test_transaction_wal_snapshot_restores_committed_sentinel_and_cleans_sidecars
 run_test "transaction same-second backup suffixes sort lexically" test_transaction_same_second_backup_suffixes_sort_lexically
 run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
+run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
+run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation

@@ -2282,11 +2282,94 @@ install_app() {
   fi
 }
 
+install_golden_codex_config() {
+  local golden_file="$1"
+  local target_file="$2"
+  local user_home="$3"
+  local work_dir
+  local rendered_file
+  local escaped_home
+
+  validate_golden_codex_template "$golden_file" || return 1
+  escaped_home="$(toml_escape_basic_string "$user_home")"
+  if ! work_dir="$(mktemp -d "$(dirname "$target_file")/.golden-codex.XXXXXX")"; then
+    die 'failed to create the golden Codex staging directory'
+    return 1
+  fi
+  rendered_file="$work_dir/config.toml"
+  if ! render_template \
+    "$golden_file" \
+    "$rendered_file" \
+    '__USER_HOME__' \
+    "$escaped_home" \
+    || ! /bin/chmod 0600 "$rendered_file" \
+    || ! validate_merged_codex_config "$rendered_file" "$user_home"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/mv "$rendered_file" "$target_file" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden Codex config'
+    return 1
+  fi
+}
+
+install_golden_database() {
+  local golden_database="$1"
+  local target_database="$2"
+  local work_dir
+  local staged_database
+
+  validate_golden_database "$golden_database" || return 1
+  if ! work_dir="$(mktemp -d "$(dirname "$target_database")/.golden-db.XXXXXX")"; then
+    die 'failed to create the golden database staging directory'
+    return 1
+  fi
+  staged_database="$work_dir/cc-switch.db"
+  if ! /bin/cp "$golden_database" "$staged_database" \
+    || ! /bin/chmod 0600 "$staged_database" \
+    || ! validate_golden_database "$staged_database"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/rm -f -- "$target_database-wal" "$target_database-shm" \
+    || ! /bin/mv "$staged_database" "$target_database" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden CC Switch database'
+    return 1
+  fi
+}
+
+install_golden_settings() {
+  local golden_settings="$1"
+  local target_settings="$2"
+  local work_dir
+  local staged_settings
+
+  validate_golden_settings "$golden_settings" || return 1
+  if ! work_dir="$(mktemp -d "$(dirname "$target_settings")/.golden-settings.XXXXXX")"; then
+    die 'failed to create the golden settings staging directory'
+    return 1
+  fi
+  staged_settings="$work_dir/settings.json"
+  if ! /bin/cp "$golden_settings" "$staged_settings" \
+    || ! /bin/chmod 0600 "$staged_settings" \
+    || ! validate_golden_settings "$staged_settings"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/mv "$staged_settings" "$target_settings" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden CC Switch settings'
+    return 1
+  fi
+}
+
 install_runtime_files() {
   local resources_dir="$1"
-  local provider_id
-  local config_work_dir
-  local config_work_file
   local plist_work_dir
   local plist_work_file
   local escaped_helper_path
@@ -2314,33 +2397,19 @@ install_runtime_files() {
     return 1
   fi
 
-  if ! config_work_dir="$(mktemp -d "$INSTALL_USER_HOME/.codex/.modelhub-config.XXXXXX")"; then
-    die "failed to create the Codex config staging directory"
-    return 1
-  fi
-  config_work_file="$config_work_dir/config.toml"
-  if ! merge_codex_config \
+  install_golden_codex_config \
+    "$resources_dir/golden/codex-config.toml" \
     "$CODEX_CONFIG_PATH" \
-    "$resources_dir/templates/modelhub-provider.toml" \
-    "$config_work_file" \
-    "$INSTALL_USER_HOME"; then
-    /bin/rm -rf "$config_work_dir" || true
-    return 1
-  fi
-  if ! /bin/chmod 600 "$config_work_file"; then
-    /bin/rm -rf "$config_work_dir" || true
-    die "failed to protect the merged Codex config"
-    return 1
-  fi
-  if ! /bin/mv "$config_work_file" "$CODEX_CONFIG_PATH"; then
-    /bin/rm -rf "$config_work_dir" || true
-    die "failed to install the merged Codex config"
-    return 1
-  fi
-  if ! /bin/rmdir "$config_work_dir"; then
-    die "failed to remove the Codex config staging directory"
-    return 1
-  fi
+    "$INSTALL_USER_HOME" \
+    || return 1
+  install_golden_database \
+    "$resources_dir/golden/cc-switch.db" \
+    "$CC_SWITCH_DATABASE_PATH" \
+    || return 1
+  install_golden_settings \
+    "$resources_dir/golden/settings.json" \
+    "$CC_SWITCH_SETTINGS_PATH" \
+    || return 1
 
   if ! /usr/bin/install -m 700 \
     "$resources_dir/templates/load-modelhub-env.sh" \
@@ -2377,14 +2446,6 @@ install_runtime_files() {
     return 1
   fi
 
-  ensure_cc_switch_schema "$CC_SWITCH_DATABASE_PATH" "$CC_SWITCH_APP_PATH" || return 1
-  provider_id="$(
-    merge_provider_database \
-      "$CC_SWITCH_DATABASE_PATH" \
-      "$CODEX_CONFIG_PATH" \
-      "$resources_dir/templates/modelhub-provider-meta.json"
-  )" || return 1
-  update_settings_json "$CC_SWITCH_SETTINGS_PATH" "$provider_id" || return 1
 }
 
 prepare_launcher_failure_snapshot() {
@@ -2697,6 +2758,55 @@ wait_for_health() {
   return 1
 }
 
+wait_for_golden_routing_state() {
+  local database="$1"
+  local live_config="$2"
+  local timeout_seconds="$3"
+  local sleep_bin="${CC_SWITCH_SLEEP_BIN:-/bin/sleep}"
+  local attempt=1
+  local provider_ready
+  local live_ready
+
+  case "$timeout_seconds" in
+    ''|*[!0-9]*)
+      die "invalid golden routing timeout: $timeout_seconds"
+      return 1
+      ;;
+  esac
+  if [[ "$timeout_seconds" -lt 1 || ! -x "$sleep_bin" ]]; then
+    die 'golden routing verification requires a positive timeout and sleep command'
+    return 1
+  fi
+
+  while [[ "$attempt" -le "$timeout_seconds" ]]; do
+    provider_ready="$(golden_sqlite_scalar "$database" "
+      SELECT count(*)
+      FROM providers
+      WHERE id='bytedance-modelhub-official-cli'
+        AND app_type='codex'
+        AND is_current=1
+        AND instr(json_extract(settings_config, '$.config'),
+                  'https://aidp.bytedance.net/api/modelhub/online') > 0
+        AND instr(json_extract(settings_config, '$.config'),
+                  '127.0.0.1:15721') = 0;
+    " || true)"
+    if [[ -f "$live_config" ]] \
+      && grep -Fq -- 'base_url = "http://127.0.0.1:15721/v1"' "$live_config"; then
+      live_ready=1
+    else
+      live_ready=0
+    fi
+    if [[ "$provider_ready" == '1' && "$live_ready" == '1' ]]; then
+      return 0
+    fi
+    "$sleep_bin" 1 || return 1
+    attempt=$((attempt + 1))
+  done
+
+  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex uses the local proxy'
+  return 1
+}
+
 path_tree_requires_privilege() {
   local target="$1"
 
@@ -2812,6 +2922,7 @@ run_install_transaction() {
   local asset_dir="$1"
   local resources_dir="$2"
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
+  local routing_timeout="${CC_SWITCH_INSTALLER_ROUTING_TIMEOUT:-30}"
 
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
@@ -2819,6 +2930,11 @@ run_install_transaction() {
   install_launch_agent || return 1
   start_cc_switch || return 1
   wait_for_health 'http://127.0.0.1:15721/health' "$health_timeout" || return 1
+  wait_for_golden_routing_state \
+    "$CC_SWITCH_DATABASE_PATH" \
+    "$CODEX_CONFIG_PATH" \
+    "$routing_timeout" \
+    || return 1
 }
 
 perform_install() {
