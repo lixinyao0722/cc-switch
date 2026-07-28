@@ -1,0 +1,7 @@
+{
+  "currentProviderCodex": "bytedance-modelhub-official-cli",
+  "enableLocalProxy": true,
+  "preserveCodexOfficialAuthOnSwitch": true,
+  "firstRunNoticeConfirmed": true,
+  "proxyConfirmed": true
+}

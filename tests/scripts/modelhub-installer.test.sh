@@ -8,6 +8,10 @@ PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
 RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
+GOLDEN_DB_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-golden-db.sh"
+GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
+GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
+GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -2517,6 +2521,62 @@ test_package_rejects_source_symlinks() {
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$case_dir/output"
 }
 
+test_golden_db_builder_creates_minimal_public_snapshot() {
+  local case_dir="$TEST_TMP/golden-db-builder"
+  local first_db="$case_dir/first.db"
+  local second_db="$case_dir/second.db"
+  local config_text
+  mkdir -p "$case_dir"
+
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$first_db"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$second_db"
+
+  cmp "$first_db" "$second_db" || fail 'golden DB builds are not byte reproducible'
+  assert_sql "$first_db" 'PRAGMA integrity_check' 'ok'
+  assert_sql "$first_db" 'PRAGMA user_version' '16'
+  assert_sql "$first_db" 'SELECT count(*) FROM providers' '1'
+  assert_sql "$first_db" 'SELECT id FROM providers' 'bytedance-modelhub-official-cli'
+  assert_sql "$first_db" \
+    "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers" \
+    '0'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers" \
+    '1'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
+    '0'
+  assert_sql "$first_db" \
+    "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex'" \
+    '1:1:0:127.0.0.1:15721'
+  assert_sql "$first_db" 'SELECT count(*) FROM proxy_request_logs' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM proxy_live_backup' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM provider_health' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM provider_endpoints' '0'
+
+  config_text="$(/bin/cat "$GOLDEN_CODEX_CONFIG")"
+  [[ "$config_text" == *'__USER_HOME__/.codex/models-modelhub-1m.json'* ]] \
+    || fail 'golden Codex config omits the portable home placeholder'
+  [[ "$config_text" == *'https://aidp.bytedance.net/api/modelhub/online'* ]] \
+    || fail 'golden Codex config omits the ModelHub upstream'
+  [[ "$config_text" != *'/Users/'* ]] || fail 'golden Codex config contains a user path'
+  [[ "$config_text" != *'127.0.0.1:15721'* ]] || fail 'golden Codex config contains a live proxy address'
+  [[ "$config_text" != *'experimental_bearer_token'* ]] \
+    || fail 'golden Codex config contains a bearer token field'
+  jq -e \
+    '.currentProviderCodex == "bytedance-modelhub-official-cli"
+      and .enableLocalProxy == true
+      and .preserveCodexOfficialAuthOnSwitch == true' \
+    "$GOLDEN_SETTINGS" >/dev/null
+}
+
 test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   local case_dir="$TEST_TMP/release-smoke"
   local asset_dir
@@ -2639,6 +2699,7 @@ run_test "package rejects generic credential key shapes" test_package_rejects_ge
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
+run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
