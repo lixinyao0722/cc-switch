@@ -15,19 +15,25 @@ ChatGPT App
 
 ## 一键安装
 
-安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前需安装并登录正式 ChatGPT App，并从管理员处获取 `MODELHUB_AK`。
+安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-安装器会先下载并校验固定 Release 资产，再备份和增量合并现有 CC Switch/Codex 配置。最后一步由 macOS Keychain 提示输入 `MODELHUB_AK`；公开 Release、脚本、plist 和配置文件均不包含该密钥或 Codex OAuth 信息。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会先校验已有 ChatGPT App，再下载并校验固定 Release 资产；如果 ChatGPT 缺失，则使用其中已校验的原子安装 helper 完成官方 DMG 安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`，避免把新电脑残留的接管地址合并回 Provider。写入 `/Applications` 或替换受保护的 CC Switch App 时，安装器会按需提示输入管理员密码；`MODELHUB_AK` 则由 macOS Keychain 单独提示输入。
+
+整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json`、ChatGPT 登录态、AK/OAuth、日志、请求历史和备份不打包、不读取、不覆盖。
+
+如果 `/Applications/ChatGPT.app` 已存在，安装器只校验其 Bundle ID、OpenAI Team ID、arm64 主程序、严格代码签名及内置 Codex，不会下载或覆盖。任一校验失败都会阻断安装，并提示用户从 OpenAI 官方页面重新安装，避免把异常 App 当成受信运行时。
 
 回滚到本次安装前状态：
 
 ```zsh
 ~/.local/share/cc-switch-modelhub/install.sh --rollback latest
 ```
+
+ChatGPT bootstrap 独立于 CC Switch 配置事务。无论后续安装失败还是执行上述显式回滚，本次自动安装的官方 ChatGPT App 都会保留，不属于回滚目标。
 
 ## Provider 配置
 
@@ -36,12 +42,12 @@ curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/in
 ```toml
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
+model_max_output_tokens = 128_000
 model_provider = "modelhub"
-service_tier = "priority"
 model_reasoning_effort = "max"
 model_auto_compact_token_limit = 829_674
 model_context_window = 921_860
-model_catalog_json = "/Users/shopee/.codex/models-modelhub-1m.json"
+model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
 
 [model_providers.modelhub]
 name = "modelhub"
@@ -52,16 +58,10 @@ env_key = "MODELHUB_AK"
 stream_idle_timeout_ms = 600_000
 request_max_retries = 10
 stream_max_retries = 10
-```
-
-官方 CLI 的 live `config.toml` 不保留以下私有字段：
-
-```toml
-model_max_output_tokens = 128_000
 retry_429 = true
 ```
 
-这些能力由 Provider 元数据承接：
+Provider 元数据还承接 ModelHub 会话适配和同 Provider 429 重试：
 
 ```json
 {
@@ -195,8 +195,10 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 
 - 原 `/Applications/CC Switch.app`；
 - `~/.cc-switch/cc-switch.db` 与 `settings.json`；
-- `~/.codex/config.toml` 与 `auth.json`；
+- `~/.codex/config.toml`；`~/.codex/auth.json` 从不由安装器读取、修改、备份或恢复；
 - LaunchAgent 和 `launchctl CODEX_CLI_PATH`；
 - 迁移前 Provider、代理与 takeover 状态。
+
+`/Applications/ChatGPT.app` 同样不在完整回滚范围内；若由安装器 bootstrap，它会继续保留。
 
 完整操作顺序见 Codex 仓库中的 `docs/superpowers/plans/2026-07-26-official-cli-cc-switch-migration.md`。

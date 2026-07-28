@@ -30,13 +30,19 @@ scan_source_tree() {
   local forbidden_link
   local required_files=(
     'install.sh'
+    'build-golden-db.sh'
     'assets/models-modelhub-1m.json'
+    'golden/cc-switch-schema.sql'
+    'golden/codex-config.toml'
+    'golden/settings.json'
+    'helpers/rename-exclusive.c'
     'templates/modelhub-provider.toml'
     'templates/modelhub-provider-meta.json'
     'templates/com.ccswitch.modelhub-env.plist'
     'templates/load-modelhub-env.sh'
   )
-  local forbidden_content="/Users/shopee|access_token|refresh_token|id_token|experimental_bearer_token|OPENAI_API_KEY|MODELHUB_AK[[:space:]]*[:=][[:space:]]*['\"]?[[:alnum:]]"
+  local forbidden_content="/Users/shopee|-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|gh[pousr]_[[:alnum:]_]{20,}|sk-[[:alnum:]]{20,}|MODELHUB_AK[[:space:]]*[:=][[:space:]]*['\"]?[[:alnum:]]"
+  local sensitive_assignment="(^|[^[:alnum:]_])(access_token|refresh_token|id_token|experimental_bearer_token|OPENAI_API_KEY)[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"$]{4}"
   local credential_key_shape="(^|[^[:alnum:]_])([[:alnum:]_]*(access|refresh|bearer|api|auth)[_-]?(token|key)|[[:alnum:]_]*(secret|password|credential)[[:alnum:]_-]*|authorization)['\"]?[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"$]{4}"
 
   forbidden_file="$(
@@ -59,29 +65,147 @@ scan_source_tree() {
       die "required allowlisted source is missing or unsafe: $relative"
       return 1
     fi
-    if LC_ALL=C grep -E -i -q "$forbidden_content|$credential_key_shape" "$source_dir/$relative"; then
+    if LC_ALL=C grep -E -i -q \
+      "$forbidden_content|$sensitive_assignment|$credential_key_shape" \
+      "$source_dir/$relative"; then
       die "allowlisted source contains forbidden content: $relative"
       return 1
     fi
   done
 }
 
+build_rename_helper() {
+  local source_path="$1"
+  local output_path="$2"
+  local xcrun_bin="${CC_SWITCH_XCRUN_BIN:-/usr/bin/xcrun}"
+  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local lipo_bin="${CC_SWITCH_LIPO_BIN:-/usr/bin/lipo}"
+  local otool_bin="${CC_SWITCH_OTOOL_BIN:-/usr/bin/otool}"
+  local architectures
+  local minimum_version
+
+  if [[ ! -x "$xcrun_bin" || ! -x "$codesign_bin" \
+    || ! -x "$lipo_bin" || ! -x "$otool_bin" ]]; then
+    die 'required macOS helper build tool is unavailable'
+    return 1
+  fi
+  if ! "$xcrun_bin" clang \
+    -arch arm64 \
+    -mmacosx-version-min=12.0 \
+    -Os \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -o "$output_path" \
+    "$source_path"; then
+    die 'failed to build the exclusive rename helper'
+    return 1
+  fi
+  if ! "$codesign_bin" \
+    --force \
+    --sign - \
+    --timestamp=none \
+    --identifier com.ccswitch.modelhub.rename-exclusive \
+    "$output_path"; then
+    die 'failed to ad-hoc sign the exclusive rename helper'
+    return 1
+  fi
+  if ! "$codesign_bin" --verify --strict --verbose=2 "$output_path"; then
+    die 'exclusive rename helper signature verification failed'
+    return 1
+  fi
+  architectures="$("$lipo_bin" -archs "$output_path")" || return 1
+  if [[ "$architectures" != 'arm64' ]]; then
+    die "exclusive rename helper has unexpected architectures: $architectures"
+    return 1
+  fi
+  minimum_version="$(
+    "$otool_bin" -l "$output_path" \
+      | awk '/LC_BUILD_VERSION/ { found = 1; next } found && $1 == "minos" { print $2; exit }'
+  )" || return 1
+  if [[ "$minimum_version" != '12.0' ]]; then
+    die "exclusive rename helper has unexpected minimum macOS version: $minimum_version"
+    return 1
+  fi
+}
+
+render_installer_with_helper_hash() {
+  local source_installer="$1"
+  local helper_path="$2"
+  local output_installer="$3"
+  local helper_sha
+
+  helper_sha="$(/usr/bin/shasum -a 256 "$helper_path" | awk '{ print $1 }')" || return 1
+  case "$helper_sha" in
+    ''|*[!0-9a-f]* )
+      die 'exclusive rename helper SHA-256 is invalid'
+      return 1
+      ;;
+  esac
+  if [[ "${#helper_sha}" -ne 64 ]]; then
+    die 'exclusive rename helper SHA-256 must contain 64 lowercase hex characters'
+    return 1
+  fi
+  if ! awk -v sha="$helper_sha" '
+    {
+      replacements += gsub(/__RENAME_HELPER_SHA256__/, sha)
+      print
+    }
+    END { if (replacements != 1) exit 1 }
+  ' "$source_installer" >"$output_installer"; then
+    die 'installer must contain exactly one rename helper SHA placeholder'
+    return 1
+  fi
+  if grep -Fq -- '__RENAME_HELPER_SHA256__' "$output_installer"; then
+    die 'rendered installer still contains the rename helper SHA placeholder'
+    return 1
+  fi
+}
+
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
 
-  mkdir -p "$package_root/assets" "$package_root/templates"
+  mkdir -p \
+    "$package_root/assets" \
+    "$package_root/golden" \
+    "$package_root/helpers" \
+    "$package_root/templates"
   cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
+  cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
+  cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
+  /bin/bash "$source_dir/build-golden-db.sh" \
+    --schema "$source_dir/golden/cc-switch-schema.sql" \
+    --provider-config "$source_dir/golden/codex-config.toml" \
+    --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
+    --output "$package_root/golden/cc-switch.db"
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
   cp "$source_dir/templates/com.ccswitch.modelhub-env.plist" "$package_root/templates/com.ccswitch.modelhub-env.plist"
   cp "$source_dir/templates/load-modelhub-env.sh" "$package_root/templates/load-modelhub-env.sh"
+  build_rename_helper \
+    "$source_dir/helpers/rename-exclusive.c" \
+    "$package_root/helpers/rename-exclusive"
   chmod 644 \
     "$package_root/assets/models-modelhub-1m.json" \
+    "$package_root/golden/codex-config.toml" \
+    "$package_root/golden/settings.json" \
+    "$package_root/golden/cc-switch.db" \
     "$package_root/templates/modelhub-provider.toml" \
     "$package_root/templates/modelhub-provider-meta.json" \
     "$package_root/templates/com.ccswitch.modelhub-env.plist"
   chmod 755 "$package_root/templates/load-modelhub-env.sh"
+  chmod 755 "$package_root/helpers/rename-exclusive"
+}
+
+build_reproducible_resource_archive() {
+  local package_dir="$1"
+  local output_path="$2"
+  local tar_path="$3"
+
+  find "$package_dir/modelhub-installer" -exec touch -t 197001010000 '{}' +
+  COPYFILE_DISABLE=1 tar -cf "$tar_path" -C "$package_dir" modelhub-installer
+  /usr/bin/gzip -n -9 -c "$tar_path" >"$output_path"
 }
 
 main() {
@@ -174,9 +298,14 @@ main() {
   mkdir -p "$package_dir" "$staged_output"
   copy_allowlisted_resources "$source_dir" "$package_dir"
 
-  COPYFILE_DISABLE=1 tar -czf "$staged_output/$OUTPUT_RESOURCES_NAME" \
-    -C "$package_dir" modelhub-installer
-  cp "$source_dir/install.sh" "$staged_output/$OUTPUT_INSTALLER_NAME"
+  build_reproducible_resource_archive \
+    "$package_dir" \
+    "$staged_output/$OUTPUT_RESOURCES_NAME" \
+    "$work_dir/modelhub-installer-resources.tar"
+  render_installer_with_helper_hash \
+    "$source_dir/install.sh" \
+    "$package_dir/modelhub-installer/helpers/rename-exclusive" \
+    "$staged_output/$OUTPUT_INSTALLER_NAME"
   chmod 755 "$staged_output/$OUTPUT_INSTALLER_NAME"
   cp "$app_zip" "$staged_output/$OUTPUT_APP_NAME"
 

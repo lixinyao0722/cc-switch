@@ -7,15 +7,34 @@ INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
 PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
+RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
+GOLDEN_DB_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-golden-db.sh"
+GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
+GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
+GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
 TEST_FILTER="${1:-}"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-installer-tests.XXXXXX")"
+TEST_RENAME_HELPER="$TEST_TMP/rename-exclusive"
 TESTS_RUN=0
 TESTS_FAILED=0
 
 cleanup() {
+  local state_file
+  local trusted_dir
+  while IFS= read -r state_file; do
+    trusted_dir="$(/bin/cat "$state_file" 2>/dev/null || true)"
+    case "$trusted_dir" in
+      /private/var/tmp/.cc-switch-modelhub-helper.*)
+        if [[ -e "$trusted_dir" ]]; then
+          /bin/chmod -R u+w "$trusted_dir" 2>/dev/null || true
+          /bin/rm -rf -- "$trusted_dir" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done < <(find "$TEST_TMP" -type f -name 'trusted-dir.state' 2>/dev/null)
   rm -rf "$TEST_TMP"
 }
 trap cleanup EXIT
@@ -77,6 +96,95 @@ assert_command_fails() {
   if "$@" >/dev/null 2>&1; then
     fail "expected command to fail: $*"
   fi
+}
+
+activate_fake_privilege_runner() {
+  TEST_FAKE_SUDO_BIN="$1"
+  sudo_command() {
+    printf '%s' "$TEST_FAKE_SUDO_BIN"
+  }
+  run_with_privilege() {
+    "$TEST_FAKE_SUDO_BIN" "$@"
+  }
+}
+
+build_test_rename_helper() {
+  local output_path="$1"
+
+  /usr/bin/xcrun clang \
+    -arch arm64 \
+    -mmacosx-version-min=12.0 \
+    -Os \
+    -Wall \
+    -Wextra \
+    -Werror \
+    -o "$output_path" \
+    "$RENAME_HELPER_SOURCE"
+  /usr/bin/codesign \
+    --force \
+    --sign - \
+    --timestamp=none \
+    --identifier com.ccswitch.modelhub.rename-exclusive \
+    "$output_path"
+  /usr/bin/codesign --verify --strict --verbose=2 "$output_path"
+}
+
+ensure_test_rename_helper() {
+  if [[ ! -x "$TEST_RENAME_HELPER" ]]; then
+    build_test_rename_helper "$TEST_RENAME_HELPER"
+  fi
+}
+
+test_helper_exclusive_rename_preserves_exact_collision() {
+  local case_dir="$TEST_TMP/rename-helper-collision"
+  local helper="$case_dir/rename-exclusive"
+  local source="$case_dir/ChatGPT.app"
+  local competitor="$case_dir/Applications/ChatGPT.app"
+  local status
+  local source_dev
+  local source_ino
+  mkdir -p "$source" "$(dirname "$competitor")" "$competitor"
+  printf 'staged\n' >"$source/owner"
+  printf 'competitor\n' >"$competitor/owner"
+
+  build_test_rename_helper "$helper"
+  source_dev="$(/usr/bin/stat -f '%d' "$source")"
+  source_ino="$(/usr/bin/stat -f '%i' "$source")"
+  set +e
+  "$helper" "$source" "$competitor" "$source_dev" "$source_ino" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  assert_equals "$status" '17'
+  assert_contains "$source/owner" 'staged'
+  assert_contains "$competitor/owner" 'competitor'
+  assert_equals "$(/usr/bin/lipo -archs "$helper")" 'arm64'
+  /usr/bin/codesign --verify --strict --verbose=2 "$helper"
+
+  set +e
+  "$helper" >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_equals "$status" '64'
+  set +e
+  "$helper" "$case_dir/missing-source" "$case_dir/new-target" 0 0 >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_equals "$status" '1'
+
+  mkdir "$case_dir/identity-source"
+  set +e
+  "$helper" \
+    "$case_dir/identity-source" \
+    "$case_dir/identity-target" \
+    "$source_dev" \
+    "$source_ino" \
+    >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_equals "$status" '18'
+  [[ -d "$case_dir/identity-source" ]] || fail 'identity mismatch moved the source'
+  [[ ! -e "$case_dir/identity-target" ]] || fail 'identity mismatch created the target'
 }
 
 run_test() {
@@ -273,6 +381,7 @@ test_preflight_validates_chatgpt_codex_team_id() {
   mkdir -p "$(dirname "$codex_path")"
   : >"$codex_path"
   chmod +x "$codex_path"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
 
   printf '%s\n' \
     '#!/bin/bash' \
@@ -286,10 +395,867 @@ test_preflight_validates_chatgpt_codex_team_id() {
     validate_chatgpt_codex "$codex_path" '2DC432GLL2'
 }
 
+create_chatgpt_app_fixture() {
+  local app_path="$1"
+  local executable_name="${2:-ChatGPT}"
+
+  mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+  printf '%s\n' \
+    'CFBundleIdentifier=com.openai.codex' \
+    "CFBundleExecutable=$executable_name" \
+    >"$app_path/Contents/Info.plist"
+  : >"$app_path/Contents/MacOS/$executable_name"
+  : >"$app_path/Contents/Resources/codex"
+  chmod +x \
+    "$app_path/Contents/MacOS/$executable_name" \
+    "$app_path/Contents/Resources/codex"
+}
+
+create_chatgpt_validation_stubs() {
+  local case_dir="$1"
+
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[[ "$1" == "-extract" && "$3" == "raw" && "$4" == "-o" && "$5" == "-" ]]' \
+    'if [[ "$6" == */.chatgpt-modelhub.*/ChatGPT.app/* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
+    'awk -F= -v key="$2" '\''$1 == key { print substr($0, index($0, "=") + 1); found = 1; exit } END { exit(found ? 0 : 1) }'\'' "$6"' \
+    >"$case_dir/plutil"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'target="${@: -1}"' \
+    'if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
+    'if [[ "$1" == "--verify" ]]; then' \
+    '  [[ "$2" == "--deep" && "$3" == "--strict" && "$#" == "4" ]]' \
+    '  if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app && "${FAKE_TEMP_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
+    '  if [[ -n "${FAKE_FINAL_TARGET:-}" && "$target" == "$FAKE_FINAL_TARGET" && "${FAKE_FINAL_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
+    '  [[ "${FAKE_APP_STRICT:-pass}" == "pass" ]]' \
+    'elif [[ "$1" == "-dv" ]]; then' \
+    '  if [[ "$target" == */Contents/Resources/codex ]]; then' \
+    '    echo "TeamIdentifier=${FAKE_CODEX_TEAM_ID:-2DC432GLL2}" >&2' \
+    '  else' \
+    '    echo "TeamIdentifier=${FAKE_APP_TEAM_ID:-2DC432GLL2}" >&2' \
+    '  fi' \
+    'else' \
+    '  exit 64' \
+    'fi' \
+    >"$case_dir/codesign"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'target="${@: -1}"' \
+    'if [[ "$target" == */.chatgpt-modelhub.*/ChatGPT.app/* && "${FAKE_REQUIRE_PRIVILEGED_STAGING:-0}" == "1" && "${FAKE_PRIVILEGED:-0}" != "1" ]]; then exit 77; fi' \
+    'printf "%s\n" "$*" >>"${FAKE_FILE_LOG:-/dev/null}"' \
+    'if [[ "${1:-}" == "-b" ]]; then' \
+    '  echo "Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    'else' \
+    '  echo "$1: Mach-O universal binary with architectures: [${FAKE_APP_ARCHS:-arm64}]"' \
+    'fi' \
+    >"$case_dir/file"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo curl >>"$FAKE_MUTATION_LOG"' \
+    'exit 90' \
+    >"$case_dir/curl"
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo hdiutil >>"$FAKE_MUTATION_LOG"' \
+    'exit 91' \
+    >"$case_dir/hdiutil"
+  chmod +x \
+    "$case_dir/plutil" \
+    "$case_dir/codesign" \
+    "$case_dir/file" \
+    "$case_dir/curl" \
+    "$case_dir/hdiutil"
+}
+
+test_validates_existing_chatgpt_app() {
+  local case_dir="$TEST_TMP/chatgpt-validation"
+  local app_path="$case_dir/ChatGPT.app"
+  local misleading_app_path="$case_dir/misleading/ChatGPT.app"
+  local file_log="$case_dir/file.log"
+  local info_plist="$app_path/Contents/Info.plist"
+  local codex_path="$app_path/Contents/Resources/codex"
+  mkdir -p "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  create_chatgpt_app_fixture "$app_path" 'OpenAI ChatGPT'
+  create_chatgpt_validation_stubs "$case_dir"
+
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  cp "$info_plist" "$case_dir/Info.plist.valid"
+  printf '%s\n' \
+    'CFBundleIdentifier=com.example.impostor' \
+    'CFBundleExecutable=OpenAI ChatGPT' \
+    >"$info_plist"
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  cp "$case_dir/Info.plist.valid" "$info_plist"
+
+  FAKE_APP_TEAM_ID='WRONGTEAM' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  FAKE_APP_ARCHS='x86_64' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  FAKE_APP_STRICT='fail' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  mv "$codex_path" "$case_dir/codex.saved"
+  CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+  mv "$case_dir/codex.saved" "$codex_path"
+  FAKE_CODEX_TEAM_ID='WRONGTEAM' CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" \
+    CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$app_path" '2DC432GLL2' 'com.openai.codex'
+
+  create_chatgpt_app_fixture "$misleading_app_path" 'arm64'
+  FAKE_APP_ARCHS='x86_64' FAKE_FILE_LOG="$file_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" \
+    assert_command_fails validate_chatgpt_app "$misleading_app_path" '2DC432GLL2' 'com.openai.codex'
+  assert_contains "$file_log" "-b $misleading_app_path/Contents/MacOS/arm64"
+}
+
+test_blocks_invalid_existing_chatgpt_without_mutation() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-existing"
+  local app_path="$case_dir/Applications/ChatGPT.app"
+  local mutation_log="$case_dir/mutations.log"
+  local stderr_file="$case_dir/stderr.log"
+  local before_digest
+  local after_digest
+  local status
+  mkdir -p "$case_dir/Applications"
+  create_chatgpt_app_fixture "$app_path"
+  create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  configure_install_paths
+  before_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
+
+  set +e
+  FAKE_APP_TEAM_ID='WRONGTEAM' FAKE_MUTATION_LOG="$mutation_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" CC_SWITCH_CURL_BIN="$case_dir/curl" \
+    CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil" \
+    ensure_chatgpt_app "$case_dir/stage" 2>"$stderr_file"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid existing ChatGPT app was accepted'
+  assert_contains "$stderr_file" 'https://openai.com/chatgpt/download/'
+  assert_contains "$stderr_file" 'official OpenAI download page'
+  [[ ! -e "$mutation_log" ]] || fail 'invalid existing ChatGPT app triggered curl or hdiutil'
+  after_digest="$(find "$app_path" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256)"
+  assert_equals "$after_digest" "$before_digest"
+}
+
+test_blocks_invalid_existing_chatgpt_symlink_without_download() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-symlink"
+  local mutation_log="$case_dir/mutations.log"
+  local status
+  mkdir -p "$case_dir/Applications" "$case_dir/stage"
+  ln -s "$case_dir/missing-ChatGPT.app" "$case_dir/Applications/ChatGPT.app"
+  create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  configure_install_paths
+
+  set +e
+  FAKE_MUTATION_LOG="$mutation_log" \
+    CC_SWITCH_PLUTIL_BIN="$case_dir/plutil" CC_SWITCH_CODESIGN_BIN="$case_dir/codesign" \
+    CC_SWITCH_FILE_BIN="$case_dir/file" CC_SWITCH_CURL_BIN="$case_dir/curl" \
+    CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil" \
+    ensure_chatgpt_app "$case_dir/stage" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid ChatGPT symlink was accepted'
+  [[ -L "$CHATGPT_APP_PATH" ]] || fail 'invalid ChatGPT symlink was replaced'
+  [[ ! -e "$mutation_log" ]] || fail 'invalid ChatGPT symlink triggered curl or hdiutil'
+}
+
+test_preflight_blocks_invalid_existing_chatgpt_before_release_assets() {
+  local case_dir="$TEST_TMP/chatgpt-invalid-before-release"
+  local app_path="$case_dir/Applications/ChatGPT.app"
+  local output
+  local status
+  mkdir -p "$case_dir/Applications" "$case_dir/tmp"
+  create_chatgpt_app_fixture "$app_path"
+  create_chatgpt_validation_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_EUID=501
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/missing-release-assets"
+  export CC_SWITCH_INSTALLER_TEST_OS=Darwin
+  export CC_SWITCH_INSTALLER_TEST_ARCH=arm64
+  export CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR=15
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/file"
+  export FAKE_APP_TEAM_ID=WRONGTEAM
+  export TMPDIR="$case_dir/tmp"
+
+  set +e
+  output="$(perform_install 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'invalid existing ChatGPT app passed top-level preflight'
+  [[ "$output" == *'official OpenAI download page'* ]] \
+    || fail "release assets were accessed before ChatGPT preflight: $output"
+  [[ "$output" != *'release asset'* ]] \
+    || fail "invalid ChatGPT preflight reported a release asset error: $output"
+}
+
+create_chatgpt_bootstrap_stubs() {
+  local case_dir="$1"
+
+  create_chatgpt_validation_stubs "$case_dir"
+  write_executable_stub "$case_dir/curl" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_CURL_LOG"' \
+    'if [[ "$*" != *"--output"* ]]; then' \
+    '  if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '    if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
+    '      /usr/bin/sed '\''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g'\'' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '      /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '    fi' \
+    '    printf "{\"status\":\"healthy\"}\n"' \
+    '    exit 0' \
+    '  fi' \
+    '  exit 22' \
+    'fi' \
+    '[[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "download-fail" ]] || exit 81' \
+    'output_path=""' \
+    'while [[ "$#" -gt 0 ]]; do' \
+    '  if [[ "$1" == "--output" ]]; then output_path="$2"; shift 2; else shift; fi' \
+    'done' \
+    '[[ -n "$output_path" ]] || exit 64' \
+    'printf "fake-dmg\n" >"$output_path"'
+  write_executable_stub "$case_dir/hdiutil" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_HDIUTIL_LOG"' \
+    'case "$1" in' \
+    '  attach)' \
+    '    [[ "$2" == "-nobrowse" && "$3" == "-readonly" && "$4" == "-mountpoint" && "$#" == "6" ]]' \
+    '    [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "attach-fail" ]] || exit 82' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "partial-attach-fail" ]]; then printf "%s\n" "$5" >"$FAKE_CHATGPT_MOUNT_STATE"; exit 82; fi' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "mount-symlink" ]]; then' \
+    '      /bin/rmdir "$5"' \
+    '      ln -s "$FAKE_CHATGPT_MOUNT_ESCAPE" "$5"' \
+    '    elif [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "source-symlink" ]]; then' \
+    '      ln -s "$FAKE_CHATGPT_DMG_SOURCE" "$5/ChatGPT.app"' \
+    '    elif [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "app-missing" ]]; then' \
+    '      /usr/bin/ditto "$FAKE_CHATGPT_DMG_SOURCE" "$5/ChatGPT.app"' \
+    '    fi' \
+    '    ;;' \
+    '  detach)' \
+    '    [[ "$#" == "2" ]]' \
+    '    printf "detach\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "detach-fail-always" ]]; then exit 83; fi' \
+    '    if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "detach-fail-once" && ! -e "$FAKE_CHATGPT_DETACH_STATE" ]]; then : >"$FAKE_CHATGPT_DETACH_STATE"; exit 83; fi' \
+    '    /bin/rm -f "$FAKE_CHATGPT_MOUNT_STATE"' \
+    '    ;;' \
+    '  *) exit 64 ;;' \
+    'esac'
+  write_executable_stub "$case_dir/ditto" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_DITTO_LOG"' \
+    'if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "staging-symlink" ]]; then ln -s "$1" "$2"; exit 0; fi' \
+    'exec /usr/bin/ditto "$@"'
+  write_executable_stub "$case_dir/mount" \
+    'if [[ "${FAKE_MOUNT_CHECK_FAIL:-0}" == "1" ]]; then exit 85; fi' \
+    'if [[ -e "$FAKE_CHATGPT_MOUNT_STATE" ]]; then printf "/dev/disk-test on %s (apfs, read-only)\n" "$(/bin/cat "$FAKE_CHATGPT_MOUNT_STATE")"; else exec /sbin/mount "$@"; fi'
+  write_executable_stub "$case_dir/rm" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_RM_LOG"' \
+    'if [[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "rm-fail-once" && ! -e "$FAKE_CHATGPT_RM_STATE" ]]; then : >"$FAKE_CHATGPT_RM_STATE"; exit 84; fi' \
+    'exec /bin/rm "$@"'
+  write_executable_stub "$case_dir/sudo" \
+    'printf "%s\n" "$*" >>"$FAKE_CHATGPT_SUDO_LOG"' \
+    'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
+    'if [[ "${1:-}" == "/usr/bin/mktemp" && "${2:-}" == "-d" && "${3:-}" == "/private/var/tmp/.cc-switch-modelhub-helper.XXXXXX" ]]; then' \
+    '  trusted_dir="$("$@")"' \
+    '  printf "%s\n" "$trusted_dir" >"$FAKE_TRUSTED_DIR_STATE"' \
+    '  printf "%s\n" "$trusted_dir"' \
+    '  exit 0' \
+    'fi' \
+    'if [[ "${1:-}" == */rename-exclusive ]]; then' \
+    '  printf "publish\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    'fi' \
+    'if [[ "${1:-}" == */rename-exclusive && -n "${FAKE_RACE_TARGET:-}" && ! -e "$FAKE_RACE_TARGET" ]]; then' \
+    '  mkdir -p "$FAKE_RACE_TARGET"' \
+    '  printf "competitor\n" >"$FAKE_RACE_TARGET/owner"' \
+    'fi' \
+    'if [[ "${1:-}" == "/bin/cp" && "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" == "trusted-copy-tamper" ]]; then' \
+    '  "$@"' \
+    '  printf "tamper\n" >>"${@: -1}"' \
+    '  /usr/bin/codesign --force --sign - --timestamp=none --identifier com.ccswitch.modelhub.rename-exclusive "${@: -1}" >/dev/null' \
+    '  exit 0' \
+    'fi' \
+    'if [[ "${1:-}" == "/bin/rm" && "${@: -1}" == */.chatgpt-helper.* ]]; then' \
+    '  /bin/chmod -R u+w "${@: -1}"' \
+    'fi' \
+    'if [[ "${1:-}" == "/bin/rm" && "${@: -1}" == /private/var/tmp/.cc-switch-modelhub-helper.* ]]; then' \
+    '  /bin/chmod -R u+w "${@: -1}"' \
+    'fi' \
+    'if [[ "${1:-}" == "/usr/bin/stat" && "${2:-}" == "-f" && "${3:-}" == "%u:%Lp" && "${4:-}" == /private/var/tmp/.cc-switch-modelhub-helper.* ]]; then' \
+    '  printf "0:%s\n" "$(/usr/bin/stat -f %Lp "$4")"' \
+    '  exit 0' \
+    'fi' \
+    'if [[ "${1:-}" == "/usr/bin/shasum" && "${FAKE_TRUSTED_PARENT_ATTACK:-0}" == "1" ]]; then' \
+    '  hash_output="$("$@")"' \
+    '  hash_status=$?' \
+    '  trusted_helper="${@: -1}"' \
+    '  trusted_dir="$(dirname "$trusted_helper")"' \
+    '  printf "attack-attempt\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  if [[ "$trusted_dir" == /private/var/tmp/.cc-switch-modelhub-helper.* && "$(/usr/bin/stat -f %u /private/var/tmp)" == "0" && "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]]; then' \
+    '    printf "attack-blocked\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  else' \
+    '    /bin/mv "$trusted_dir" "$trusted_dir.attacker-old"' \
+    '    /bin/chmod -R u+w "$trusted_dir.attacker-old"' \
+    '    /bin/mkdir "$trusted_dir"' \
+    '    /bin/cp /usr/bin/false "$trusted_helper"' \
+    '    /bin/chmod 0500 "$trusted_helper" "$trusted_dir"' \
+    '    printf "attacker-executed\n" >>"$FAKE_CHATGPT_EVENT_LOG"' \
+    '  fi' \
+    '  printf "%s\n" "$hash_output"' \
+    '  exit "$hash_status"' \
+    'fi' \
+    'set +e' \
+    'FAKE_PRIVILEGED=1 "$@"' \
+    'command_status=$?' \
+    'set -e' \
+    'if [[ "${1:-}" == */rename-exclusive && "$command_status" == "0" && "${FAKE_SIGNAL_AFTER_PUBLISH:-0}" == "1" ]]; then' \
+    '  kill -TERM "$PPID"' \
+    'fi' \
+    'exit "$command_status"'
+
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/file"
+  export CC_SWITCH_CURL_BIN="$case_dir/curl"
+  export CC_SWITCH_HDIUTIL_BIN="$case_dir/hdiutil"
+  export CC_SWITCH_DITTO_BIN="$case_dir/ditto"
+  export CC_SWITCH_RM_BIN="$case_dir/rm"
+  export CC_SWITCH_MOUNT_BIN="$case_dir/mount"
+  export FAKE_CHATGPT_CURL_LOG="$case_dir/curl.log"
+  export FAKE_CHATGPT_HDIUTIL_LOG="$case_dir/hdiutil.log"
+  export FAKE_CHATGPT_DITTO_LOG="$case_dir/ditto.log"
+  export FAKE_CHATGPT_SUDO_LOG="$case_dir/sudo.log"
+  export FAKE_CHATGPT_RM_LOG="$case_dir/rm.log"
+  export FAKE_CHATGPT_EVENT_LOG="$case_dir/events.log"
+  export FAKE_CHATGPT_DETACH_STATE="$case_dir/detach.state"
+  export FAKE_CHATGPT_RM_STATE="$case_dir/rm.state"
+  export FAKE_CHATGPT_MOUNT_STATE="$case_dir/mount.state"
+  export FAKE_TRUSTED_DIR_STATE="$case_dir/trusted-dir.state"
+  export FAKE_MOUNT_CHECK_FAIL=0
+  export FAKE_TRUSTED_PARENT_ATTACK=0
+  activate_fake_privilege_runner "$case_dir/sudo"
+}
+
+prepare_chatgpt_bootstrap_case() {
+  local case_dir="$1"
+
+  mkdir -p "$case_dir/Applications" "$case_dir/stage" "$case_dir/dmg-source"
+  create_chatgpt_app_fixture "$case_dir/dmg-source/ChatGPT.app"
+  printf 'installed-from-official-dmg\n' \
+    >"$case_dir/dmg-source/ChatGPT.app/Contents/Resources/bootstrap-marker"
+  mkdir -p "$case_dir/mount-escape"
+  /usr/bin/ditto \
+    "$case_dir/dmg-source/ChatGPT.app" \
+    "$case_dir/mount-escape/ChatGPT.app"
+  create_chatgpt_bootstrap_stubs "$case_dir"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export FAKE_CHATGPT_DMG_SOURCE="$case_dir/dmg-source/ChatGPT.app"
+  export FAKE_CHATGPT_MOUNT_ESCAPE="$case_dir/mount-escape"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  export FAKE_APP_TEAM_ID=2DC432GLL2
+  export FAKE_APP_STRICT=pass
+  export FAKE_TEMP_APP_STRICT=pass
+  export FAKE_FINAL_APP_STRICT=pass
+  export FAKE_FINAL_TARGET="$case_dir/Applications/ChatGPT.app"
+  export FAKE_REQUIRE_PRIVILEGED_STAGING=0
+  export FAKE_SIGNAL_AFTER_PUBLISH=0
+  export FAKE_RACE_TARGET=''
+  configure_install_paths
+  NEEDS_SUDO=1
+  ensure_test_rename_helper
+  export FAKE_CHATGPT_RESOURCE_DIR="$case_dir/stage/resources/modelhub-installer"
+  mkdir -p "$FAKE_CHATGPT_RESOURCE_DIR/helpers"
+  cp "$TEST_RENAME_HELPER" "$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  export CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256="$(
+    /usr/bin/shasum -a 256 "$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive" \
+      | awk '{ print $1 }'
+  )"
+}
+
+assert_chatgpt_bootstrap_scratch_clean() {
+  local case_dir="$1"
+
+  [[ -z "$(find "$case_dir/stage" -mindepth 1 -maxdepth 1 -type d -name 'chatgpt-mount.*' -print -quit)" ]] \
+    || fail 'ChatGPT mount directory was not cleaned'
+  [[ -z "$(find "$case_dir/Applications" -mindepth 1 -maxdepth 1 -type d -name '.chatgpt-modelhub.*' -print -quit)" ]] \
+    || fail 'ChatGPT same-volume temporary directory was not cleaned'
+  [[ -z "$(find "$case_dir/Applications" -mindepth 1 -maxdepth 1 -type d -name '.chatgpt-helper.*' -print -quit)" ]] \
+    || fail 'trusted ChatGPT helper directory was not cleaned'
+  if [[ -e "$case_dir/trusted-dir.state" ]]; then
+    [[ ! -e "$(/bin/cat "$case_dir/trusted-dir.state")" ]] \
+      || fail 'private var tmp trusted helper directory was not cleaned'
+  fi
+}
+
+test_bootstraps_missing_chatgpt_from_official_dmg() {
+  local case_dir="$TEST_TMP/chatgpt-bootstrap-success"
+  local curl_count
+  local attach_count
+  prepare_chatgpt_bootstrap_case "$case_dir"
+
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'ChatGPT was not installed'
+  assert_equals "$CHATGPT_INSTALLED_BY_RUN" '1'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  assert_contains "$FAKE_CHATGPT_CURL_LOG" '--fail --location --silent --show-error --retry 3 --retry-all-errors'
+  assert_contains "$FAKE_CHATGPT_CURL_LOG" "--output $case_dir/stage/ChatGPT.dmg $CHATGPT_DMG_URL"
+  assert_occurrences "$FAKE_CHATGPT_CURL_LOG" "$CHATGPT_DMG_URL" 1
+  assert_contains "$FAKE_CHATGPT_HDIUTIL_LOG" "attach -nobrowse -readonly -mountpoint $case_dir/stage/chatgpt-mount."
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'attach -nobrowse -readonly -mountpoint' 1
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+  assert_contains "$FAKE_CHATGPT_DITTO_LOG" "/ChatGPT.app $case_dir/Applications/.chatgpt-modelhub."
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d $case_dir/Applications/.chatgpt-modelhub.XXXXXX"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/mktemp -d /private/var/tmp/.cc-switch-modelhub-helper.XXXXXX"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/cp $FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/bin/chmod 0500"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/usr/bin/shasum -a 256 /private/var/tmp/.cc-switch-modelhub-helper."
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "/private/var/tmp/.cc-switch-modelhub-helper."
+  assert_equals "$(sed -n '1p' "$FAKE_CHATGPT_EVENT_LOG")" 'detach'
+  assert_equals "$(sed -n '2p' "$FAKE_CHATGPT_EVENT_LOG")" 'publish'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+
+  curl_count="$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')"
+  attach_count="$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")"
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+  assert_equals "$(wc -l <"$FAKE_CHATGPT_CURL_LOG" | tr -d ' ')" "$curl_count"
+  assert_equals "$(grep -c '^attach ' "$FAKE_CHATGPT_HDIUTIL_LOG")" "$attach_count"
+}
+
+test_bootstraps_missing_chatgpt_cleans_all_failure_paths() {
+  local mode
+  local case_dir
+  local status
+
+  for mode in download-fail attach-fail partial-attach-fail app-missing signature-fail temp-signature-fail mount-symlink source-symlink staging-symlink; do
+    case_dir="$TEST_TMP/chatgpt-bootstrap-$mode"
+    prepare_chatgpt_bootstrap_case "$case_dir"
+    export FAKE_CHATGPT_BOOTSTRAP_MODE="$mode"
+    if [[ "$mode" == "signature-fail" ]]; then
+      export FAKE_APP_TEAM_ID=WRONGTEAM
+    elif [[ "$mode" == "temp-signature-fail" ]]; then
+      export FAKE_TEMP_APP_STRICT=fail
+    fi
+
+    set +e
+    ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+    status=$?
+    set -e
+
+    [[ "$status" -ne 0 ]] || fail "ChatGPT bootstrap unexpectedly succeeded for $mode"
+    [[ ! -e "$CHATGPT_APP_PATH" ]] || fail "ChatGPT target exists after $mode"
+    assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+    if [[ "$mode" == "download-fail" ]]; then
+      [[ ! -e "$FAKE_CHATGPT_HDIUTIL_LOG" ]] || fail 'download failure unexpectedly invoked hdiutil'
+    elif [[ "$mode" == "attach-fail" ]]; then
+      assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 0
+    else
+      assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+    fi
+  done
+}
+
+test_bootstraps_missing_chatgpt_rejects_final_target_race() {
+  local case_dir="$TEST_TMP/chatgpt-bootstrap-race"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_RACE_TARGET="$CHATGPT_APP_PATH"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'ChatGPT bootstrap overwrote a concurrent target'
+  assert_contains "$CHATGPT_APP_PATH/owner" 'competitor'
+  [[ ! -e "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" ]] \
+    || fail 'concurrent ChatGPT target was overwritten'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_cleanup_retries_detach_before_removing_mount() {
+  local case_dir="$TEST_TMP/chatgpt-cleanup-detach-retry"
+  local mount_dir
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  mount_dir="$case_dir/stage/chatgpt-mount.retry"
+  mkdir -p "$mount_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$case_dir/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=detach-fail-once
+
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first detach cleanup unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" "$mount_dir"
+  [[ -d "$mount_dir" ]] || fail 'failed detach removed a still-mounted path'
+  [[ ! -e "$FAKE_CHATGPT_RM_LOG" ]] || fail 'failed detach invoked mount removal'
+
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ''
+  [[ ! -e "$mount_dir" ]] || fail 'second cleanup did not remove detached mount directory'
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 2
+}
+
+test_chatgpt_bootstrap_cleanup_preserves_pending_mount_when_inspection_fails() {
+  local case_dir="$TEST_TMP/chatgpt-cleanup-mount-inspection"
+  local mount_dir
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  mount_dir="$case_dir/stage/chatgpt-mount.pending"
+  mkdir -p "$mount_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$case_dir/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='pending'
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  export FAKE_MOUNT_CHECK_FAIL=1
+
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'mount inspection failure unexpectedly cleaned the mount'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_STATE" 'pending'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" "$mount_dir"
+  [[ -d "$mount_dir" ]] || fail 'mount inspection failure removed an unknown mount path'
+  [[ ! -e "$FAKE_CHATGPT_RM_LOG" ]] || fail 'mount inspection failure invoked rm'
+
+  export FAKE_MOUNT_CHECK_FAIL=0
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ''
+  [[ ! -e "$mount_dir" ]] || fail 'retry did not clean the inactive mount directory'
+}
+
+test_chatgpt_bootstrap_cleanup_retries_mount_and_temp_removal() {
+  local mount_case="$TEST_TMP/chatgpt-cleanup-mount-rm-retry"
+  local temp_case="$TEST_TMP/chatgpt-cleanup-temp-rm-retry"
+  local mount_dir
+  local temp_dir
+  local status
+
+  prepare_chatgpt_bootstrap_case "$mount_case"
+  mount_dir="$mount_case/stage/chatgpt-mount.retry"
+  mkdir -p "$mount_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$mount_case/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR="$mount_dir"
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=rm-fail-once
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first mount removal unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" "$mount_dir"
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_STATE" 'detached'
+  [[ -d "$mount_dir" ]] || fail 'failed mount removal lost retry state'
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ''
+  assert_occurrences "$FAKE_CHATGPT_HDIUTIL_LOG" 'detach ' 1
+
+  prepare_chatgpt_bootstrap_case "$temp_case"
+  temp_dir="$temp_case/Applications/.chatgpt-modelhub.retry"
+  mkdir -p "$temp_dir"
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$temp_case/stage"
+  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='none'
+  CHATGPT_BOOTSTRAP_TEMP_DIR="$temp_dir"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=rm-fail-once
+  set +e
+  cleanup_chatgpt_bootstrap >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]] || fail 'first temp removal unexpectedly succeeded'
+  assert_equals "$CHATGPT_BOOTSTRAP_TEMP_DIR" "$temp_dir"
+  [[ -d "$temp_dir" ]] || fail 'failed temp removal lost retry state'
+  cleanup_chatgpt_bootstrap
+  assert_equals "$CHATGPT_BOOTSTRAP_TEMP_DIR" ''
+  [[ ! -e "$temp_dir" ]] || fail 'second cleanup did not remove temp directory'
+}
+
+test_chatgpt_bootstrap_detach_failure_prevents_publication() {
+  local case_dir="$TEST_TMP/chatgpt-detach-before-publish"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=detach-fail-always
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a failed DMG detach'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'ChatGPT was published before successful DMG detach'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'publish'
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  cleanup_chatgpt_bootstrap
+}
+
+test_chatgpt_bootstrap_final_validation_failure_preserves_target_and_fails() {
+  local case_dir="$TEST_TMP/chatgpt-final-validation-failure"
+  local output
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_FINAL_APP_STRICT=fail
+
+  set +e
+  output="$(ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a final ChatGPT signature failure'
+  [[ "$output" == *'official OpenAI download page'* ]] \
+    || fail "final ChatGPT validation failure omitted recovery guidance: $output"
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'final validation failure removed the committed ChatGPT target'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_rejects_modified_resigned_helper_by_pinned_hash() {
+  local case_dir="$TEST_TMP/chatgpt-resigned-helper"
+  local helper_path
+  local modified_source="$case_dir/modified-rename-exclusive.c"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  helper_path="$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  sed 's/destination already exists/destination collision/' \
+    "$RENAME_HELPER_SOURCE" >"$modified_source"
+  /usr/bin/xcrun clang \
+    -arch arm64 -mmacosx-version-min=12.0 \
+    -Os -Wall -Wextra -Werror \
+    -o "$helper_path" "$modified_source"
+  /usr/bin/codesign \
+    --force --sign - --timestamp=none \
+    --identifier com.ccswitch.modelhub.rename-exclusive \
+    "$helper_path" >/dev/null
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a modified re-signed helper'
+  [[ ! -e "$FAKE_CHATGPT_CURL_LOG" ]] || fail 'modified helper was rejected only after download'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'publish'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'modified helper installed ChatGPT'
+}
+
+test_chatgpt_bootstrap_rejects_tampered_trusted_copy_before_exec() {
+  local case_dir="$TEST_TMP/chatgpt-tampered-trusted-copy"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=trusted-copy-tamper
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap executed a tampered trusted helper copy'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'publish'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'tampered trusted helper installed ChatGPT'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_trusted_parent_blocks_post_hash_replacement() {
+  local case_dir="$TEST_TMP/chatgpt-trusted-parent-attack"
+  local trusted_dir
+  local attack_line
+  local publish_line
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_TRUSTED_PARENT_ATTACK=1
+
+  assert_equals "$(/usr/bin/stat -f %u /private/var/tmp)" '0'
+  [[ "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]] \
+    || fail '/private/var/tmp is not sticky'
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+
+  trusted_dir="$(/bin/cat "$FAKE_TRUSTED_DIR_STATE")"
+  [[ "$trusted_dir" == /private/var/tmp/.cc-switch-modelhub-helper.* ]] \
+    || fail "trusted helper used an unsafe parent: $trusted_dir"
+  assert_contains "$FAKE_CHATGPT_EVENT_LOG" 'attack-attempt'
+  assert_contains "$FAKE_CHATGPT_EVENT_LOG" 'attack-blocked'
+  assert_not_contains "$FAKE_CHATGPT_EVENT_LOG" 'attacker-executed'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  attack_line="$(grep -n '^attack-blocked$' "$FAKE_CHATGPT_EVENT_LOG" | cut -d: -f1)"
+  publish_line="$(grep -n '^publish$' "$FAKE_CHATGPT_EVENT_LOG" | cut -d: -f1)"
+  [[ "$attack_line" -lt "$publish_line" ]] || fail 'attack hook did not run before helper execution'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
+test_chatgpt_bootstrap_requires_root_sticky_trusted_parent() {
+  validate_trusted_helper_parent
+  assert_equals "$(/usr/bin/stat -f %u /private/var/tmp)" '0'
+  [[ "$(/usr/bin/stat -f %Sp /private/var/tmp)" == *t ]] \
+    || fail '/private/var/tmp is not sticky'
+}
+
+test_production_mode_ignores_privileged_tool_overrides() {
+  local case_dir="$TEST_TMP/production-tool-overrides"
+  local malicious="$case_dir/malicious"
+  mkdir -p "$case_dir"
+  write_executable_stub "$malicious" 'exit 99'
+  export CC_SWITCH_INSTALLER_TEST_MODE=0
+  export CC_SWITCH_SUDO_BIN="$malicious"
+  export CC_SWITCH_CODESIGN_BIN="$malicious"
+  export CC_SWITCH_PLUTIL_BIN="$malicious"
+  export CC_SWITCH_FILE_BIN="$malicious"
+  export CC_SWITCH_DITTO_BIN="$malicious"
+  export CC_SWITCH_RM_BIN="$malicious"
+  export CC_SWITCH_XATTR_BIN="$malicious"
+  export CC_SWITCH_HELPER_CODESIGN_BIN="$malicious"
+  export CC_SWITCH_LIPO_BIN="$malicious"
+  export CC_SWITCH_MOUNT_BIN="$malicious"
+
+  assert_equals "$(sudo_command)" '/usr/bin/sudo'
+  assert_equals "$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)" '/usr/bin/codesign'
+  assert_equals "$(installer_tool_path CC_SWITCH_PLUTIL_BIN /usr/bin/plutil)" '/usr/bin/plutil'
+  assert_equals "$(installer_tool_path CC_SWITCH_FILE_BIN /usr/bin/file)" '/usr/bin/file'
+  assert_equals "$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)" '/usr/bin/ditto'
+  assert_equals "$(installer_tool_path CC_SWITCH_RM_BIN /bin/rm)" '/bin/rm'
+  assert_equals "$(installer_tool_path CC_SWITCH_XATTR_BIN /usr/bin/xattr)" '/usr/bin/xattr'
+  assert_equals "$(installer_tool_path CC_SWITCH_HELPER_CODESIGN_BIN /usr/bin/codesign)" '/usr/bin/codesign'
+  assert_equals "$(installer_tool_path CC_SWITCH_LIPO_BIN /usr/bin/lipo)" '/usr/bin/lipo'
+  assert_equals "$(installer_tool_path CC_SWITCH_MOUNT_BIN /sbin/mount)" '/sbin/mount'
+}
+
+test_real_sudo_rejects_non_allowlisted_privileged_commands() {
+  local case_dir="$TEST_TMP/privileged-command-allowlist"
+  local malicious="$case_dir/malicious"
+  local malicious_log="$case_dir/malicious.log"
+  local sudo_symlink="$case_dir/system-sudo"
+  mkdir -p "$case_dir"
+  write_executable_stub "$malicious" ': >"$MALICIOUS_LOG"' 'exit 0'
+  ln -s /usr/bin/sudo "$sudo_symlink"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_SUDO_BIN="$sudo_symlink"
+  export MALICIOUS_LOG="$malicious_log"
+  NEEDS_SUDO=1
+
+  assert_equals "$(sudo_command)" '/usr/bin/sudo'
+  validate_privileged_command /usr/bin/ditto
+  validate_privileged_command /usr/bin/codesign
+  validate_privileged_command /bin/rm
+  assert_command_fails validate_privileged_command "$malicious"
+  assert_command_fails run_with_privilege "$malicious"
+  [[ ! -e "$malicious_log" ]] || fail 'test sudo override executed a non-allowlisted command'
+}
+
+test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege() {
+  local case_dir="$TEST_TMP/chatgpt-root-owned-staging"
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_REQUIRE_PRIVILEGED_STAGING=1
+
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'privileged staging validation did not install ChatGPT'
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/plutil -extract"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/codesign --verify --deep --strict"
+  assert_contains "$FAKE_CHATGPT_SUDO_LOG" "$case_dir/file -b"
+}
+
+test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download() {
+  local case_dir="$TEST_TMP/chatgpt-unverified-helper"
+  local corrupt_helper
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  corrupt_helper="$FAKE_CHATGPT_RESOURCE_DIR/helpers/rename-exclusive"
+  printf 'tamper\n' >>"$corrupt_helper"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted an unverified rename helper'
+  [[ ! -e "$FAKE_CHATGPT_CURL_LOG" ]] || fail 'unverified helper was rejected only after download'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'unverified helper installed ChatGPT'
+}
+
+test_chatgpt_bootstrap_rejects_signed_helper_outside_verified_resource_root() {
+  local case_dir="$TEST_TMP/chatgpt-outside-helper"
+  local outside_helper="$case_dir/outside-rename-exclusive"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  cp "$TEST_RENAME_HELPER" "$outside_helper"
+
+  set +e
+  ensure_chatgpt_app "$case_dir/stage" "$outside_helper" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'bootstrap accepted a signed helper outside verified resources'
+  [[ ! -e "$FAKE_CHATGPT_CURL_LOG" ]] || fail 'outside helper was rejected only after download'
+  [[ ! -e "$CHATGPT_APP_PATH" ]] || fail 'outside helper installed ChatGPT'
+}
+
+test_chatgpt_bootstrap_signal_after_commit_preserves_prevalidated_target() {
+  local case_dir="$TEST_TMP/chatgpt-signal-after-publish"
+  local status
+  prepare_chatgpt_bootstrap_case "$case_dir"
+  export FAKE_SIGNAL_AFTER_PUBLISH=1
+
+  set +e
+  (
+    trap 'cleanup_chatgpt_bootstrap; exit 143' TERM
+    ensure_chatgpt_app "$case_dir/stage" "$FAKE_CHATGPT_RESOURCE_DIR"
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  assert_equals "$status" '143'
+  [[ -d "$CHATGPT_APP_PATH" ]] || fail 'signal after commit removed the prevalidated ChatGPT target'
+  assert_contains "$CHATGPT_APP_PATH/Contents/Resources/bootstrap-marker" 'installed-from-official-dmg'
+  assert_chatgpt_bootstrap_scratch_clean "$case_dir"
+}
+
 create_expected_resource_tree() {
   local root="$1/modelhub-installer"
-  mkdir -p "$root/assets" "$root/templates"
+  mkdir -p "$root/assets" "$root/golden" "$root/helpers" "$root/templates"
+  ensure_test_rename_helper
   : >"$root/assets/models-modelhub-1m.json"
+  cp "$GOLDEN_CODEX_CONFIG" "$root/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$root/golden/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$root/golden/cc-switch.db" >/dev/null
+  cp "$TEST_RENAME_HELPER" "$root/helpers/rename-exclusive"
   : >"$root/templates/modelhub-provider.toml"
   : >"$root/templates/modelhub-provider-meta.json"
   : >"$root/templates/com.ccswitch.modelhub-env.plist"
@@ -398,6 +1364,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260728-r3'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -410,7 +1377,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260727/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260728-r3/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -668,6 +1635,102 @@ test_settings_merge_creates_missing_file() {
   assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
 }
 
+test_existing_nonwritable_app_requires_privilege() {
+  local case_dir="$TEST_TMP/existing-nonwritable-app"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  local removal_status
+  local needs_sudo
+  mkdir -p "$applications_dir/CC Switch.app/Contents"
+  chmod 0775 "$applications_dir"
+  chmod -R 0555 "$applications_dir/CC Switch.app"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    'if [[ "${1:-}" == "-v" ]]; then exit 0; fi' \
+    'chmod -R u+w "$FAKE_SUDO_APP_PATH"' \
+    '"$@"'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  export FAKE_SUDO_APP_PATH="$applications_dir/CC Switch.app"
+  activate_fake_privilege_runner "$sudo_bin"
+  configure_install_paths
+
+  prepare_application_permissions
+  needs_sudo="$NEEDS_SUDO"
+  set +e
+  remove_managed_target "$CC_SWITCH_APP_PATH"
+  removal_status=$?
+  set -e
+  if [[ -d "$CC_SWITCH_APP_PATH" ]]; then
+    chmod -R u+w "$CC_SWITCH_APP_PATH"
+  fi
+
+  assert_equals "$needs_sudo" '1'
+  assert_equals "$removal_status" '0'
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+  assert_contains "$FAKE_SUDO_LOG" "/bin/rm -rf -- $CC_SWITCH_APP_PATH"
+}
+
+test_existing_nontraversable_app_requires_privilege() {
+  local case_dir="$TEST_TMP/existing-nontraversable-app"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  mkdir -p "$applications_dir/CC Switch.app/Contents"
+  chmod 0775 "$applications_dir"
+  chmod 0666 "$applications_dir/CC Switch.app"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    '[[ "${1:-}" == "-v" ]]'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  activate_fake_privilege_runner "$sudo_bin"
+  configure_install_paths
+
+  prepare_application_permissions
+  chmod 0775 "$applications_dir/CC Switch.app"
+
+  assert_equals "$NEEDS_SUDO" '1'
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+}
+
+test_rejects_root_execution_validation_contract() {
+  assert_command_fails validate_non_root 0
+  validate_non_root 501
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  assert_command_fails validate_execution_identity 0 501
+  assert_command_fails validate_execution_identity 501 0
+  validate_execution_identity 501 501
+}
+
+test_rejects_root_execution_before_install_work() {
+  local case_dir="$TEST_TMP/reject-root-execution"
+  local output
+  local status
+  mkdir -p "$case_dir/tmp"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_EUID=0
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
+  export TMPDIR="$case_dir/tmp"
+
+  set +e
+  output="$(perform_install 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'root execution unexpectedly succeeded'
+  [[ "$output" == *'do not run the entire installer with sudo'* ]] \
+    || fail "root rejection was not explicit: $output"
+  [[ ! -e "$case_dir/Applications" ]] || fail 'root execution wrote to Applications before rejection'
+  [[ -z "$(find "$case_dir/tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'root execution created a staging directory before rejection'
+}
+
 write_executable_stub() {
   local path="$1"
   shift
@@ -683,6 +1746,15 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/codesign" \
     'if [[ "${1:-}" == "-dv" ]]; then echo "TeamIdentifier=2DC432GLL2" >&2; fi' \
     'exit 0'
+  write_executable_stub "$stub_dir/plutil" \
+    'if [[ "${6:-}" == */ChatGPT.app/Contents/Info.plist ]]; then' \
+    '  [[ "$1" == "-extract" && "$3" == "raw" && "$4" == "-o" && "$5" == "-" ]]' \
+    '  awk -F= -v key="$2" '\''$1 == key { print substr($0, index($0, "=") + 1); found = 1; exit } END { exit(found ? 0 : 1) }'\'' "$6"' \
+    'else' \
+    '  exec /usr/bin/plutil "$@"' \
+    'fi'
+  write_executable_stub "$stub_dir/file" \
+    'echo "Mach-O 64-bit executable arm64"'
   write_executable_stub "$stub_dir/security" \
     'printf "%s\n" "${1:-}" >>"${FAKE_SECURITY_LOG:-/dev/null}"' \
     'case "${1:-}" in' \
@@ -723,6 +1795,10 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/sleep" 'exit 0'
   write_executable_stub "$stub_dir/curl" \
     'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '  if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
+    '    /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '  fi' \
     '  if [[ -n "${FAKE_COMPLETION_MARKER_DIR:-}" ]]; then chmod 500 "$FAKE_COMPLETION_MARKER_DIR"; fi' \
     '  printf "{\"status\":\"healthy\",\"timestamp\":\"test\"}\n"' \
     '  exit 0' \
@@ -730,6 +1806,8 @@ create_transaction_stubs() {
     'exit 22'
 
   export CC_SWITCH_CODESIGN_BIN="$stub_dir/codesign"
+  export CC_SWITCH_PLUTIL_BIN="$stub_dir/plutil"
+  export CC_SWITCH_FILE_BIN="$stub_dir/file"
   export CC_SWITCH_SECURITY_BIN="$stub_dir/security"
   export CC_SWITCH_LAUNCHCTL_BIN="$stub_dir/launchctl"
   export CC_SWITCH_OSASCRIPT_BIN="$stub_dir/osascript"
@@ -753,10 +1831,24 @@ create_transaction_assets() {
   local case_dir="$1"
   local asset_dir="$case_dir/assets"
   local resource_root="$case_dir/resource-build/modelhub-installer"
-  mkdir -p "$asset_dir" "$resource_root/assets" "$resource_root/templates"
+  mkdir -p \
+    "$asset_dir" \
+    "$resource_root/assets" \
+    "$resource_root/golden" \
+    "$resource_root/helpers" \
+    "$resource_root/templates"
+  ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
   printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$GOLDEN_CODEX_CONFIG" "$resource_root/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$resource_root/golden/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$resource_root/golden/cc-switch.db" >/dev/null
+  cp "$TEST_RENAME_HELPER" "$resource_root/helpers/rename-exclusive"
   cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
@@ -784,7 +1876,7 @@ create_transaction_state() {
     "$user_home/.cc-switch" \
     "$user_home/.local/share/cc-switch-modelhub" \
     "$applications_dir/CC Switch.app/Contents/MacOS" \
-    "$applications_dir/ChatGPT.app/Contents/Resources"
+    "$applications_dir"
   printf '%s\n' \
     'approval_policy = "on-request"' \
     '[plugins."browser@openai-bundled"]' \
@@ -800,8 +1892,7 @@ create_transaction_state() {
     '}' \
     >"$user_home/.cc-switch/settings.json"
   printf 'old-app\n' >"$applications_dir/CC Switch.app/Contents/MacOS/cc-switch"
-  printf '%s\n' '#!/bin/bash' 'exit 0' >"$applications_dir/ChatGPT.app/Contents/Resources/codex"
-  chmod +x "$applications_dir/ChatGPT.app/Contents/Resources/codex"
+  create_chatgpt_app_fixture "$applications_dir/ChatGPT.app"
   printf '%s\n' '#!/bin/bash' '# old-local-installer' 'exit 70' \
     >"$user_home/.local/share/cc-switch-modelhub/install.sh"
   chmod +x "$user_home/.local/share/cc-switch-modelhub/install.sh"
@@ -866,9 +1957,60 @@ prepare_transaction_case() {
   export FAKE_SECURITY_MODE=success
   export FAKE_SECURITY_FIND_STATUS=''
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_COMPLETION_MARKER_DIR=''
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
   export FAKE_PGREP_MODE=stopped
+}
+
+prepare_missing_chatgpt_transaction_case() {
+  local case_dir="$1"
+
+  prepare_transaction_case "$case_dir"
+  rm -rf "$case_dir/Applications/ChatGPT.app"
+  mkdir -p "$case_dir/dmg-source"
+  create_chatgpt_app_fixture "$case_dir/dmg-source/ChatGPT.app"
+  printf 'installed-from-official-dmg\n' \
+    >"$case_dir/dmg-source/ChatGPT.app/Contents/Resources/bootstrap-marker"
+  create_chatgpt_bootstrap_stubs "$case_dir"
+  export CC_SWITCH_PLUTIL_BIN="$case_dir/stubs/plutil"
+  export CC_SWITCH_CODESIGN_BIN="$case_dir/stubs/codesign"
+  export CC_SWITCH_FILE_BIN="$case_dir/stubs/file"
+  export FAKE_CHATGPT_DMG_SOURCE="$case_dir/dmg-source/ChatGPT.app"
+  export FAKE_CHATGPT_BOOTSTRAP_MODE=success
+  export FAKE_APP_TEAM_ID=2DC432GLL2
+  export FAKE_APP_STRICT=pass
+  export FAKE_TEMP_APP_STRICT=pass
+  export FAKE_RACE_TARGET=''
+  export CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256="$(
+    /usr/bin/shasum -a 256 "$TEST_RENAME_HELPER" | awk '{ print $1 }'
+  )"
+}
+
+test_keeps_bootstrapped_chatgpt_after_failure_and_explicit_rollback() {
+  local failed_case_dir="$TEST_TMP/chatgpt-bootstrap-transaction-failure"
+  local rollback_case_dir="$TEST_TMP/chatgpt-bootstrap-explicit-rollback"
+
+  mkdir -p "$failed_case_dir"
+  prepare_missing_chatgpt_transaction_case "$failed_case_dir"
+  export FAKE_HEALTH_MODE=unhealthy
+  assert_command_fails perform_install
+  assert_contains \
+    "$failed_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
+
+  mkdir -p "$rollback_case_dir"
+  prepare_missing_chatgpt_transaction_case "$rollback_case_dir"
+  export FAKE_HEALTH_MODE=healthy
+  perform_install
+  assert_contains \
+    "$rollback_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
+  rollback_latest
+  assert_contains \
+    "$rollback_case_dir/Applications/ChatGPT.app/Contents/Resources/bootstrap-marker" \
+    'installed-from-official-dmg'
 }
 
 test_transaction_backup_copy_failure_is_fail_closed() {
@@ -1114,7 +2256,8 @@ test_transaction_success_and_repeat_are_idempotent() {
   /bin/bash "$INSTALLER"
 
   assert_contains "$case_dir/home/.codex/config.toml" 'model_provider = "modelhub"'
-  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
+  assert_not_contains "$case_dir/home/.codex/config.toml" '[plugins."browser@openai-bundled"]'
   assert_contains "$case_dir/Applications/CC Switch.app/Contents/MacOS/cc-switch" 'new-app'
   assert_contains "$case_dir/home/.codex/auth.json" 'user-owned'
   assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
@@ -1125,6 +2268,82 @@ test_transaction_success_and_repeat_are_idempotent() {
   [[ -f "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'local installer was not saved'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'MODELHUB_AK was not loaded into launchd'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'CODEX_CLI_PATH was not loaded into launchd'
+}
+
+test_transaction_overwrites_golden_configuration_and_rolls_back() {
+  local case_dir="$TEST_TMP/transaction-golden-overwrite"
+  local auth_path
+  local auth_before
+  local before
+  local after_rollback
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  auth_path="$case_dir/home/.codex/auth.json"
+  auth_before="$(shasum -a 256 "$auth_path" | awk '{ print $1 }')"
+  before="$(managed_state_digest "$case_dir")"
+
+  perform_install
+
+  assert_not_contains "$case_dir/home/.codex/config.toml" '[plugins."browser@openai-bundled"]'
+  assert_not_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
+  assert_contains \
+    "$case_dir/home/.codex/config.toml" \
+    "model_catalog_json = \"$case_dir/home/.codex/models-modelhub-1m.json\""
+  assert_equals "$(shasum -a 256 "$auth_path" | awk '{ print $1 }')" "$auth_before"
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" 'SELECT count(*) FROM providers' '1'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    'SELECT id FROM providers' 'bytedance-modelhub-official-cli'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sentinel'" '0'
+  assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
+    'SELECT count(*) FROM proxy_request_logs' '0'
+  assert_equals \
+    "$(jq -r 'has("language") or has("showInTray")' "$case_dir/home/.cc-switch/settings.json")" \
+    'false'
+  assert_equals \
+    "$(jq -r '.currentProviderCodex' "$case_dir/home/.cc-switch/settings.json")" \
+    'bytedance-modelhub-official-cli'
+
+  rollback_latest
+  after_rollback="$(managed_state_digest "$case_dir")"
+  assert_equals "$after_rollback" "$before"
+}
+
+test_golden_routing_verification_rejects_reversed_routes() {
+  local case_dir="$TEST_TMP/golden-routing-verification"
+  local live_config="$case_dir/config.toml"
+  local database="$case_dir/cc-switch.db"
+  mkdir -p "$case_dir"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$database" >/dev/null
+  /usr/bin/sed \
+    -e "s#__USER_HOME__#$case_dir/home#g" \
+    -e 's#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g' \
+    "$GOLDEN_CODEX_CONFIG" >"$live_config"
+  export CC_SWITCH_SLEEP_BIN=/usr/bin/true
+
+  wait_for_golden_routing_state "$database" "$live_config" 1
+
+  sqlite3 "$database" <<'SQL'
+UPDATE providers
+SET settings_config = json_set(
+  settings_config,
+  '$.config',
+  replace(
+    json_extract(settings_config, '$.config'),
+    'https://aidp.bytedance.net/api/modelhub/online',
+    'http://127.0.0.1:15721/v1'
+  )
+);
+SQL
+  assert_command_fails wait_for_golden_routing_state "$database" "$live_config" 1
+
+  /bin/cp "$GOLDEN_CODEX_CONFIG" "$live_config"
+  assert_command_fails wait_for_golden_routing_state "$database" "$live_config" 1
 }
 
 test_transaction_rollback_latest_restores_and_removes_files() {
@@ -1201,14 +2420,19 @@ test_transaction_corrupt_backup_fails_before_restore_writes() {
 
 create_packager_source() {
   local source_dir="$1"
-  mkdir -p "$source_dir/assets" "$source_dir/templates"
+  mkdir -p "$source_dir/assets" "$source_dir/golden" "$source_dir/helpers" "$source_dir/templates"
   cp "$INSTALLER" "$source_dir/install.sh"
+  cp "$GOLDEN_DB_BUILDER" "$source_dir/build-golden-db.sh"
+  cp "$GOLDEN_DB_SCHEMA" "$source_dir/golden/cc-switch-schema.sql"
+  cp "$GOLDEN_CODEX_CONFIG" "$source_dir/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$source_dir/golden/settings.json"
   cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
     "$source_dir/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
     "$source_dir/templates/load-modelhub-env.sh"
+  cp "$RENAME_HELPER_SOURCE" "$source_dir/helpers/rename-exclusive.c"
   printf '{"models":{}}\n' >"$source_dir/assets/models-modelhub-1m.json"
 }
 
@@ -1226,12 +2450,17 @@ test_package_builds_exact_allowlisted_release_assets() {
   local output_dir="$case_dir/output"
   local actual_files
   local expected_files
+  local extracted_dir="$case_dir/extracted"
+  local helper_sha
   mkdir -p "$case_dir"
   create_packager_source "$source_dir"
   printf 'verified-app-zip\n' >"$case_dir/app.zip"
 
   run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
 
+  assert_contains \
+    "$output_dir/install.sh" \
+    "readonly RELEASE_TAG='modelhub-installer-20260728-r3'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.18.0-arm64.app.zip' \
@@ -1242,7 +2471,78 @@ test_package_builds_exact_allowlisted_release_assets() {
   assert_equals "$actual_files" "$expected_files"
   verify_release_assets "$output_dir"
   validate_resource_archive "$output_dir/modelhub-installer-resources.tar.gz"
+  mkdir -p "$extracted_dir"
+  tar -xzf "$output_dir/modelhub-installer-resources.tar.gz" -C "$extracted_dir"
+  [[ -x "$extracted_dir/modelhub-installer/helpers/rename-exclusive" ]] \
+    || fail 'resource package is missing the executable rename helper'
+  [[ ! -e "$extracted_dir/modelhub-installer/helpers/rename-exclusive.c" ]] \
+    || fail 'resource package unexpectedly ships rename helper source'
+  [[ -f "$extracted_dir/modelhub-installer/golden/codex-config.toml" ]] \
+    || fail 'resource package is missing golden Codex config'
+  [[ -f "$extracted_dir/modelhub-installer/golden/settings.json" ]] \
+    || fail 'resource package is missing golden settings'
+  [[ -f "$extracted_dir/modelhub-installer/golden/cc-switch.db" ]] \
+    || fail 'resource package is missing golden CC Switch database'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    'PRAGMA integrity_check' 'ok'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    'SELECT count(*) FROM providers' '1'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
+    '0'
+  assert_equals \
+    "$(/usr/bin/lipo -archs "$extracted_dir/modelhub-installer/helpers/rename-exclusive")" \
+    'arm64'
+  /usr/bin/codesign --verify --strict --verbose=2 \
+    "$extracted_dir/modelhub-installer/helpers/rename-exclusive"
+  helper_sha="$(
+    /usr/bin/shasum -a 256 "$extracted_dir/modelhub-installer/helpers/rename-exclusive" \
+      | awk '{ print $1 }'
+  )"
+  assert_contains "$output_dir/install.sh" "readonly RENAME_HELPER_SHA256='$helper_sha'"
+  assert_not_contains "$output_dir/install.sh" '__RENAME_HELPER_SHA256__'
+  assert_equals "$(
+    CC_SWITCH_INSTALLER_TEST_MODE=0 /bin/bash -c \
+      'source "$1"; expected_rename_helper_sha256' \
+      _ "$output_dir/install.sh"
+  )" "$helper_sha"
   assert_equals "$(awk 'NF { count += 1 } END { print count + 0 }' "$output_dir/SHA256SUMS.txt")" '3'
+}
+
+test_package_reproducibly_renders_pinned_helper_hash() {
+  local case_dir="$TEST_TMP/package-helper-reproducibility"
+  local source_dir="$case_dir/source"
+  local first_output="$case_dir/first-output"
+  local second_output="$case_dir/second-output"
+  local first_tree="$case_dir/first-tree"
+  local second_tree="$case_dir/second-tree"
+  local helper_sha
+  mkdir -p "$case_dir" "$first_tree" "$second_tree"
+  create_packager_source "$source_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  run_packager "$source_dir" "$case_dir/app.zip" "$first_output"
+  run_packager "$source_dir" "$case_dir/app.zip" "$second_output"
+  tar -xzf "$first_output/modelhub-installer-resources.tar.gz" -C "$first_tree"
+  tar -xzf "$second_output/modelhub-installer-resources.tar.gz" -C "$second_tree"
+
+  assert_equals \
+    "$(shasum -a 256 "$first_tree/modelhub-installer/helpers/rename-exclusive" | awk '{ print $1 }')" \
+    "$(shasum -a 256 "$second_tree/modelhub-installer/helpers/rename-exclusive" | awk '{ print $1 }')"
+  assert_equals \
+    "$(shasum -a 256 "$first_output/install.sh" | awk '{ print $1 }')" \
+    "$(shasum -a 256 "$second_output/install.sh" | awk '{ print $1 }')"
+  cmp \
+    "$first_output/modelhub-installer-resources.tar.gz" \
+    "$second_output/modelhub-installer-resources.tar.gz" \
+    || fail 'resource archives are not byte reproducible'
+  cmp "$first_output/SHA256SUMS.txt" "$second_output/SHA256SUMS.txt" \
+    || fail 'release checksum manifests are not byte reproducible'
+  helper_sha="$(shasum -a 256 "$first_tree/modelhub-installer/helpers/rename-exclusive" | awk '{ print $1 }')"
+  assert_contains "$first_output/install.sh" "readonly RENAME_HELPER_SHA256='$helper_sha'"
+  assert_contains "$second_output/install.sh" "readonly RENAME_HELPER_SHA256='$helper_sha'"
+  assert_not_contains "$first_output/install.sh" '__RENAME_HELPER_SHA256__'
+  assert_not_contains "$second_output/install.sh" '__RENAME_HELPER_SHA256__'
 }
 
 test_package_rejects_sensitive_content() {
@@ -1353,6 +2653,77 @@ test_package_rejects_source_symlinks() {
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$case_dir/output"
 }
 
+test_package_rejects_unsafe_golden_snapshot_source() {
+  local case_dir="$TEST_TMP/package-unsafe-golden"
+  local source_dir="$case_dir/source"
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  create_packager_source "$source_dir"
+  printf '\nbase_url = "http://127.0.0.1:15721/v1"\n' \
+    >>"$source_dir/golden/codex-config.toml"
+
+  assert_command_fails run_packager \
+    "$source_dir" "$case_dir/app.zip" "$case_dir/output"
+  [[ ! -e "$case_dir/output/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'unsafe golden source left a publishable resource archive'
+}
+
+test_golden_db_builder_creates_minimal_public_snapshot() {
+  local case_dir="$TEST_TMP/golden-db-builder"
+  local first_db="$case_dir/first.db"
+  local second_db="$case_dir/second.db"
+  local config_text
+  mkdir -p "$case_dir"
+
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$first_db"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$second_db"
+
+  cmp "$first_db" "$second_db" || fail 'golden DB builds are not byte reproducible'
+  assert_sql "$first_db" 'PRAGMA integrity_check' 'ok'
+  assert_sql "$first_db" 'PRAGMA user_version' '16'
+  assert_sql "$first_db" 'SELECT count(*) FROM providers' '1'
+  assert_sql "$first_db" 'SELECT id FROM providers' 'bytedance-modelhub-official-cli'
+  assert_sql "$first_db" \
+    "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers" \
+    '0'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers" \
+    '1'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
+    '0'
+  assert_sql "$first_db" \
+    "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex'" \
+    '1:1:0:127.0.0.1:15721'
+  assert_sql "$first_db" 'SELECT count(*) FROM proxy_request_logs' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM proxy_live_backup' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM provider_health' '0'
+  assert_sql "$first_db" 'SELECT count(*) FROM provider_endpoints' '0'
+
+  config_text="$(/bin/cat "$GOLDEN_CODEX_CONFIG")"
+  [[ "$config_text" == *'__USER_HOME__/.codex/models-modelhub-1m.json'* ]] \
+    || fail 'golden Codex config omits the portable home placeholder'
+  [[ "$config_text" == *'https://aidp.bytedance.net/api/modelhub/online'* ]] \
+    || fail 'golden Codex config omits the ModelHub upstream'
+  [[ "$config_text" != *'/Users/'* ]] || fail 'golden Codex config contains a user path'
+  [[ "$config_text" != *'127.0.0.1:15721'* ]] || fail 'golden Codex config contains a live proxy address'
+  [[ "$config_text" != *'experimental_bearer_token'* ]] \
+    || fail 'golden Codex config contains a bearer token field'
+  jq -e \
+    '.currentProviderCodex == "bytedance-modelhub-official-cli"
+      and .enableLocalProxy == true
+      and .preserveCodexOfficialAuthOnSwitch == true' \
+    "$GOLDEN_SETTINGS" >/dev/null
+}
+
 test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   local case_dir="$TEST_TMP/release-smoke"
   local asset_dir
@@ -1381,15 +2752,17 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   export CC_SWITCH_INSTALLER_ASSET_DIR="$asset_dir"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
   export FAKE_SECURITY_MODE=success
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
   database="$case_dir/home/.cc-switch/cc-switch.db"
 
   /bin/bash -s <"$asset_dir/install.sh"
   first_install_digest="$(managed_state_digest "$case_dir")"
-  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
   assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
 
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130001Z'
@@ -1402,6 +2775,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
+run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
 run_test "merge replaces only modelhub section" test_merge_replaces_only_active_modelhub_section
@@ -1410,6 +2784,29 @@ run_test "merge validation uses real TOML parser" test_merge_validation_uses_rea
 run_test "merge validation rejects unresolved home placeholder" test_validate_rejects_unresolved_home_placeholder
 run_test "preflight rejects unsupported platforms" test_preflight_rejects_unsupported_platforms
 run_test "preflight validates ChatGPT Codex Team ID" test_preflight_validates_chatgpt_codex_team_id
+run_test "validates existing ChatGPT" test_validates_existing_chatgpt_app
+run_test "blocks invalid existing ChatGPT" test_blocks_invalid_existing_chatgpt_without_mutation
+run_test "blocks invalid existing ChatGPT symlink" test_blocks_invalid_existing_chatgpt_symlink_without_download
+run_test "preflight blocks invalid existing ChatGPT before release assets" test_preflight_blocks_invalid_existing_chatgpt_before_release_assets
+run_test "bootstraps missing ChatGPT from official DMG" test_bootstraps_missing_chatgpt_from_official_dmg
+run_test "bootstraps missing ChatGPT cleans all failure paths" test_bootstraps_missing_chatgpt_cleans_all_failure_paths
+run_test "bootstraps missing ChatGPT rejects final target race" test_bootstraps_missing_chatgpt_rejects_final_target_race
+run_test "ChatGPT bootstrap cleanup retries detach" test_chatgpt_bootstrap_cleanup_retries_detach_before_removing_mount
+run_test "ChatGPT bootstrap cleanup preserves pending mount on inspection failure" test_chatgpt_bootstrap_cleanup_preserves_pending_mount_when_inspection_fails
+run_test "ChatGPT bootstrap cleanup retries mount and temp removal" test_chatgpt_bootstrap_cleanup_retries_mount_and_temp_removal
+run_test "ChatGPT bootstrap detach failure prevents publication" test_chatgpt_bootstrap_detach_failure_prevents_publication
+run_test "ChatGPT bootstrap final validation failure preserves target" test_chatgpt_bootstrap_final_validation_failure_preserves_target_and_fails
+run_test "ChatGPT bootstrap rejects modified re-signed helper by pinned hash" test_chatgpt_bootstrap_rejects_modified_resigned_helper_by_pinned_hash
+run_test "ChatGPT bootstrap rejects tampered trusted copy before exec" test_chatgpt_bootstrap_rejects_tampered_trusted_copy_before_exec
+run_test "ChatGPT bootstrap trusted parent blocks post-hash replacement" test_chatgpt_bootstrap_trusted_parent_blocks_post_hash_replacement
+run_test "ChatGPT bootstrap requires root sticky trusted parent" test_chatgpt_bootstrap_requires_root_sticky_trusted_parent
+run_test "production mode ignores privileged tool overrides" test_production_mode_ignores_privileged_tool_overrides
+run_test "real sudo rejects non-allowlisted privileged commands" test_real_sudo_rejects_non_allowlisted_privileged_commands
+run_test "ChatGPT bootstrap validates root-owned staging through privilege" test_chatgpt_bootstrap_validates_root_owned_staging_through_privilege
+run_test "ChatGPT bootstrap rejects unverified packaged helper" test_chatgpt_bootstrap_rejects_unverified_packaged_helper_before_download
+run_test "ChatGPT bootstrap rejects signed helper outside verified resources" test_chatgpt_bootstrap_rejects_signed_helper_outside_verified_resource_root
+run_test "ChatGPT bootstrap signal after commit preserves prevalidated target" test_chatgpt_bootstrap_signal_after_commit_preserves_prevalidated_target
+run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_keeps_bootstrapped_chatgpt_after_failure_and_explicit_rollback
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
@@ -1425,6 +2822,10 @@ run_test "database schema initializes missing database with hidden app" test_dat
 run_test "settings merge changes only managed keys" test_settings_merge_changes_only_managed_keys
 run_test "settings merge rejects invalid JSON without overwrite" test_settings_merge_rejects_invalid_json_without_overwrite
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
+run_test "existing nonwritable app requires privilege" test_existing_nonwritable_app_requires_privilege
+run_test "existing nontraversable app requires privilege" test_existing_nontraversable_app_requires_privilege
+run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
+run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
 run_test "transaction keychain ACL error aborts without write" test_transaction_keychain_acl_error_aborts_without_write
 run_test "transaction health timeout rolls back all files" test_transaction_health_timeout_rolls_back_all_files
@@ -1436,16 +2837,21 @@ run_test "transaction waits for CC Switch exit before backup" test_transaction_w
 run_test "transaction WAL snapshot restores committed sentinel and cleans sidecars" test_transaction_wal_snapshot_restores_committed_sentinel_and_cleans_sidecars
 run_test "transaction same-second backup suffixes sort lexically" test_transaction_same_second_backup_suffixes_sort_lexically
 run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
+run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
+run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
 run_test "package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
+run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
+run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then

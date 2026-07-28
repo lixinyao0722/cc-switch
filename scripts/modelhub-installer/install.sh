@@ -7,12 +7,17 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260727'
+readonly RELEASE_TAG='modelhub-installer-20260728-r3'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
+readonly CHATGPT_BUNDLE_ID='com.openai.codex'
+readonly CHATGPT_DOWNLOAD_PAGE='https://openai.com/chatgpt/download/'
+readonly CHATGPT_DMG_URL='https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg'
+readonly RENAME_HELPER_SHA256='__RENAME_HELPER_SHA256__'
+readonly TRUSTED_HELPER_TEMPLATE='/private/var/tmp/.cc-switch-modelhub-helper.XXXXXX'
 readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
 readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
 readonly KEYCHAIN_SERVICE='com.ccswitch.modelhub.ak'
@@ -21,6 +26,7 @@ readonly LAUNCH_AGENT_LABEL='com.ccswitch.modelhub-env'
 INSTALL_USER_HOME=''
 INSTALL_APPLICATIONS_DIR=''
 CC_SWITCH_APP_PATH=''
+CHATGPT_APP_PATH=''
 CHATGPT_CODEX_PATH=''
 CODEX_CONFIG_PATH=''
 MODEL_CATALOG_PATH=''
@@ -40,10 +46,85 @@ TRANSACTION_ROLLBACK_RUNNING=0
 TRANSACTION_STAGE_DIR=''
 LAUNCHER_FAILURE_SNAPSHOT_READY=0
 LAUNCHER_REPLACED_BY_RUN=0
+CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+CHATGPT_BOOTSTRAP_MOUNT_STATE='none'
+CHATGPT_BOOTSTRAP_TEMP_DIR=''
+CHATGPT_BOOTSTRAP_STAGE_DIR=''
+CHATGPT_TRUSTED_HELPER_DIR=''
+CHATGPT_TRUSTED_HELPER_PATH=''
+CHATGPT_INSTALLED_BY_RUN=0
 
 die() {
   echo "error: $*" >&2
   return 1
+}
+
+installer_tool_path() {
+  local variable_name="$1"
+  local default_path="$2"
+  local override=''
+
+  case "$variable_name" in
+    CC_SWITCH_*_BIN) ;;
+    *)
+      die "invalid installer tool variable: $variable_name"
+      return 1
+      ;;
+  esac
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    eval "override=\${$variable_name:-}"
+  fi
+  printf '%s' "${override:-$default_path}"
+}
+
+expected_rename_helper_sha256() {
+  local expected_sha="$RENAME_HELPER_SHA256"
+
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" \
+    && -n "${CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256:-}" ]]; then
+    expected_sha="$CC_SWITCH_INSTALLER_TEST_RENAME_HELPER_SHA256"
+  fi
+  case "$expected_sha" in
+    ''|*[!0-9a-f]*)
+      die "exclusive rename helper pinned SHA-256 is invalid"
+      return 1
+      ;;
+  esac
+  if [[ "${#expected_sha}" -ne 64 ]]; then
+    die "exclusive rename helper pinned SHA-256 must contain 64 lowercase hex characters"
+    return 1
+  fi
+  printf '%s' "$expected_sha"
+}
+
+file_sha256() {
+  local file_path="$1"
+  local shasum_bin='/usr/bin/shasum'
+  local digest
+
+  if ! digest="$("$shasum_bin" -a 256 "$file_path" | awk '{ print $1 }')"; then
+    return 1
+  fi
+  printf '%s' "$digest"
+}
+
+validate_non_root() {
+  local effective_uid="$1"
+
+  if [[ "$effective_uid" == "0" ]]; then
+    die "do not run the entire installer with sudo; run it as your login user"
+    return 1
+  fi
+}
+
+validate_execution_identity() {
+  local actual_uid="$1"
+  local test_uid="${2:-$actual_uid}"
+
+  validate_non_root "$actual_uid" || return 1
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    validate_non_root "$test_uid" || return 1
+  fi
 }
 
 validate_platform() {
@@ -71,14 +152,54 @@ validate_platform() {
   fi
 }
 
+path_is_directory() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -d "$1"
+  else
+    [[ -d "$1" ]]
+  fi
+}
+
+path_is_regular_file() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -f "$1"
+  else
+    [[ -f "$1" ]]
+  fi
+}
+
+path_is_executable() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -x "$1"
+  else
+    [[ -x "$1" ]]
+  fi
+}
+
+path_is_symlink() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -L "$1"
+  else
+    [[ -L "$1" ]]
+  fi
+}
+
+path_exists() {
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    run_with_privilege /bin/test -e "$1"
+  else
+    [[ -e "$1" ]]
+  fi
+}
+
 validate_chatgpt_codex() {
   local codex_path="$1"
   local expected_team_id="$2"
-  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
   local details
   local team_id
 
-  if [[ ! -x "$codex_path" ]]; then
+  if ! path_is_executable "$codex_path"; then
     die "ChatGPT Codex executable not found: $codex_path"
     return 1
   fi
@@ -86,7 +207,7 @@ validate_chatgpt_codex() {
     die "codesign command not found: $codesign_bin"
     return 1
   fi
-  if ! details="$("$codesign_bin" -dv --verbose=4 "$codex_path" 2>&1)"; then
+  if ! details="$(run_with_privilege "$codesign_bin" -dv --verbose=4 "$codex_path" 2>&1)"; then
     die "unable to inspect ChatGPT Codex signature"
     return 1
   fi
@@ -95,6 +216,642 @@ validate_chatgpt_codex() {
     die "unexpected ChatGPT Codex Team ID"
     return 1
   fi
+}
+
+validate_chatgpt_app() {
+  local app_path="$1"
+  local expected_team_id="$2"
+  local expected_bundle_id="$3"
+  local plutil_bin="$(installer_tool_path CC_SWITCH_PLUTIL_BIN /usr/bin/plutil)"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
+  local file_bin="$(installer_tool_path CC_SWITCH_FILE_BIN /usr/bin/file)"
+  local info_plist="$app_path/Contents/Info.plist"
+  local bundle_id
+  local executable_name
+  local executable_path
+  local details
+  local team_id
+  local file_details
+
+  if path_is_symlink "$app_path" \
+    || ! path_is_directory "$app_path" \
+    || ! path_is_regular_file "$info_plist"; then
+    die "ChatGPT app bundle is missing or incomplete: $app_path"
+    return 1
+  fi
+  if [[ ! -x "$plutil_bin" ]]; then
+    die "plutil command not found: $plutil_bin"
+    return 1
+  fi
+  if [[ ! -x "$codesign_bin" ]]; then
+    die "codesign command not found: $codesign_bin"
+    return 1
+  fi
+  if [[ ! -x "$file_bin" ]]; then
+    die "file command not found: $file_bin"
+    return 1
+  fi
+
+  if ! bundle_id="$(run_with_privilege "$plutil_bin" -extract CFBundleIdentifier raw -o - "$info_plist" 2>/dev/null)"; then
+    die "unable to read the ChatGPT bundle identifier"
+    return 1
+  fi
+  if [[ "$bundle_id" != "$expected_bundle_id" ]]; then
+    die "unexpected ChatGPT bundle identifier"
+    return 1
+  fi
+  if ! executable_name="$(run_with_privilege "$plutil_bin" -extract CFBundleExecutable raw -o - "$info_plist" 2>/dev/null)"; then
+    die "unable to read the ChatGPT main executable name"
+    return 1
+  fi
+  case "$executable_name" in
+    ''|*/*|.|..)
+      die "invalid ChatGPT main executable name"
+      return 1
+      ;;
+  esac
+  executable_path="$app_path/Contents/MacOS/$executable_name"
+  if ! path_is_executable "$executable_path"; then
+    die "ChatGPT main executable not found: $executable_path"
+    return 1
+  fi
+
+  if ! details="$(run_with_privilege "$codesign_bin" -dv --verbose=4 "$app_path" 2>&1)"; then
+    die "unable to inspect the ChatGPT app signature"
+    return 1
+  fi
+  team_id="$(printf '%s\n' "$details" | awk -F= '$1 == "TeamIdentifier" { print $2; exit }')"
+  if [[ "$team_id" != "$expected_team_id" ]]; then
+    die "unexpected ChatGPT app Team ID"
+    return 1
+  fi
+  if ! run_with_privilege "$codesign_bin" --verify --deep --strict "$app_path" >/dev/null 2>&1; then
+    die "ChatGPT app strict signature verification failed"
+    return 1
+  fi
+  if ! file_details="$(run_with_privilege "$file_bin" -b "$executable_path" 2>/dev/null)"; then
+    die "unable to inspect the ChatGPT main executable architecture"
+    return 1
+  fi
+  if ! printf '%s\n' "$file_details" | grep -Eq '(^|[^[:alnum:]_])arm64([^[:alnum:]_]|$)'; then
+    die "ChatGPT main executable does not contain arm64"
+    return 1
+  fi
+
+  validate_chatgpt_codex "$app_path/Contents/Resources/codex" "$expected_team_id"
+}
+
+download_chatgpt_dmg() {
+  local output_path="$1"
+  local curl_bin="${CC_SWITCH_CURL_BIN:-/usr/bin/curl}"
+
+  if [[ ! -x "$curl_bin" ]]; then
+    die "curl command not found: $curl_bin"
+    return 1
+  fi
+  if ! "$curl_bin" \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    --retry 3 \
+    --retry-all-errors \
+    --output "$output_path" \
+    "$CHATGPT_DMG_URL"; then
+    die "failed to download ChatGPT from the official OpenAI URL"
+    return 1
+  fi
+}
+
+attach_chatgpt_dmg() {
+  local dmg_path="$1"
+  local mount_dir="$2"
+  local hdiutil_bin="${CC_SWITCH_HDIUTIL_BIN:-/usr/bin/hdiutil}"
+
+  if [[ ! -x "$hdiutil_bin" ]]; then
+    die "hdiutil command not found: $hdiutil_bin"
+    return 1
+  fi
+  if ! "$hdiutil_bin" attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg_path"; then
+    die "failed to attach the official ChatGPT disk image"
+    return 1
+  fi
+}
+
+detach_chatgpt_dmg() {
+  local mount_dir="$1"
+  local hdiutil_bin="${CC_SWITCH_HDIUTIL_BIN:-/usr/bin/hdiutil}"
+
+  if [[ ! -x "$hdiutil_bin" ]]; then
+    die "hdiutil command not found: $hdiutil_bin"
+    return 1
+  fi
+  if ! "$hdiutil_bin" detach "$mount_dir"; then
+    die "failed to detach the ChatGPT disk image"
+    return 1
+  fi
+}
+
+canonical_directory() {
+  (cd "$1" 2>/dev/null && /bin/pwd -P)
+}
+
+validate_mounted_chatgpt_source() {
+  local source_app="$1"
+  local mount_dir="$2"
+  local canonical_source
+  local canonical_mount
+  local canonical_stage
+
+  if path_is_symlink "$mount_dir" || path_is_symlink "$source_app"; then
+    die "mounted ChatGPT app must not be a symlink"
+    return 1
+  fi
+  canonical_stage="$(canonical_directory "$CHATGPT_BOOTSTRAP_STAGE_DIR")" || {
+    die "unable to resolve the ChatGPT bootstrap stage"
+    return 1
+  }
+  canonical_mount="$(canonical_directory "$mount_dir")" || {
+    die "unable to resolve the ChatGPT mount directory"
+    return 1
+  }
+  case "$canonical_mount" in
+    "$canonical_stage"/chatgpt-mount.*) ;;
+    *)
+      die "ChatGPT mount directory escapes the private stage"
+      return 1
+      ;;
+  esac
+  canonical_source="$(canonical_directory "$source_app")" || {
+    die "unable to resolve the mounted ChatGPT app"
+    return 1
+  }
+  if [[ "$canonical_source" != "$canonical_mount/ChatGPT.app" ]]; then
+    die "mounted ChatGPT app escapes its private mount directory"
+    return 1
+  fi
+}
+
+validate_staged_chatgpt_source() {
+  local source_app="$1"
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" \
+    || "$source_app" != "$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app" ]]; then
+    die "staged ChatGPT app is outside the tracked Applications directory"
+    return 1
+  fi
+  if path_is_symlink "$source_app" || ! path_is_directory "$source_app"; then
+    die "staged ChatGPT app must be a real directory"
+    return 1
+  fi
+}
+
+validate_rename_helper() {
+  local helper_path="$1"
+  local expected_sha="$2"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_HELPER_CODESIGN_BIN /usr/bin/codesign)"
+  local lipo_bin="$(installer_tool_path CC_SWITCH_LIPO_BIN /usr/bin/lipo)"
+  local architectures
+  local actual_sha
+
+  if [[ -z "$helper_path" || "$helper_path" != /* \
+    || ! -f "$helper_path" || ! -x "$helper_path" || -L "$helper_path" ]]; then
+    die "exclusive rename helper is missing or unsafe"
+    return 1
+  fi
+  if [[ ! -x "$codesign_bin" || ! -x "$lipo_bin" ]]; then
+    die "exclusive rename helper verification tool is unavailable"
+    return 1
+  fi
+  if ! "$codesign_bin" --verify --strict --verbose=2 "$helper_path" >/dev/null 2>&1; then
+    die "exclusive rename helper signature verification failed"
+    return 1
+  fi
+  architectures="$("$lipo_bin" -archs "$helper_path")" || return 1
+  if [[ "$architectures" != 'arm64' ]]; then
+    die "exclusive rename helper must contain only arm64"
+    return 1
+  fi
+  actual_sha="$(file_sha256 "$helper_path")" || return 1
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    die "exclusive rename helper does not match the pinned SHA-256"
+    return 1
+  fi
+}
+
+validate_packaged_rename_helper() {
+  local stage_dir="$1"
+  local resources_dir="$2"
+  local helper_path="$resources_dir/helpers/rename-exclusive"
+  local canonical_stage
+  local canonical_resources
+  local expected_sha
+
+  if [[ "$resources_dir" != "$stage_dir/resources/modelhub-installer" \
+    || -L "$resources_dir" || -L "$resources_dir/helpers" ]]; then
+    die "exclusive rename helper is outside verified packaged resources"
+    return 1
+  fi
+  canonical_stage="$(canonical_directory "$stage_dir")" || return 1
+  canonical_resources="$(canonical_directory "$resources_dir")" || return 1
+  if [[ "$canonical_resources" != "$canonical_stage/resources/modelhub-installer" ]]; then
+    die "exclusive rename helper resource path is not canonically contained"
+    return 1
+  fi
+  expected_sha="$(expected_rename_helper_sha256)" || return 1
+  validate_rename_helper "$helper_path" "$expected_sha"
+}
+
+chatgpt_path_identity() {
+  run_with_privilege /usr/bin/stat -f '%d:%i' "$1"
+}
+
+chatgpt_mount_is_active() {
+  local mount_dir="$1"
+  local mount_bin="$(installer_tool_path CC_SWITCH_MOUNT_BIN /sbin/mount)"
+  local mount_output
+
+  if [[ ! -x "$mount_bin" ]]; then
+    die "mount command not found: $mount_bin"
+    return 1
+  fi
+  if ! mount_output="$("$mount_bin")"; then
+    die "failed to inspect active mounts"
+    return 2
+  fi
+  if printf '%s\n' "$mount_output" | /usr/bin/grep -Fq -- " on $mount_dir ("; then
+    return 0
+  fi
+  return 1
+}
+
+cleanup_chatgpt_mount() {
+  local rm_bin="$(installer_tool_path CC_SWITCH_RM_BIN /bin/rm)"
+  local mount_status
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" ]]; then
+    return 0
+  fi
+  case "$CHATGPT_BOOTSTRAP_MOUNT_DIR" in
+    "$CHATGPT_BOOTSTRAP_STAGE_DIR"/chatgpt-mount.*) ;;
+    *)
+      die "refusing to remove an unsafe ChatGPT mount directory: $CHATGPT_BOOTSTRAP_MOUNT_DIR"
+      return 1
+      ;;
+  esac
+  case "$CHATGPT_BOOTSTRAP_MOUNT_STATE" in
+    pending)
+      if chatgpt_mount_is_active "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+        CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+      else
+        mount_status=$?
+        if [[ "$mount_status" == "1" ]]; then
+          CHATGPT_BOOTSTRAP_MOUNT_STATE='detached'
+        else
+          return 1
+        fi
+      fi
+      ;;
+    attached)
+      ;;
+    detached)
+      ;;
+    *)
+      die "invalid ChatGPT mount lifecycle state: $CHATGPT_BOOTSTRAP_MOUNT_STATE"
+      return 1
+      ;;
+  esac
+  if [[ "$CHATGPT_BOOTSTRAP_MOUNT_STATE" == "attached" ]]; then
+    if ! detach_chatgpt_dmg "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+      return 1
+    fi
+    CHATGPT_BOOTSTRAP_MOUNT_STATE='detached'
+  fi
+  if [[ ! -x "$rm_bin" ]]; then
+    die "rm command not found: $rm_bin"
+    return 1
+  fi
+  if ! "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+    die "failed to remove the ChatGPT mount directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='none'
+}
+
+cleanup_chatgpt_temp() {
+  local rm_bin="$(installer_tool_path CC_SWITCH_RM_BIN /bin/rm)"
+
+  if [[ -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" ]]; then
+    return 0
+  fi
+  case "$CHATGPT_BOOTSTRAP_TEMP_DIR" in
+    "$INSTALL_APPLICATIONS_DIR"/.chatgpt-modelhub.*) ;;
+    *)
+      die "refusing to remove an unsafe ChatGPT install directory: $CHATGPT_BOOTSTRAP_TEMP_DIR"
+      return 1
+      ;;
+  esac
+  if [[ ! -x "$rm_bin" ]]; then
+    die "rm command not found: $rm_bin"
+    return 1
+  fi
+  if ! run_with_privilege "$rm_bin" -rf -- "$CHATGPT_BOOTSTRAP_TEMP_DIR"; then
+    die "failed to remove the ChatGPT install directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_TEMP_DIR=''
+}
+
+cleanup_trusted_rename_helper() {
+  if [[ -z "$CHATGPT_TRUSTED_HELPER_DIR" ]]; then
+    CHATGPT_TRUSTED_HELPER_PATH=''
+    return 0
+  fi
+  validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '500|700' || return 1
+  if ! run_with_privilege /bin/rm -rf -- "$CHATGPT_TRUSTED_HELPER_DIR"; then
+    die "failed to remove the trusted helper directory"
+    return 1
+  fi
+  CHATGPT_TRUSTED_HELPER_DIR=''
+  CHATGPT_TRUSTED_HELPER_PATH=''
+}
+
+validate_trusted_helper_parent() {
+  local owner
+  local permissions
+
+  if [[ ! -d '/private/var/tmp' || -L '/private/var/tmp' ]]; then
+    die "trusted helper parent must be a real directory"
+    return 1
+  fi
+  owner="$(/usr/bin/stat -f '%u' /private/var/tmp)" || return 1
+  permissions="$(/usr/bin/stat -f '%Sp' /private/var/tmp)" || return 1
+  if [[ "$owner" != '0' || "$permissions" != *t ]]; then
+    die "trusted helper parent must be root-owned and sticky"
+    return 1
+  fi
+}
+
+validate_trusted_helper_directory() {
+  local directory="$1"
+  local allowed_modes="$2"
+  local parent="${directory%/*}"
+  local name="${directory##*/}"
+  local owner_mode
+
+  if [[ "$parent" != '/private/var/tmp' ]]; then
+    die "trusted helper directory has an unsafe parent"
+    return 1
+  fi
+  case "$name" in
+    .cc-switch-modelhub-helper.?*) ;;
+    *)
+      die "trusted helper directory has an unsafe name"
+      return 1
+      ;;
+  esac
+  if run_with_privilege /bin/test -L "$directory" \
+    || ! run_with_privilege /bin/test -d "$directory"; then
+    die "trusted helper directory must be a real directory"
+    return 1
+  fi
+  owner_mode="$(run_with_privilege /usr/bin/stat -f '%u:%Lp' "$directory")" || return 1
+  case "$owner_mode" in
+    "0:${allowed_modes%%|*}") ;;
+    "0:${allowed_modes#*|}") ;;
+    *)
+      die "trusted helper directory has unsafe ownership or permissions"
+      return 1
+      ;;
+  esac
+}
+
+validate_trusted_helper_file() {
+  local helper_path="$1"
+  local expected_directory="$2"
+  local owner_mode
+
+  if [[ "$helper_path" != "$expected_directory/rename-exclusive" ]] \
+    || run_with_privilege /bin/test -L "$helper_path" \
+    || ! run_with_privilege /bin/test -f "$helper_path" \
+    || ! run_with_privilege /bin/test -x "$helper_path"; then
+    die "trusted helper file is unsafe"
+    return 1
+  fi
+  owner_mode="$(run_with_privilege /usr/bin/stat -f '%u:%Lp' "$helper_path")" || return 1
+  if [[ "$owner_mode" != '0:500' ]]; then
+    die "trusted helper file has unsafe ownership or permissions"
+    return 1
+  fi
+}
+
+privileged_file_sha256() {
+  local file_path="$1"
+  local digest
+
+  if ! digest="$(run_with_privilege /usr/bin/shasum -a 256 "$file_path" | awk '{ print $1 }')"; then
+    return 1
+  fi
+  printf '%s' "$digest"
+}
+
+prepare_trusted_rename_helper() {
+  local source_helper="$1"
+  local expected_sha="$2"
+  local actual_sha
+
+  if [[ "$NEEDS_SUDO" == "1" ]]; then
+    validate_trusted_helper_parent || return 1
+    if ! CHATGPT_TRUSTED_HELPER_DIR="$(
+      run_with_privilege /usr/bin/mktemp -d "$TRUSTED_HELPER_TEMPLATE"
+    )"; then
+      CHATGPT_TRUSTED_HELPER_DIR=''
+      die "failed to create the trusted helper directory"
+      return 1
+    fi
+    validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '700|700' || return 1
+    CHATGPT_TRUSTED_HELPER_PATH="$CHATGPT_TRUSTED_HELPER_DIR/rename-exclusive"
+    if ! run_with_privilege /bin/cp "$source_helper" "$CHATGPT_TRUSTED_HELPER_PATH" \
+      || ! run_with_privilege /bin/chmod 0500 "$CHATGPT_TRUSTED_HELPER_PATH" \
+      || ! run_with_privilege /bin/chmod 0500 "$CHATGPT_TRUSTED_HELPER_DIR"; then
+      die "failed to protect the trusted helper copy"
+      return 1
+    fi
+    validate_trusted_helper_directory "$CHATGPT_TRUSTED_HELPER_DIR" '500|500' || return 1
+    validate_trusted_helper_file \
+      "$CHATGPT_TRUSTED_HELPER_PATH" \
+      "$CHATGPT_TRUSTED_HELPER_DIR" \
+      || return 1
+    actual_sha="$(privileged_file_sha256 "$CHATGPT_TRUSTED_HELPER_PATH")" || return 1
+  else
+    CHATGPT_TRUSTED_HELPER_PATH="$source_helper"
+    actual_sha="$(file_sha256 "$CHATGPT_TRUSTED_HELPER_PATH")" || return 1
+  fi
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    die "trusted rename helper does not match the pinned SHA-256"
+    return 1
+  fi
+}
+
+cleanup_chatgpt_bootstrap() {
+  local cleanup_status=0
+
+  cleanup_chatgpt_mount || cleanup_status=1
+  cleanup_trusted_rename_helper || cleanup_status=1
+  cleanup_chatgpt_temp || cleanup_status=1
+  if [[ -z "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+    && -z "$CHATGPT_BOOTSTRAP_TEMP_DIR" \
+    && -z "$CHATGPT_TRUSTED_HELPER_DIR" ]]; then
+    CHATGPT_BOOTSTRAP_STAGE_DIR=''
+  fi
+  return "$cleanup_status"
+}
+
+stage_verified_chatgpt_app() {
+  local source_app="$1"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
+  local temp_app
+
+  if [[ ! -x "$ditto_bin" ]]; then
+    die "ditto command not found: $ditto_bin"
+    return 1
+  fi
+  if ! CHATGPT_BOOTSTRAP_TEMP_DIR="$(
+    run_with_privilege /usr/bin/mktemp -d "$INSTALL_APPLICATIONS_DIR/.chatgpt-modelhub.XXXXXX"
+  )"; then
+    CHATGPT_BOOTSTRAP_TEMP_DIR=''
+    die "failed to create a same-volume ChatGPT install directory"
+    return 1
+  fi
+  temp_app="$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app"
+  if ! run_with_privilege "$ditto_bin" "$source_app" "$temp_app"; then
+    die "failed to copy the verified ChatGPT app"
+    return 1
+  fi
+  validate_staged_chatgpt_source "$temp_app" || return 1
+  validate_chatgpt_app "$temp_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"
+}
+
+install_verified_chatgpt_app() {
+  local source_app="$1"
+  local target_app="$2"
+  local helper_path="$3"
+  local helper_status
+  local source_identity
+  local source_device
+  local source_inode
+  local expected_sha
+  local trusted_cleanup_status=0
+
+  validate_staged_chatgpt_source "$source_app" || return 1
+  if [[ "$target_app" != "$CHATGPT_APP_PATH" ]]; then
+    die "refusing to install ChatGPT at an unexpected path: $target_app"
+    return 1
+  fi
+  if path_exists "$target_app" || path_is_symlink "$target_app"; then
+    die "ChatGPT appeared before the official app could be installed"
+    return 1
+  fi
+  expected_sha="$(expected_rename_helper_sha256)" || return 1
+  validate_rename_helper "$helper_path" "$expected_sha" || return 1
+  source_identity="$(chatgpt_path_identity "$source_app")" || {
+    die "unable to record the staged ChatGPT app identity"
+    return 1
+  }
+  source_device="${source_identity%%:*}"
+  source_inode="${source_identity#*:}"
+  prepare_trusted_rename_helper "$helper_path" "$expected_sha" || return 1
+  if run_with_privilege \
+    "$CHATGPT_TRUSTED_HELPER_PATH" \
+    "$source_app" \
+    "$target_app" \
+    "$source_device" \
+    "$source_inode"; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  cleanup_trusted_rename_helper || trusted_cleanup_status=1
+  if [[ "$helper_status" != "0" ]]; then
+    if [[ "$helper_status" == "17" ]]; then
+      die "ChatGPT appeared during the exclusive app publication"
+    elif [[ "$helper_status" == "18" ]]; then
+      die "staged ChatGPT app identity changed before publication"
+    else
+      die "failed to atomically publish the verified ChatGPT app"
+    fi
+    return 1
+  fi
+  CHATGPT_INSTALLED_BY_RUN=1
+  if ! validate_chatgpt_app "$target_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
+    die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
+    return 1
+  fi
+  if [[ "$trusted_cleanup_status" != "0" ]]; then
+    return 1
+  fi
+  cleanup_chatgpt_temp
+}
+
+ensure_chatgpt_app() {
+  local stage_dir="$1"
+  local resources_dir="${2:-}"
+  local helper_path="$resources_dir/helpers/rename-exclusive"
+  local dmg_path="$stage_dir/ChatGPT.dmg"
+  local mounted_app
+
+  CHATGPT_INSTALLED_BY_RUN=0
+  if [[ -e "$CHATGPT_APP_PATH" || -L "$CHATGPT_APP_PATH" ]]; then
+    if validate_chatgpt_app "$CHATGPT_APP_PATH" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID"; then
+      return 0
+    fi
+    die "Install ChatGPT again from the official OpenAI download page: $CHATGPT_DOWNLOAD_PAGE"
+    return 1
+  fi
+  if [[ ! -d "$stage_dir" ]]; then
+    die "ChatGPT bootstrap staging directory is missing: $stage_dir"
+    return 1
+  fi
+  validate_packaged_rename_helper "$stage_dir" "$resources_dir" || return 1
+  CHATGPT_BOOTSTRAP_STAGE_DIR="$stage_dir"
+  download_chatgpt_dmg "$dmg_path" || {
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  }
+  if ! CHATGPT_BOOTSTRAP_MOUNT_DIR="$(
+    /usr/bin/mktemp -d "$stage_dir/chatgpt-mount.XXXXXX"
+  )"; then
+    CHATGPT_BOOTSTRAP_MOUNT_DIR=''
+    cleanup_chatgpt_bootstrap || true
+    die "failed to create the ChatGPT disk image mount directory"
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='pending'
+  mounted_app="$CHATGPT_BOOTSTRAP_MOUNT_DIR/ChatGPT.app"
+  if ! attach_chatgpt_dmg "$dmg_path" "$CHATGPT_BOOTSTRAP_MOUNT_DIR"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  CHATGPT_BOOTSTRAP_MOUNT_STATE='attached'
+  if ! validate_mounted_chatgpt_source "$mounted_app" "$CHATGPT_BOOTSTRAP_MOUNT_DIR" \
+    || ! validate_chatgpt_app "$mounted_app" "$EXPECTED_CODEX_TEAM_ID" "$CHATGPT_BUNDLE_ID" \
+    || ! stage_verified_chatgpt_app "$mounted_app"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  if ! cleanup_chatgpt_mount; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  if ! install_verified_chatgpt_app \
+    "$CHATGPT_BOOTSTRAP_TEMP_DIR/ChatGPT.app" \
+    "$CHATGPT_APP_PATH" \
+    "$helper_path"; then
+    cleanup_chatgpt_bootstrap || true
+    return 1
+  fi
+  cleanup_chatgpt_bootstrap
 }
 
 download_release_assets() {
@@ -200,12 +957,116 @@ expected_resource_archive_entries() {
 modelhub-installer/
 modelhub-installer/assets/
 modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/golden/
+modelhub-installer/golden/cc-switch.db
+modelhub-installer/golden/codex-config.toml
+modelhub-installer/golden/settings.json
+modelhub-installer/helpers/
+modelhub-installer/helpers/rename-exclusive
 modelhub-installer/templates/
 modelhub-installer/templates/com.ccswitch.modelhub-env.plist
 modelhub-installer/templates/load-modelhub-env.sh
 modelhub-installer/templates/modelhub-provider-meta.json
 modelhub-installer/templates/modelhub-provider.toml
 EOF
+}
+
+validate_golden_codex_template() {
+  local file="$1"
+  local placeholder_count
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "golden Codex config is missing or unsafe: $file"
+    return 1
+  fi
+  placeholder_count="$(awk '{ count += gsub(/__USER_HOME__/, "") } END { print count + 0 }' "$file")"
+  if [[ "$placeholder_count" != '1' ]] \
+    || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
+    || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
+    || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file"; then
+    die 'golden Codex config does not match the portable ModelHub contract'
+    return 1
+  fi
+  if LC_ALL=C grep -E -i -q \
+    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token' \
+    "$file"; then
+    die 'golden Codex config contains a forbidden path, route, or credential field'
+    return 1
+  fi
+}
+
+validate_golden_settings() {
+  local file="$1"
+  local valid
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "golden CC Switch settings are missing or unsafe: $file"
+    return 1
+  fi
+  valid="$(/usr/bin/jq -r '
+    (keys | sort) == [
+      "currentProviderCodex",
+      "enableLocalProxy",
+      "firstRunNoticeConfirmed",
+      "preserveCodexOfficialAuthOnSwitch",
+      "proxyConfirmed"
+    ]
+    and .currentProviderCodex == "bytedance-modelhub-official-cli"
+    and .enableLocalProxy == true
+    and .preserveCodexOfficialAuthOnSwitch == true
+    and .firstRunNoticeConfirmed == true
+    and .proxyConfirmed == true
+  ' "$file" 2>/dev/null)" || return 1
+  if [[ "$valid" != 'true' ]]; then
+    die 'golden CC Switch settings do not match the public allowlist'
+    return 1
+  fi
+}
+
+golden_sqlite_scalar() {
+  local database="$1"
+  local query="$2"
+  /usr/bin/sqlite3 -readonly "$database" "$query" 2>/dev/null
+}
+
+validate_golden_database() {
+  local database="$1"
+  local raw_strings
+  local table
+
+  if [[ ! -f "$database" || -L "$database" ]]; then
+    die "golden CC Switch database is missing or unsafe: $database"
+    return 1
+  fi
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA integrity_check;')" == 'ok' ]] \
+    || { die 'golden CC Switch database integrity check failed'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '16' ]] \
+    || { die 'golden CC Switch database schema version is not 16'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'SELECT count(*) FROM providers;')" == '1' ]] \
+    || { die 'golden CC Switch database must contain exactly one provider'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND is_current=1;")" == '1' ]] \
+    || { die 'golden CC Switch database current provider is invalid'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers;")" == '0' ]] \
+    || { die 'golden CC Switch provider auth must be empty'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers;")" == '1' ]] \
+    || { die 'golden CC Switch provider omits the ModelHub upstream'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers;")" == '0' ]] \
+    || { die 'golden CC Switch provider points to the local proxy'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
+    || { die 'golden CC Switch proxy state is invalid'; return 1; }
+  for table in \
+    provider_endpoints provider_health proxy_live_backup proxy_request_logs \
+    session_log_sync stream_check_logs usage_daily_rollups profiles prompts \
+    mcp_servers skills skill_repos; do
+    [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM $table;")" == '0' ]] \
+      || { die "golden CC Switch database contains forbidden rows in $table"; return 1; }
+  done
+  raw_strings="$(/usr/bin/strings "$database")"
+  if printf '%s\n' "$raw_strings" | LC_ALL=C grep -E -i -q \
+    '/Users/|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token'; then
+    die 'golden CC Switch database contains a forbidden path or credential field'
+    return 1
+  fi
 }
 
 validate_resource_archive() {
@@ -216,6 +1077,7 @@ validate_resource_archive() {
   local expected_listing
   local verbose_listing
   local entry
+  local extracted_dir
 
   if [[ ! -f "$archive" ]]; then
     die "resource archive does not exist: $archive"
@@ -258,6 +1120,23 @@ validate_resource_archive() {
     die "resource archive does not match the public allowlist"
     return 1
   fi
+
+  extracted_dir="$work_dir/extracted"
+  if ! mkdir -p "$extracted_dir" \
+    || ! tar -xzf "$archive" -C "$extracted_dir"; then
+    rm -rf "$work_dir"
+    die 'resource archive cannot be extracted for golden validation'
+    return 1
+  fi
+  validate_golden_codex_template \
+    "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_golden_settings \
+    "$extracted_dir/modelhub-installer/golden/settings.json" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_golden_database \
+    "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    || { rm -rf "$work_dir"; return 1; }
 
   rm -rf "$work_dir"
 }
@@ -983,7 +1862,8 @@ configure_install_paths() {
   fi
 
   CC_SWITCH_APP_PATH="$INSTALL_APPLICATIONS_DIR/CC Switch.app"
-  CHATGPT_CODEX_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app/Contents/Resources/codex"
+  CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
+  CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
@@ -1031,9 +1911,34 @@ managed_relative_for_target() {
   return 1
 }
 
+sudo_command() {
+  printf '%s' '/usr/bin/sudo'
+}
+
+validate_privileged_command() {
+  local command_path="$1"
+
+  case "$command_path" in
+    /bin/chmod|/bin/cp|/bin/rm|/bin/test \
+      |/usr/bin/codesign|/usr/bin/ditto|/usr/bin/file|/usr/bin/mktemp \
+      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr)
+      return 0
+      ;;
+  esac
+  if [[ -n "$CHATGPT_TRUSTED_HELPER_PATH" \
+    && "$command_path" == "$CHATGPT_TRUSTED_HELPER_PATH" ]]; then
+    return 0
+  fi
+  die "refusing to run a non-allowlisted command with administrator permission"
+}
+
 run_with_privilege() {
+  local sudo_bin
+
   if [[ "$NEEDS_SUDO" == "1" ]]; then
-    /usr/bin/sudo "$@"
+    sudo_bin="$(sudo_command)"
+    validate_privileged_command "$1" || return 1
+    "$sudo_bin" "$@"
   else
     "$@"
   fi
@@ -1093,7 +1998,7 @@ create_backup() {
   local target
   local relative
   local counter=1
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
 
   if [[ -n "${CC_SWITCH_INSTALLER_TIMESTAMP:-}" ]]; then
     timestamp="$CC_SWITCH_INSTALLER_TIMESTAMP"
@@ -1264,7 +2169,7 @@ restore_backup() {
   local existed
   local relative
   local backup_path
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
 
   validate_backup_manifest "$backup_dir" || return 1
 
@@ -1324,9 +2229,9 @@ restore_backup() {
 
 install_app() {
   local app_zip="$1"
-  local ditto_bin="${CC_SWITCH_DITTO_BIN:-/usr/bin/ditto}"
-  local codesign_bin="${CC_SWITCH_CODESIGN_BIN:-/usr/bin/codesign}"
-  local xattr_bin="${CC_SWITCH_XATTR_BIN:-/usr/bin/xattr}"
+  local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
+  local codesign_bin="$(installer_tool_path CC_SWITCH_CODESIGN_BIN /usr/bin/codesign)"
+  local xattr_bin="$(installer_tool_path CC_SWITCH_XATTR_BIN /usr/bin/xattr)"
   local work_dir
   local extracted_app
 
@@ -1377,11 +2282,94 @@ install_app() {
   fi
 }
 
+install_golden_codex_config() {
+  local golden_file="$1"
+  local target_file="$2"
+  local user_home="$3"
+  local work_dir
+  local rendered_file
+  local escaped_home
+
+  validate_golden_codex_template "$golden_file" || return 1
+  escaped_home="$(toml_escape_basic_string "$user_home")"
+  if ! work_dir="$(mktemp -d "$(dirname "$target_file")/.golden-codex.XXXXXX")"; then
+    die 'failed to create the golden Codex staging directory'
+    return 1
+  fi
+  rendered_file="$work_dir/config.toml"
+  if ! render_template \
+    "$golden_file" \
+    "$rendered_file" \
+    '__USER_HOME__' \
+    "$escaped_home" \
+    || ! /bin/chmod 0600 "$rendered_file" \
+    || ! validate_merged_codex_config "$rendered_file" "$user_home"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/mv "$rendered_file" "$target_file" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden Codex config'
+    return 1
+  fi
+}
+
+install_golden_database() {
+  local golden_database="$1"
+  local target_database="$2"
+  local work_dir
+  local staged_database
+
+  validate_golden_database "$golden_database" || return 1
+  if ! work_dir="$(mktemp -d "$(dirname "$target_database")/.golden-db.XXXXXX")"; then
+    die 'failed to create the golden database staging directory'
+    return 1
+  fi
+  staged_database="$work_dir/cc-switch.db"
+  if ! /bin/cp "$golden_database" "$staged_database" \
+    || ! /bin/chmod 0600 "$staged_database" \
+    || ! validate_golden_database "$staged_database"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/rm -f -- "$target_database-wal" "$target_database-shm" \
+    || ! /bin/mv "$staged_database" "$target_database" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden CC Switch database'
+    return 1
+  fi
+}
+
+install_golden_settings() {
+  local golden_settings="$1"
+  local target_settings="$2"
+  local work_dir
+  local staged_settings
+
+  validate_golden_settings "$golden_settings" || return 1
+  if ! work_dir="$(mktemp -d "$(dirname "$target_settings")/.golden-settings.XXXXXX")"; then
+    die 'failed to create the golden settings staging directory'
+    return 1
+  fi
+  staged_settings="$work_dir/settings.json"
+  if ! /bin/cp "$golden_settings" "$staged_settings" \
+    || ! /bin/chmod 0600 "$staged_settings" \
+    || ! validate_golden_settings "$staged_settings"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/mv "$staged_settings" "$target_settings" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the golden CC Switch settings'
+    return 1
+  fi
+}
+
 install_runtime_files() {
   local resources_dir="$1"
-  local provider_id
-  local config_work_dir
-  local config_work_file
   local plist_work_dir
   local plist_work_file
   local escaped_helper_path
@@ -1409,33 +2397,19 @@ install_runtime_files() {
     return 1
   fi
 
-  if ! config_work_dir="$(mktemp -d "$INSTALL_USER_HOME/.codex/.modelhub-config.XXXXXX")"; then
-    die "failed to create the Codex config staging directory"
-    return 1
-  fi
-  config_work_file="$config_work_dir/config.toml"
-  if ! merge_codex_config \
+  install_golden_codex_config \
+    "$resources_dir/golden/codex-config.toml" \
     "$CODEX_CONFIG_PATH" \
-    "$resources_dir/templates/modelhub-provider.toml" \
-    "$config_work_file" \
-    "$INSTALL_USER_HOME"; then
-    /bin/rm -rf "$config_work_dir" || true
-    return 1
-  fi
-  if ! /bin/chmod 600 "$config_work_file"; then
-    /bin/rm -rf "$config_work_dir" || true
-    die "failed to protect the merged Codex config"
-    return 1
-  fi
-  if ! /bin/mv "$config_work_file" "$CODEX_CONFIG_PATH"; then
-    /bin/rm -rf "$config_work_dir" || true
-    die "failed to install the merged Codex config"
-    return 1
-  fi
-  if ! /bin/rmdir "$config_work_dir"; then
-    die "failed to remove the Codex config staging directory"
-    return 1
-  fi
+    "$INSTALL_USER_HOME" \
+    || return 1
+  install_golden_database \
+    "$resources_dir/golden/cc-switch.db" \
+    "$CC_SWITCH_DATABASE_PATH" \
+    || return 1
+  install_golden_settings \
+    "$resources_dir/golden/settings.json" \
+    "$CC_SWITCH_SETTINGS_PATH" \
+    || return 1
 
   if ! /usr/bin/install -m 700 \
     "$resources_dir/templates/load-modelhub-env.sh" \
@@ -1472,14 +2446,6 @@ install_runtime_files() {
     return 1
   fi
 
-  ensure_cc_switch_schema "$CC_SWITCH_DATABASE_PATH" "$CC_SWITCH_APP_PATH" || return 1
-  provider_id="$(
-    merge_provider_database \
-      "$CC_SWITCH_DATABASE_PATH" \
-      "$CODEX_CONFIG_PATH" \
-      "$resources_dir/templates/modelhub-provider-meta.json"
-  )" || return 1
-  update_settings_json "$CC_SWITCH_SETTINGS_PATH" "$provider_id" || return 1
 }
 
 prepare_launcher_failure_snapshot() {
@@ -1792,12 +2758,81 @@ wait_for_health() {
   return 1
 }
 
+wait_for_golden_routing_state() {
+  local database="$1"
+  local live_config="$2"
+  local timeout_seconds="$3"
+  local sleep_bin="${CC_SWITCH_SLEEP_BIN:-/bin/sleep}"
+  local attempt=1
+  local provider_ready
+  local live_ready
+
+  case "$timeout_seconds" in
+    ''|*[!0-9]*)
+      die "invalid golden routing timeout: $timeout_seconds"
+      return 1
+      ;;
+  esac
+  if [[ "$timeout_seconds" -lt 1 || ! -x "$sleep_bin" ]]; then
+    die 'golden routing verification requires a positive timeout and sleep command'
+    return 1
+  fi
+
+  while [[ "$attempt" -le "$timeout_seconds" ]]; do
+    provider_ready="$(golden_sqlite_scalar "$database" "
+      SELECT count(*)
+      FROM providers
+      WHERE id='bytedance-modelhub-official-cli'
+        AND app_type='codex'
+        AND is_current=1
+        AND instr(json_extract(settings_config, '$.config'),
+                  'https://aidp.bytedance.net/api/modelhub/online') > 0
+        AND instr(json_extract(settings_config, '$.config'),
+                  '127.0.0.1:15721') = 0;
+    " || true)"
+    if [[ -f "$live_config" ]] \
+      && grep -Fq -- 'base_url = "http://127.0.0.1:15721/v1"' "$live_config"; then
+      live_ready=1
+    else
+      live_ready=0
+    fi
+    if [[ "$provider_ready" == '1' && "$live_ready" == '1' ]]; then
+      return 0
+    fi
+    "$sleep_bin" 1 || return 1
+    attempt=$((attempt + 1))
+  done
+
+  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex uses the local proxy'
+  return 1
+}
+
+path_tree_requires_privilege() {
+  local target="$1"
+
+  [[ -e "$target" ]] || return 1
+  [[ -w "$target" ]] || return 0
+  if /usr/bin/find "$target" -type d -print0 2>/dev/null \
+    | while IFS= read -r -d '' directory; do
+      [[ -w "$directory" && -x "$directory" ]] || exit 1
+    done; then
+    return 1
+  fi
+  return 0
+}
+
 prepare_application_permissions() {
+  local sudo_bin
+
   NEEDS_SUDO=0
   /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR" 2>/dev/null || true
-  if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; then
+  if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]] \
+    || path_tree_requires_privilege "$CC_SWITCH_APP_PATH" \
+    || { [[ ! -d "$INSTALL_APPLICATIONS_DIR/ChatGPT.app" ]] \
+      && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
     NEEDS_SUDO=1
-    if ! /usr/bin/sudo -v; then
+    sudo_bin="$(sudo_command)"
+    if ! "$sudo_bin" -v; then
       die "administrator permission is required to install CC Switch"
       return 1
     fi
@@ -1841,6 +2876,9 @@ rollback_failed_install() {
 }
 
 cleanup_transaction_stage() {
+  if ! cleanup_chatgpt_bootstrap; then
+    return 1
+  fi
   if [[ -n "$TRANSACTION_STAGE_DIR" && -d "$TRANSACTION_STAGE_DIR" ]]; then
     if ! /bin/rm -rf "$TRANSACTION_STAGE_DIR"; then
       die "failed to remove the installer staging directory"
@@ -1860,6 +2898,7 @@ transaction_exit_guard() {
     && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
     rollback_failed_install || exit_status=1
   fi
+  cleanup_chatgpt_bootstrap || exit_status=1
   cleanup_transaction_stage || exit_status=1
   exit "$exit_status"
 }
@@ -1874,6 +2913,7 @@ transaction_signal_guard() {
     && "$TRANSACTION_ROLLBACK_RUNNING" == "0" ]]; then
     rollback_failed_install || exit_status=1
   fi
+  cleanup_chatgpt_bootstrap || exit_status=1
   cleanup_transaction_stage || exit_status=1
   exit "$exit_status"
 }
@@ -1882,6 +2922,7 @@ run_install_transaction() {
   local asset_dir="$1"
   local resources_dir="$2"
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
+  local routing_timeout="${CC_SWITCH_INSTALLER_ROUTING_TIMEOUT:-30}"
 
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
@@ -1889,6 +2930,11 @@ run_install_transaction() {
   install_launch_agent || return 1
   start_cc_switch || return 1
   wait_for_health 'http://127.0.0.1:15721/health' "$health_timeout" || return 1
+  wait_for_golden_routing_state \
+    "$CC_SWITCH_DATABASE_PATH" \
+    "$CODEX_CONFIG_PATH" \
+    "$routing_timeout" \
+    || return 1
 }
 
 perform_install() {
@@ -1901,6 +2947,10 @@ perform_install() {
   local resources_dir
   local rollback_status
 
+  validate_execution_identity \
+    "$EUID" \
+    "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" \
+    || return 1
   LAUNCHER_FAILURE_SNAPSHOT_READY=0
   LAUNCHER_REPLACED_BY_RUN=0
 
@@ -1909,13 +2959,22 @@ perform_install() {
   architecture="${CC_SWITCH_INSTALLER_TEST_ARCH:-$(/usr/bin/uname -m)}"
   major_version="${CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR:-$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)}"
   validate_platform "$operating_system" "$architecture" "$major_version" || return 1
-  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || return 1
 
   if ! stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-modelhub-install.XXXXXX")"; then
     die "failed to create the installer staging directory"
     return 1
   fi
   TRANSACTION_STAGE_DIR="$stage_dir"
+  prepare_application_permissions || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  if [[ -e "$CHATGPT_APP_PATH" || -L "$CHATGPT_APP_PATH" ]]; then
+    ensure_chatgpt_app "$stage_dir" || {
+      cleanup_transaction_stage || true
+      return 1
+    }
+  fi
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -1949,10 +3008,15 @@ perform_install() {
   }
   resources_dir="$resources_parent/modelhub-installer"
 
-  prepare_application_permissions || {
+  ensure_chatgpt_app "$stage_dir" "$resources_dir" || {
     cleanup_transaction_stage || true
     return 1
   }
+  validate_chatgpt_codex "$CHATGPT_CODEX_PATH" "$EXPECTED_CODEX_TEAM_ID" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+
   quit_apps || {
     cleanup_transaction_stage || true
     return 1
@@ -2010,6 +3074,10 @@ rollback_latest() {
   local latest_backup
   local keychain_existed
 
+  validate_execution_identity \
+    "$EUID" \
+    "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" \
+    || return 1
   configure_install_paths || return 1
   latest_backup="$(
     { /usr/bin/find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/install-completed' \; -print \
