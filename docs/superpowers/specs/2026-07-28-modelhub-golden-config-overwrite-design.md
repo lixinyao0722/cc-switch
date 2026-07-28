@@ -1,5 +1,7 @@
 # ModelHub 黄金配置整体覆盖设计
 
+> R4 补充：`modelhub-installer-20260729-r4` 使用清洗后的本机完整配置快照，保留 Provider、MCP、Prompt、模型价格、技能仓库和 UI 偏好；继续排除凭据、日志、请求/会话/用量记录与备份。所有本机用户路径转换为 `__USER_HOME__`，安装时渲染。安装过程增加 8 个中文进度步骤，自定义中文 AK 输入提示，并把 AK 同时写入 Keychain 和 ModelHub Provider API Key。
+
 ## 目标
 
 把一键安装器从“读取新电脑现有 Codex/CC Switch 配置并增量合并”调整为“备份后整体覆盖一份经过清洗、可公开审计的黄金配置”，消除接管态 `base_url = "http://127.0.0.1:15721/v1"` 被反向固化进 Provider 配置而形成代理自环的风险。

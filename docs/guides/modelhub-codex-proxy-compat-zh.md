@@ -21,9 +21,11 @@ ChatGPT App
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会先校验已有 ChatGPT App，再下载并校验固定 Release 资产；如果 ChatGPT 缺失，则使用其中已校验的原子安装 helper 完成官方 DMG 安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`，避免把新电脑残留的接管地址合并回 Provider。写入 `/Applications` 或替换受保护的 CC Switch App 时，安装器会按需提示输入管理员密码；`MODELHUB_AK` 则由 macOS Keychain 单独提示输入。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R4 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
 
-整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json`、ChatGPT 登录态、AK/OAuth、日志、请求历史和备份不打包、不读取、不覆盖。
+安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。输入值同时保存到 macOS Keychain 和 CC Switch ModelHub Provider 的 API Key；写入 `/Applications` 时可能另行提示 Mac 管理员密码。
+
+整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖；Release 不包含 AK/OAuth、日志、请求/会话/用量记录或备份。本机绝对路径在包内统一为 `__USER_HOME__`，安装时替换为新电脑真实用户目录。
 
 如果 `/Applications/ChatGPT.app` 已存在，安装器只校验其 Bundle ID、OpenAI Team ID、arm64 主程序、严格代码签名及内置 Codex，不会下载或覆盖。任一校验失败都会阻断安装，并提示用户从 OpenAI 官方页面重新安装，避免把异常 App 当成受信运行时。
 
