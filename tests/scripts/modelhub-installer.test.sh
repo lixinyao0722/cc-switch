@@ -1238,9 +1238,16 @@ test_chatgpt_bootstrap_signal_after_commit_preserves_prevalidated_target() {
 
 create_expected_resource_tree() {
   local root="$1/modelhub-installer"
-  mkdir -p "$root/assets" "$root/helpers" "$root/templates"
+  mkdir -p "$root/assets" "$root/golden" "$root/helpers" "$root/templates"
   ensure_test_rename_helper
   : >"$root/assets/models-modelhub-1m.json"
+  cp "$GOLDEN_CODEX_CONFIG" "$root/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$root/golden/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$root/golden/cc-switch.db" >/dev/null
   cp "$TEST_RENAME_HELPER" "$root/helpers/rename-exclusive"
   : >"$root/templates/modelhub-provider.toml"
   : >"$root/templates/modelhub-provider-meta.json"
@@ -2311,8 +2318,12 @@ test_transaction_corrupt_backup_fails_before_restore_writes() {
 
 create_packager_source() {
   local source_dir="$1"
-  mkdir -p "$source_dir/assets" "$source_dir/helpers" "$source_dir/templates"
+  mkdir -p "$source_dir/assets" "$source_dir/golden" "$source_dir/helpers" "$source_dir/templates"
   cp "$INSTALLER" "$source_dir/install.sh"
+  cp "$GOLDEN_DB_BUILDER" "$source_dir/build-golden-db.sh"
+  cp "$GOLDEN_DB_SCHEMA" "$source_dir/golden/cc-switch-schema.sql"
+  cp "$GOLDEN_CODEX_CONFIG" "$source_dir/golden/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$source_dir/golden/settings.json"
   cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
@@ -2364,6 +2375,19 @@ test_package_builds_exact_allowlisted_release_assets() {
     || fail 'resource package is missing the executable rename helper'
   [[ ! -e "$extracted_dir/modelhub-installer/helpers/rename-exclusive.c" ]] \
     || fail 'resource package unexpectedly ships rename helper source'
+  [[ -f "$extracted_dir/modelhub-installer/golden/codex-config.toml" ]] \
+    || fail 'resource package is missing golden Codex config'
+  [[ -f "$extracted_dir/modelhub-installer/golden/settings.json" ]] \
+    || fail 'resource package is missing golden settings'
+  [[ -f "$extracted_dir/modelhub-installer/golden/cc-switch.db" ]] \
+    || fail 'resource package is missing golden CC Switch database'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    'PRAGMA integrity_check' 'ok'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    'SELECT count(*) FROM providers' '1'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
+    '0'
   assert_equals \
     "$(/usr/bin/lipo -archs "$extracted_dir/modelhub-installer/helpers/rename-exclusive")" \
     'arm64'
@@ -2406,6 +2430,12 @@ test_package_reproducibly_renders_pinned_helper_hash() {
   assert_equals \
     "$(shasum -a 256 "$first_output/install.sh" | awk '{ print $1 }')" \
     "$(shasum -a 256 "$second_output/install.sh" | awk '{ print $1 }')"
+  cmp \
+    "$first_output/modelhub-installer-resources.tar.gz" \
+    "$second_output/modelhub-installer-resources.tar.gz" \
+    || fail 'resource archives are not byte reproducible'
+  cmp "$first_output/SHA256SUMS.txt" "$second_output/SHA256SUMS.txt" \
+    || fail 'release checksum manifests are not byte reproducible'
   helper_sha="$(shasum -a 256 "$first_tree/modelhub-installer/helpers/rename-exclusive" | awk '{ print $1 }')"
   assert_contains "$first_output/install.sh" "readonly RENAME_HELPER_SHA256='$helper_sha'"
   assert_contains "$second_output/install.sh" "readonly RENAME_HELPER_SHA256='$helper_sha'"
@@ -2519,6 +2549,21 @@ test_package_rejects_source_symlinks() {
   ln -s /tmp "$source_dir/unexpected-link"
 
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$case_dir/output"
+}
+
+test_package_rejects_unsafe_golden_snapshot_source() {
+  local case_dir="$TEST_TMP/package-unsafe-golden"
+  local source_dir="$case_dir/source"
+  mkdir -p "$case_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  create_packager_source "$source_dir"
+  printf '\nbase_url = "http://127.0.0.1:15721/v1"\n' \
+    >>"$source_dir/golden/codex-config.toml"
+
+  assert_command_fails run_packager \
+    "$source_dir" "$case_dir/app.zip" "$case_dir/output"
+  [[ ! -e "$case_dir/output/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'unsafe golden source left a publishable resource archive'
 }
 
 test_golden_db_builder_creates_minimal_public_snapshot() {
@@ -2699,6 +2744,7 @@ run_test "package rejects generic credential key shapes" test_package_rejects_ge
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
+run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 

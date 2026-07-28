@@ -957,6 +957,10 @@ expected_resource_archive_entries() {
 modelhub-installer/
 modelhub-installer/assets/
 modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/golden/
+modelhub-installer/golden/cc-switch.db
+modelhub-installer/golden/codex-config.toml
+modelhub-installer/golden/settings.json
 modelhub-installer/helpers/
 modelhub-installer/helpers/rename-exclusive
 modelhub-installer/templates/
@@ -967,6 +971,104 @@ modelhub-installer/templates/modelhub-provider.toml
 EOF
 }
 
+validate_golden_codex_template() {
+  local file="$1"
+  local placeholder_count
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "golden Codex config is missing or unsafe: $file"
+    return 1
+  fi
+  placeholder_count="$(awk '{ count += gsub(/__USER_HOME__/, "") } END { print count + 0 }' "$file")"
+  if [[ "$placeholder_count" != '1' ]] \
+    || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
+    || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
+    || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file"; then
+    die 'golden Codex config does not match the portable ModelHub contract'
+    return 1
+  fi
+  if LC_ALL=C grep -E -i -q \
+    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token' \
+    "$file"; then
+    die 'golden Codex config contains a forbidden path, route, or credential field'
+    return 1
+  fi
+}
+
+validate_golden_settings() {
+  local file="$1"
+  local valid
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "golden CC Switch settings are missing or unsafe: $file"
+    return 1
+  fi
+  valid="$(/usr/bin/jq -r '
+    (keys | sort) == [
+      "currentProviderCodex",
+      "enableLocalProxy",
+      "firstRunNoticeConfirmed",
+      "preserveCodexOfficialAuthOnSwitch",
+      "proxyConfirmed"
+    ]
+    and .currentProviderCodex == "bytedance-modelhub-official-cli"
+    and .enableLocalProxy == true
+    and .preserveCodexOfficialAuthOnSwitch == true
+    and .firstRunNoticeConfirmed == true
+    and .proxyConfirmed == true
+  ' "$file" 2>/dev/null)" || return 1
+  if [[ "$valid" != 'true' ]]; then
+    die 'golden CC Switch settings do not match the public allowlist'
+    return 1
+  fi
+}
+
+golden_sqlite_scalar() {
+  local database="$1"
+  local query="$2"
+  /usr/bin/sqlite3 -readonly "$database" "$query" 2>/dev/null
+}
+
+validate_golden_database() {
+  local database="$1"
+  local raw_strings
+  local table
+
+  if [[ ! -f "$database" || -L "$database" ]]; then
+    die "golden CC Switch database is missing or unsafe: $database"
+    return 1
+  fi
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA integrity_check;')" == 'ok' ]] \
+    || { die 'golden CC Switch database integrity check failed'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '16' ]] \
+    || { die 'golden CC Switch database schema version is not 16'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'SELECT count(*) FROM providers;')" == '1' ]] \
+    || { die 'golden CC Switch database must contain exactly one provider'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND is_current=1;")" == '1' ]] \
+    || { die 'golden CC Switch database current provider is invalid'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers;")" == '0' ]] \
+    || { die 'golden CC Switch provider auth must be empty'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers;")" == '1' ]] \
+    || { die 'golden CC Switch provider omits the ModelHub upstream'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers;")" == '0' ]] \
+    || { die 'golden CC Switch provider points to the local proxy'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
+    || { die 'golden CC Switch proxy state is invalid'; return 1; }
+  for table in \
+    provider_endpoints provider_health proxy_live_backup proxy_request_logs \
+    session_log_sync stream_check_logs usage_daily_rollups profiles prompts \
+    mcp_servers skills skill_repos; do
+    [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM $table;")" == '0' ]] \
+      || { die "golden CC Switch database contains forbidden rows in $table"; return 1; }
+  done
+  raw_strings="$(/usr/bin/strings "$database")"
+  if printf '%s\n' "$raw_strings" | LC_ALL=C grep -E -i -q \
+    '/Users/|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token'; then
+    die 'golden CC Switch database contains a forbidden path or credential field'
+    return 1
+  fi
+}
+
 validate_resource_archive() {
   local archive="$1"
   local work_dir
@@ -975,6 +1077,7 @@ validate_resource_archive() {
   local expected_listing
   local verbose_listing
   local entry
+  local extracted_dir
 
   if [[ ! -f "$archive" ]]; then
     die "resource archive does not exist: $archive"
@@ -1017,6 +1120,23 @@ validate_resource_archive() {
     die "resource archive does not match the public allowlist"
     return 1
   fi
+
+  extracted_dir="$work_dir/extracted"
+  if ! mkdir -p "$extracted_dir" \
+    || ! tar -xzf "$archive" -C "$extracted_dir"; then
+    rm -rf "$work_dir"
+    die 'resource archive cannot be extracted for golden validation'
+    return 1
+  fi
+  validate_golden_codex_template \
+    "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_golden_settings \
+    "$extracted_dir/modelhub-installer/golden/settings.json" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_golden_database \
+    "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    || { rm -rf "$work_dir"; return 1; }
 
   rm -rf "$work_dir"
 }

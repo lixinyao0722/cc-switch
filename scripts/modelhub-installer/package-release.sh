@@ -30,14 +30,18 @@ scan_source_tree() {
   local forbidden_link
   local required_files=(
     'install.sh'
+    'build-golden-db.sh'
     'assets/models-modelhub-1m.json'
+    'golden/cc-switch-schema.sql'
+    'golden/codex-config.toml'
+    'golden/settings.json'
     'helpers/rename-exclusive.c'
     'templates/modelhub-provider.toml'
     'templates/modelhub-provider-meta.json'
     'templates/com.ccswitch.modelhub-env.plist'
     'templates/load-modelhub-env.sh'
   )
-  local forbidden_content="/Users/shopee|access_token|refresh_token|id_token|experimental_bearer_token|OPENAI_API_KEY|MODELHUB_AK[[:space:]]*[:=][[:space:]]*['\"]?[[:alnum:]]"
+  local forbidden_content="/Users/shopee|-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|gh[pousr]_[[:alnum:]_]{20,}|sk-[[:alnum:]]{20,}|MODELHUB_AK[[:space:]]*[:=][[:space:]]*['\"]?[[:alnum:]]"
   local credential_key_shape="(^|[^[:alnum:]_])([[:alnum:]_]*(access|refresh|bearer|api|auth)[_-]?(token|key)|[[:alnum:]_]*(secret|password|credential)[[:alnum:]_-]*|authorization)['\"]?[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"$]{4}"
 
   forbidden_file="$(
@@ -159,8 +163,19 @@ copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
 
-  mkdir -p "$package_root/assets" "$package_root/helpers" "$package_root/templates"
+  mkdir -p \
+    "$package_root/assets" \
+    "$package_root/golden" \
+    "$package_root/helpers" \
+    "$package_root/templates"
   cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
+  cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
+  cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
+  /bin/bash "$source_dir/build-golden-db.sh" \
+    --schema "$source_dir/golden/cc-switch-schema.sql" \
+    --provider-config "$source_dir/golden/codex-config.toml" \
+    --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
+    --output "$package_root/golden/cc-switch.db"
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
   cp "$source_dir/templates/com.ccswitch.modelhub-env.plist" "$package_root/templates/com.ccswitch.modelhub-env.plist"
@@ -170,11 +185,24 @@ copy_allowlisted_resources() {
     "$package_root/helpers/rename-exclusive"
   chmod 644 \
     "$package_root/assets/models-modelhub-1m.json" \
+    "$package_root/golden/codex-config.toml" \
+    "$package_root/golden/settings.json" \
+    "$package_root/golden/cc-switch.db" \
     "$package_root/templates/modelhub-provider.toml" \
     "$package_root/templates/modelhub-provider-meta.json" \
     "$package_root/templates/com.ccswitch.modelhub-env.plist"
   chmod 755 "$package_root/templates/load-modelhub-env.sh"
   chmod 755 "$package_root/helpers/rename-exclusive"
+}
+
+build_reproducible_resource_archive() {
+  local package_dir="$1"
+  local output_path="$2"
+  local tar_path="$3"
+
+  find "$package_dir/modelhub-installer" -exec touch -t 197001010000 '{}' +
+  COPYFILE_DISABLE=1 tar -cf "$tar_path" -C "$package_dir" modelhub-installer
+  /usr/bin/gzip -n -9 -c "$tar_path" >"$output_path"
 }
 
 main() {
@@ -267,8 +295,10 @@ main() {
   mkdir -p "$package_dir" "$staged_output"
   copy_allowlisted_resources "$source_dir" "$package_dir"
 
-  COPYFILE_DISABLE=1 tar -czf "$staged_output/$OUTPUT_RESOURCES_NAME" \
-    -C "$package_dir" modelhub-installer
+  build_reproducible_resource_archive \
+    "$package_dir" \
+    "$staged_output/$OUTPUT_RESOURCES_NAME" \
+    "$work_dir/modelhub-installer-resources.tar"
   render_installer_with_helper_hash \
     "$source_dir/install.sh" \
     "$package_dir/modelhub-installer/helpers/rename-exclusive" \
