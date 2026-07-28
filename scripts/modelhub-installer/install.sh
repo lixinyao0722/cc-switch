@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260728-r3'
+readonly RELEASE_TAG='modelhub-installer-20260729-r4'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -57,6 +57,13 @@ CHATGPT_INSTALLED_BY_RUN=0
 die() {
   echo "error: $*" >&2
   return 1
+}
+
+progress() {
+  local current="$1"
+  local total="$2"
+  shift 2
+  printf '\n[%s/%s] %s\n' "$current" "$total" "$*" >&2
 }
 
 installer_tool_path() {
@@ -980,7 +987,7 @@ validate_golden_codex_template() {
     return 1
   fi
   placeholder_count="$(awk '{ count += gsub(/__USER_HOME__/, "") } END { print count + 0 }' "$file")"
-  if [[ "$placeholder_count" != '1' ]] \
+  if [[ "$placeholder_count" -lt 1 ]] \
     || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
     || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file"; then
@@ -1004,14 +1011,7 @@ validate_golden_settings() {
     return 1
   fi
   valid="$(/usr/bin/jq -r '
-    (keys | sort) == [
-      "currentProviderCodex",
-      "enableLocalProxy",
-      "firstRunNoticeConfirmed",
-      "preserveCodexOfficialAuthOnSwitch",
-      "proxyConfirmed"
-    ]
-    and .currentProviderCodex == "bytedance-modelhub-official-cli"
+    .currentProviderCodex == "bytedance-modelhub-official-cli"
     and .enableLocalProxy == true
     and .preserveCodexOfficialAuthOnSwitch == true
     and .firstRunNoticeConfirmed == true
@@ -1042,22 +1042,19 @@ validate_golden_database() {
     || { die 'golden CC Switch database integrity check failed'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '16' ]] \
     || { die 'golden CC Switch database schema version is not 16'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" 'SELECT count(*) FROM providers;')" == '1' ]] \
-    || { die 'golden CC Switch database must contain exactly one provider'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND is_current=1;")" == '1' ]] \
     || { die 'golden CC Switch database current provider is invalid'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers;")" == '0' ]] \
-    || { die 'golden CC Switch provider auth must be empty'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers;")" == '1' ]] \
+  [[ "$(golden_sqlite_scalar "$database" "SELECT COALESCE(SUM(CASE WHEN json_type(settings_config, '$.auth')='object' THEN json_array_length(json_extract(settings_config, '$.auth')) ELSE 0 END),0) FROM providers;")" == '0' ]] \
+    || { die 'golden CC Switch provider auth objects must be empty'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '1' ]] \
     || { die 'golden CC Switch provider omits the ModelHub upstream'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers;")" == '0' ]] \
+  [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
-    provider_endpoints provider_health proxy_live_backup proxy_request_logs \
-    session_log_sync stream_check_logs usage_daily_rollups profiles prompts \
-    mcp_servers skills skill_repos; do
+    provider_health proxy_live_backup proxy_request_logs session_log_sync \
+    stream_check_logs usage_daily_rollups; do
     [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM $table;")" == '0' ]] \
       || { die "golden CC Switch database contains forbidden rows in $table"; return 1; }
   done
@@ -2318,8 +2315,11 @@ install_golden_codex_config() {
 install_golden_database() {
   local golden_database="$1"
   local target_database="$2"
+  local user_home="$3"
   local work_dir
   local staged_database
+  local placeholder_sql
+  local home_sql
 
   validate_golden_database "$golden_database" || return 1
   if ! work_dir="$(mktemp -d "$(dirname "$target_database")/.golden-db.XXXXXX")"; then
@@ -2327,10 +2327,44 @@ install_golden_database() {
     return 1
   fi
   staged_database="$work_dir/cc-switch.db"
+  placeholder_sql="$(sql_quote '__USER_HOME__')"
+  home_sql="$(sql_quote "$user_home")"
   if ! /bin/cp "$golden_database" "$staged_database" \
-    || ! /bin/chmod 0600 "$staged_database" \
-    || ! validate_golden_database "$staged_database"; then
+    || ! /bin/chmod 0600 "$staged_database"; then
     /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /usr/bin/sqlite3 "$staged_database" <<SQL
+BEGIN IMMEDIATE;
+UPDATE providers
+   SET settings_config=replace(settings_config, $placeholder_sql, $home_sql),
+       website_url=replace(COALESCE(website_url,''), $placeholder_sql, $home_sql),
+       notes=replace(COALESCE(notes,''), $placeholder_sql, $home_sql);
+UPDATE provider_endpoints SET url=replace(url, $placeholder_sql, $home_sql);
+UPDATE mcp_servers
+   SET server_config=replace(server_config, $placeholder_sql, $home_sql),
+       homepage=replace(COALESCE(homepage,''), $placeholder_sql, $home_sql),
+       docs=replace(COALESCE(docs,''), $placeholder_sql, $home_sql);
+UPDATE prompts
+   SET content=replace(content, $placeholder_sql, $home_sql),
+       description=replace(COALESCE(description,''), $placeholder_sql, $home_sql);
+UPDATE skills
+   SET directory=replace(directory, $placeholder_sql, $home_sql),
+       readme_url=replace(COALESCE(readme_url,''), $placeholder_sql, $home_sql);
+UPDATE profiles SET payload=replace(payload, $placeholder_sql, $home_sql);
+UPDATE settings SET value=replace(value, $placeholder_sql, $home_sql);
+COMMIT;
+VACUUM;
+SQL
+  then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to render user paths in the golden CC Switch database'
+    return 1
+  fi
+  if [[ "$(golden_sqlite_scalar "$staged_database" 'PRAGMA integrity_check;')" != 'ok' ]] \
+    || /usr/bin/strings "$staged_database" | /usr/bin/grep -Fq -- '__USER_HOME__'; then
+    /bin/rm -rf "$work_dir" || true
+    die 'installed golden database contains an unresolved user path placeholder'
     return 1
   fi
   if ! /bin/rm -f -- "$target_database-wal" "$target_database-shm" \
@@ -2345,6 +2379,7 @@ install_golden_database() {
 install_golden_settings() {
   local golden_settings="$1"
   local target_settings="$2"
+  local user_home="$3"
   local work_dir
   local staged_settings
 
@@ -2354,7 +2389,11 @@ install_golden_settings() {
     return 1
   fi
   staged_settings="$work_dir/settings.json"
-  if ! /bin/cp "$golden_settings" "$staged_settings" \
+  if ! render_template \
+    "$golden_settings" \
+    "$staged_settings" \
+    '__USER_HOME__' \
+    "$user_home" \
     || ! /bin/chmod 0600 "$staged_settings" \
     || ! validate_golden_settings "$staged_settings"; then
     /bin/rm -rf "$work_dir" || true
@@ -2405,10 +2444,12 @@ install_runtime_files() {
   install_golden_database \
     "$resources_dir/golden/cc-switch.db" \
     "$CC_SWITCH_DATABASE_PATH" \
+    "$INSTALL_USER_HOME" \
     || return 1
   install_golden_settings \
     "$resources_dir/golden/settings.json" \
     "$CC_SWITCH_SETTINGS_PATH" \
+    "$INSTALL_USER_HOME" \
     || return 1
 
   if ! /usr/bin/install -m 700 \
@@ -2598,10 +2639,38 @@ keychain_account_name() {
   /usr/bin/id -un
 }
 
+store_modelhub_api_key_in_provider() {
+  local database="$1"
+  local modelhub_ak="$2"
+  local ak_sql
+  local changed
+
+  ak_sql="$(sql_quote "$modelhub_ak")" || return 1
+  changed="$(/usr/bin/sqlite3 "$database" <<SQL
+BEGIN IMMEDIATE;
+UPDATE providers
+SET settings_config=json_set(
+  settings_config,
+  '$.auth',
+  json_object('OPENAI_API_KEY', $ak_sql)
+)
+WHERE id='$MODELHUB_PROVIDER_ID'
+  AND app_type='codex';
+SELECT changes();
+COMMIT;
+SQL
+)" || return 1
+  if [[ "$changed" != '1' ]]; then
+    die 'failed to store MODELHUB_AK in the CC Switch ModelHub Provider'
+    return 1
+  fi
+}
+
 configure_keychain() {
   local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
   local account_name
   local find_status
+  local modelhub_ak=''
   account_name="$(keychain_account_name)"
   KEYCHAIN_CREATED_BY_RUN=0
 
@@ -2639,10 +2708,30 @@ configure_keychain() {
       return 1
     fi
   else
-    printf '%s\n' '请输入从管理员处获取的 MODELHUB_AK；输入内容将保存到 macOS Keychain。' >&2
-    if ! "$security_bin" add-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" -U -w </dev/tty; then
+    printf '%s' '请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）：' >/dev/tty
+    if ! IFS= read -r -s modelhub_ak </dev/tty; then
+      printf '\n' >/dev/tty
+      die '读取 MODELHUB_AK 失败'
       return 1
     fi
+    printf '\n' >/dev/tty
+    if [[ -z "$modelhub_ak" ]]; then
+      die 'MODELHUB_AK 不能为空'
+      return 1
+    fi
+    if ! "$security_bin" add-generic-password \
+      -a "$account_name" \
+      -s "$KEYCHAIN_SERVICE" \
+      -U \
+      -w "$modelhub_ak"; then
+      modelhub_ak=''
+      return 1
+    fi
+    if ! store_modelhub_api_key_in_provider "$CC_SWITCH_DATABASE_PATH" "$modelhub_ak"; then
+      modelhub_ak=''
+      return 1
+    fi
+    modelhub_ak=''
   fi
 }
 
@@ -2924,9 +3013,12 @@ run_install_transaction() {
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
   local routing_timeout="${CC_SWITCH_INSTALLER_ROUTING_TIMEOUT:-30}"
 
+  progress 6 8 '安装 CC Switch，并覆盖本机完整配置快照'
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
+  progress 7 8 '请输入 MODELHUB_AK，并写入 Keychain 与 ModelHub Provider'
   configure_keychain || return 1
+  progress 8 8 '启动 CC Switch，检查健康状态和 ModelHub 路由'
   install_launch_agent || return 1
   start_cc_switch || return 1
   wait_for_health 'http://127.0.0.1:15721/health' "$health_timeout" || return 1
@@ -2947,6 +3039,7 @@ perform_install() {
   local resources_dir
   local rollback_status
 
+  progress 1 8 '检查 macOS、Apple Silicon 和当前用户权限'
   validate_execution_identity \
     "$EUID" \
     "${CC_SWITCH_INSTALLER_TEST_EUID:-$EUID}" \
@@ -2965,6 +3058,7 @@ perform_install() {
     return 1
   fi
   TRANSACTION_STAGE_DIR="$stage_dir"
+  progress 2 8 '检查 Applications 权限和现有 ChatGPT 应用'
   prepare_application_permissions || {
     cleanup_transaction_stage || true
     return 1
@@ -2975,6 +3069,7 @@ perform_install() {
       return 1
     }
   fi
+  progress 3 8 '下载并校验 R4 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -3008,6 +3103,7 @@ perform_install() {
   }
   resources_dir="$resources_parent/modelhub-installer"
 
+  progress 4 8 '验证 ChatGPT；缺失时从 OpenAI 官方来源安装'
   ensure_chatgpt_app "$stage_dir" "$resources_dir" || {
     cleanup_transaction_stage || true
     return 1
@@ -3017,6 +3113,7 @@ perform_install() {
     return 1
   }
 
+  progress 5 8 '退出应用并备份现有 Codex、CC Switch 配置'
   quit_apps || {
     cleanup_transaction_stage || true
     return 1
@@ -3068,6 +3165,7 @@ perform_install() {
   TRANSACTION_GUARD_ACTIVE=0
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
+  printf '\n安装完成：CC Switch 已启动，ModelHub 路由检查通过。\n' >&2
 }
 
 rollback_latest() {

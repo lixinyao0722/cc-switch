@@ -31,6 +31,7 @@ scan_source_tree() {
   local required_files=(
     'install.sh'
     'build-golden-db.sh'
+    'build-local-golden-snapshot.sh'
     'assets/models-modelhub-1m.json'
     'golden/cc-switch-schema.sql'
     'golden/codex-config.toml'
@@ -165,6 +166,7 @@ render_installer_with_helper_hash() {
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
+  local snapshot_dir="${CC_SWITCH_GOLDEN_SNAPSHOT_DIR:-}"
 
   mkdir -p \
     "$package_root/assets" \
@@ -172,13 +174,27 @@ copy_allowlisted_resources() {
     "$package_root/helpers" \
     "$package_root/templates"
   cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
-  cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
-  cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
-  /bin/bash "$source_dir/build-golden-db.sh" \
-    --schema "$source_dir/golden/cc-switch-schema.sql" \
-    --provider-config "$source_dir/golden/codex-config.toml" \
-    --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
-    --output "$package_root/golden/cc-switch.db"
+  if [[ -n "$snapshot_dir" ]]; then
+    case "$snapshot_dir" in
+      /*) ;;
+      *) snapshot_dir="$(pwd -P)/$snapshot_dir" ;;
+    esac
+    if [[ ! -d "$snapshot_dir" || -L "$snapshot_dir" ]]; then
+      die "portable golden snapshot directory is missing or unsafe: $snapshot_dir"
+      return 1
+    fi
+    cp "$snapshot_dir/codex-config.toml" "$package_root/golden/codex-config.toml"
+    cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
+    cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
+  else
+    cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
+    cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
+    /bin/bash "$source_dir/build-golden-db.sh" \
+      --schema "$source_dir/golden/cc-switch-schema.sql" \
+      --provider-config "$source_dir/golden/codex-config.toml" \
+      --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
+      --output "$package_root/golden/cc-switch.db"
+  fi
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
   cp "$source_dir/templates/com.ccswitch.modelhub-env.plist" "$package_root/templates/com.ccswitch.modelhub-env.plist"
