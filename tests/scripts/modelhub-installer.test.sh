@@ -628,7 +628,14 @@ create_chatgpt_bootstrap_stubs() {
   write_executable_stub "$case_dir/curl" \
     'printf "%s\n" "$*" >>"$FAKE_CHATGPT_CURL_LOG"' \
     'if [[ "$*" != *"--output"* ]]; then' \
-    '  if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then printf "{\"status\":\"healthy\"}\n"; exit 0; fi' \
+    '  if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '    if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
+    '      /usr/bin/sed '\''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g'\'' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '      /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '    fi' \
+    '    printf "{\"status\":\"healthy\"}\n"' \
+    '    exit 0' \
+    '  fi' \
     '  exit 22' \
     'fi' \
     '[[ "${FAKE_CHATGPT_BOOTSTRAP_MODE:-success}" != "download-fail" ]] || exit 81' \
@@ -2745,15 +2752,17 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   export CC_SWITCH_INSTALLER_ASSET_DIR="$asset_dir"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
   export FAKE_SECURITY_MODE=success
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
   database="$case_dir/home/.cc-switch/cc-switch.db"
 
   /bin/bash -s <"$asset_dir/install.sh"
   first_install_digest="$(managed_state_digest "$case_dir")"
-  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "on-request"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
   assert_sql "$database" "select count(*) from providers where name='Bytedance ModelHub - 官方CLI'" '1'
 
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130001Z'

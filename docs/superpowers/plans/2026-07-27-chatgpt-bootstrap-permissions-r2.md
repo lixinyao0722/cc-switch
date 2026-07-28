@@ -1,5 +1,7 @@
 # ChatGPT Bootstrap 与 App 权限修复实施计划
 
+> 历史说明：本计划对应已发布的 R2。R3 已改为黄金配置整体覆盖，当前实现与发布步骤以 `docs/superpowers/plans/2026-07-28-modelhub-golden-config-overwrite.md` 为准；R2 的增量合并描述不再代表最新行为。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 修复 root-owned `CC Switch.app` 的权限误判，并在 ChatGPT App 缺失时从 OpenAI 官方 DMG 安装、验签和保留该应用。

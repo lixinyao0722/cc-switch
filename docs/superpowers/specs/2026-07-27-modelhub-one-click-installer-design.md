@@ -45,6 +45,8 @@
 
 针对新机权限与 ChatGPT 缺失场景发布 follow-up 正式 Release `modelhub-installer-20260727-r2`。它成为新的 `/releases/latest` 目标；`modelhub-installer-20260727` 和更早的两个 Pre-release 全部保留不变。
 
+针对增量合并把 live 接管地址固化进 Provider 的问题，再发布正式 Release `modelhub-installer-20260728-r3`。R3 改用清洗后的黄金配置整体覆盖，并成为新的 `/releases/latest` 目标；R1、R2 和 Pre-release 继续保留。
+
 新 Release 只包含以下公开资产：
 
 - `install.sh`
@@ -52,7 +54,7 @@
 - `modelhub-installer-resources.tar.gz`
 - `SHA256SUMS.txt`
 
-R2 的 `install.sh` 内部固定不可变 tag `modelhub-installer-20260727-r2`。用户虽然通过 `/releases/latest` 获取脚本，但该脚本会从自身对应的精确 tag 下载其余资产，避免安装过程中因新版 Release 发布而混用不同版本的文件。
+R3 的 `install.sh` 内部固定不可变 tag `modelhub-installer-20260728-r3`。用户虽然通过 `/releases/latest` 获取脚本，但该脚本会从自身对应的精确 tag 下载其余资产，避免安装过程中因新版 Release 发布而混用不同版本的文件。
 
 通过 stdin 执行的脚本还会从该精确 tag 重新下载一份 `install.sh`，与 App ZIP 和资源包一起使用 `SHA256SUMS.txt` 校验；校验后的副本用于本机回滚入口。
 
@@ -62,6 +64,8 @@ R2 的 `install.sh` 内部固定不可变 tag `modelhub-installer-20260727-r2`�
 
 - `scripts/modelhub-installer/install.sh`：兼容 Bash 3.2 的引导、安装、验证和回滚入口。
 - `scripts/modelhub-installer/package-release.sh`：从显式白名单构建公开资源包和校验文件。
+- `scripts/modelhub-installer/build-golden-db.sh`：从固定 schema 和公开 Provider 模板构建可复现、无历史数据的黄金 SQLite 快照。
+- `scripts/modelhub-installer/golden/`：portable Codex 配置、最小 settings 和 CC Switch v16 schema。
 - `scripts/modelhub-installer/assets/models-modelhub-1m.json`：不含凭据和本地路径的公开 ModelHub 模型目录。
 - `scripts/modelhub-installer/templates/modelhub-provider.toml`：包含 `__USER_HOME__` 占位符的 Codex Provider 受管字段。
 - `scripts/modelhub-installer/templates/modelhub-provider-meta.json`：`max_output_tokens`、ModelHub 会话适配器和同 Provider 429 重试元数据。
@@ -144,7 +148,7 @@ helper 的信任链由打包器和安装器共同固定：打包器以 `arm64`�
 
 CC Switch 数据库使用系统 `sqlite3 .backup` 生成一致逻辑快照；恢复前删除 `cc-switch.db-wal` 与 `cc-switch.db-shm`，避免新事务 sidecar 重放到旧主库。
 
-备份完成后，如果 App 安装、配置合并、Keychain 设置、launchd 加载或健康检查中的任一步失败，安装器都会根据 manifest 自动回滚。回滚恢复原文件，并删除安装前不存在的目标。若失败流程新建了 Keychain 条目，则删除该条目；若条目此前已经存在，则保留当前条目，不把旧密钥导出到文件。
+备份完成后，如果 App 安装、配置整体覆盖、Keychain 设置、launchd 加载、健康检查或路由验真中的任一步失败，安装器都会根据 manifest 自动回滚。回滚恢复原文件，并删除安装前不存在的目标。若失败流程新建了 Keychain 条目，则删除该条目；若条目此前已经存在，则保留当前条目，不把旧密钥导出到文件。
 
 安装器把自身复制到 `~/.local/share/cc-switch-modelhub/install.sh`，以支持：
 
@@ -154,7 +158,7 @@ CC Switch 数据库使用系统 `sqlite3 .backup` 生成一致逻辑快照；恢
 
 该 launcher 是持久回滚入口，不属于用户显式回滚的普通受管目标。每次安装会在事务开始时保存一个仅用于失败恢复的私有 launcher 快照；只有当前事务失败且已替换 launcher 时才恢复旧版本或删除本次新建版本。安装成功后，显式 `--rollback latest` 会保留当前已验证 launcher，因此可重复执行。
 
-## 增量配置合并
+## 黄金配置整体覆盖
 
 ### CC Switch App
 
@@ -168,37 +172,17 @@ CC Switch 数据库使用系统 `sqlite3 .backup` 生成一致逻辑快照；恢
 ${HOME}/.codex/models-modelhub-1m.json
 ```
 
-安装器通过可识别 TOML 章节的转换器，在暂存目录生成新的 `config.toml`，校验后原子替换线上文件。安装器只管理以下顶层字段：
-
-- `model`
-- `review_model`
-- `model_provider`
-- `model_reasoning_effort`
-- `model_auto_compact_token_limit`
-- `model_context_window`
-- `model_catalog_json`
-
-安装器还只管理 `[model_providers.modelhub]` 表。其他顶层字段和章节保持原有相对顺序及字节内容，包括插件、MCP servers、项目信任、hooks、memories、桌面偏好和 skills。
+安装器从公开黄金模板生成新的完整 `config.toml`，校验后原子替换线上文件。它不读取或合并目标机器旧 config，因此旧插件、MCP、项目信任、hooks、skills 和个人偏好不会进入新配置；安装前副本仍保存在事务备份中。
 
 模板使用 `__USER_HOME__`。安装器会先按 TOML 规则转义当前绝对 `$HOME`，再替换该占位符。仓库和 Release 中不得出现 `/Users/shopee` 路径。
 
 ### CC Switch Provider 与代理
 
-如果 `~/.cc-switch/cc-switch.db` 不存在，安装器会隐藏启动一次新安装的 App 以初始化数据库结构，然后在继续配置前退出 App。
-
-安装器在一个 SQLite 事务中完成以下操作：
-
-- 查找名为 `Bytedance ModelHub - 官方CLI` 的现有 Codex Provider；如果存在，则保留其 Provider ID，只更新受管字段。
-- 如果不存在，则插入 Provider ID `bytedance-modelhub-official-cli`。
-- 保存包含空 `auth` 对象和合并后 ModelHub TOML 的 `settings_config`，不保存 OAuth 或 bearer 信息。
-- 保存公开模板中精确的 `localProxyRequestOverrides` 元数据。
-- 将 ModelHub Provider 设为当前 Codex Provider，不改变其他应用类型的 Provider。
-- 只新增或更新 Codex 的 `proxy_config` 行：监听 `127.0.0.1:15721`，启用代理与接管、启用日志并关闭自动故障转移。
-- 不修改请求日志、其他 Provider、价格、profiles、prompts、skills 和其他无关表。
+打包器从固定 v16 schema 构建全新 SQLite 快照，而不是复制开发机数据库。快照仅包含稳定 ID `bytedance-modelhub-official-cli` 的 ModelHub Provider、四条最小 proxy_config 行和公开初始化标记；请求日志、用量、live backup、健康状态、其他 Provider、profiles、prompts、MCP 和 skills 均为空。安装器验证后原子整体替换 `cc-switch.db`，不打开或合并目标旧数据库。
 
 当前 CC Switch Codex 适配器只从 Provider 持久化配置提取 API key。为使空 `auth` 的公开模板可用，适配器增加以下窄范围回退：只有活跃 `[model_providers.<model_provider>]` 显式声明 `env_key`、且现有持久化 key 为空时，才读取同名进程环境变量。它不读取非活跃 Provider 的 `env_key`，不把解析结果写回数据库，也不改变已有持久化 key 的优先级。
 
-安装器只更新 `~/.cc-switch/settings.json` 中的以下字段，其他字段保持不变：
+安装器用最小黄金 `settings.json` 整体覆盖旧文件，只保留：
 
 - `currentProviderCodex`
 - `enableLocalProxy`
@@ -228,8 +212,8 @@ security add-generic-password \
 
 ## 幂等与失败处理
 
-- 重复运行同一安装器会创建新备份并更新同一受管 Provider，不会重复新增 Provider。
-- 既有非受管 Codex 设置和 CC Switch 数据行保持不变。
+- 重复运行同一安装器会创建新备份并从同一黄金快照重建三份配置，不会继承 live 接管地址。
+- 既有 Codex/CC Switch Provider 和个人设置会被覆盖，但可通过 `--rollback latest` 完整恢复。
 - 下载使用有限次数重试，SHA 或归档校验失败时立即终止。
 - 已存在但签名、Bundle ID、架构或内置 Codex 不符合约束的 ChatGPT App 会阻断安装，不自动覆盖。
 - 本次新安装的官方 ChatGPT App 不参与 CC Switch 失败回滚或显式回滚。
@@ -252,9 +236,9 @@ security add-generic-password \
 - ChatGPT 下载失败、DMG 挂载失败或验签失败时不留下目标 App；ChatGPT 安装成功后即使 CC Switch 后续失败也会保留。
 - 在首次修改前拒绝 SHA 不匹配、归档路径穿越、符号链接、非预期资产或未解析占位符。
 - 不存在 CC Switch 数据库或 Codex 配置时的首次安装。
-- 增量合并既有 Codex 配置并保留无关章节。
-- 更新现有 ModelHub Provider 且不产生重复项。
-- 保留无关 CC Switch Provider、设置和数据库行。
+- 整体覆盖旧 Codex config、CC Switch DB/settings，并保持 `auth.json` 字节不变。
+- 黄金 DB 只有一个固定 ModelHub Provider，历史/用量/live backup/健康和其他个人表为空。
+- 启动后验证数据库 Provider 指向真实 ModelHub、live Codex 指向本地代理，拒绝方向反转。
 - Codex Provider 在无持久化 key 时从活跃 Provider 的 `env_key` 读取 AK，并忽略非活跃 Provider 或空环境值。
 - 当用户主目录包含空格时正确替换 `__USER_HOME__`。
 - 取消 Keychain 输入后自动恢复备份。
@@ -278,7 +262,7 @@ Release 验证还包括：
 
 1. 在 `feat/modelhub-one-click-installer` 提交安装器、模板、测试、打包逻辑和文档。
 2. 推送分支并创建以 `main` 为目标的草稿 GitHub PR。
-3. R2 follow-up 创建 tag 为 `modelhub-installer-20260727-r2`、指向已验证功能分支提交的草稿 GitHub Release；旧 Release 保留。
+3. R3 创建 tag 为 `modelhub-installer-20260728-r3`、指向已验证功能分支提交的草稿 GitHub Release；旧 Release 保留。
 4. 上传四个声明的资产，并对比 GitHub 资产摘要与本地 SHA-256。
 5. 发布为正式 Release，使 `/releases/latest/download/install.sh` 可以解析。
 6. 下载并验证已发布资产，执行最终沙箱冒烟测试。
