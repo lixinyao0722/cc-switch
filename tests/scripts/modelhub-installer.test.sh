@@ -1766,12 +1766,25 @@ create_transaction_stubs() {
     '    ;;' \
     '  add-generic-password)' \
     '    [[ "${FAKE_SECURITY_MODE:-success}" != "cancel" ]] || exit 1' \
-    '    modelhub_ak="${CC_SWITCH_INSTALLER_TEST_MODELHUB_AK:-}"' \
+    '    modelhub_ak=""' \
+    '    password_value_count=0' \
+    '    shift' \
     '    while [[ $# -gt 0 ]]; do' \
-    '      if [[ "$1" == "-w" && $# -gt 1 ]]; then modelhub_ak="$2"; break; fi' \
-    '      shift' \
+    '      if [[ "$1" == "-w" ]]; then' \
+    '        [[ $# -gt 1 ]] || exit 64' \
+    '        modelhub_ak="$2"' \
+    '        password_value_count=$((password_value_count + 1))' \
+    '        shift 2' \
+    '      else' \
+    '        shift' \
+    '      fi' \
     '    done' \
+    '    [[ "$password_value_count" == "1" ]] || exit 64' \
     '    printf "%s" "$modelhub_ak" >"$FAKE_KEYCHAIN_STATE"' \
+    '    if [[ "${FAKE_SECURITY_MODE:-success}" == "write-then-fail" && ! -e "$FAKE_SECURITY_WRITE_THEN_FAIL_STATE" ]]; then' \
+    '      : >"$FAKE_SECURITY_WRITE_THEN_FAIL_STATE"' \
+    '      exit 70' \
+    '    fi' \
     '    ;;' \
     '  delete-generic-password)' \
     '    rm -f "$FAKE_KEYCHAIN_STATE"' \
@@ -1806,6 +1819,10 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/sleep" \
     'if [[ -n "${FAKE_ROUTING_REWRITE_AK:-}" && ! -e "$FAKE_ROUTING_REWRITE_STATE" ]]; then' \
     '  /usr/bin/sqlite3 "$FAKE_PROVIDER_DATABASE_PATH" "UPDATE providers SET settings_config=json_set(settings_config, '\''$.auth'\'', json_object('\''OPENAI_API_KEY'\'', '\''$FAKE_ROUTING_REWRITE_AK'\'')) WHERE id='\''bytedance-modelhub-official-cli'\'' AND app_type='\''codex'\'';"' \
+    '  if [[ "${FAKE_ROUTING_REWRITE_ALL:-0}" == "1" ]]; then' \
+    '    printf "%s" "$FAKE_ROUTING_REWRITE_AK" >"$FAKE_KEYCHAIN_STATE"' \
+    '    printf "%s" "$FAKE_ROUTING_REWRITE_AK" >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"' \
+    '  fi' \
     '  /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
     '  /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
     '  : >"$FAKE_ROUTING_REWRITE_STATE"' \
@@ -1977,11 +1994,13 @@ prepare_transaction_case() {
   export FAKE_PGREP_LOG="$case_dir/pgrep.log"
   export FAKE_PGREP_ONCE_STATE="$case_dir/pgrep-once-state"
   export FAKE_SECURITY_MODE=success
+  export FAKE_SECURITY_WRITE_THEN_FAIL_STATE="$case_dir/security-write-then-fail-state"
   export FAKE_SECURITY_FIND_STATUS=''
   export FAKE_HEALTH_MODE=healthy
   export FAKE_PROVIDER_DATABASE_PATH="$case_dir/home/.cc-switch/cc-switch.db"
   export FAKE_PROVIDER_REWRITE_AK=''
   export FAKE_ROUTING_REWRITE_AK=''
+  export FAKE_ROUTING_REWRITE_ALL=0
   export FAKE_ROUTING_REWRITE_STATE="$case_dir/routing-rewrite-state"
   export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
@@ -2404,6 +2423,101 @@ test_transaction_launchd_snapshot_error_preserves_existing_state() {
   assert_equals \
     "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
     'existing-modelhub-ak-r5'
+}
+
+test_transaction_rejects_uniform_credential_drift_from_expected_ak() {
+  local case_dir="$TEST_TMP/transaction-uniform-credential-drift"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=2
+  export FAKE_ROUTING_REWRITE_AK='uniform-drift-test-r5'
+  export FAKE_ROUTING_REWRITE_ALL=1
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'uniform credential drift rollback left a new keychain item'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] \
+    || fail 'uniform credential drift rollback left MODELHUB_AK in launchd'
+}
+
+test_transaction_restores_existing_keychain_after_write_then_fail() {
+  local case_dir="$TEST_TMP/transaction-existing-keychain-write-then-fail"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  printf '%s' 'existing-keychain-test-r5' >"$FAKE_KEYCHAIN_STATE"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_SECURITY_MODE=write-then-fail
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" == 'existing-keychain-test-r5' ]] \
+    || fail 'write-then-fail rollback did not restore the previous keychain item'
+}
+
+test_transaction_removes_new_keychain_after_write_then_fail() {
+  local case_dir="$TEST_TMP/transaction-new-keychain-write-then-fail"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_SECURITY_MODE=write-then-fail
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'write-then-fail rollback left a new keychain item'
+}
+
+test_transaction_restores_custom_codex_cli_path_after_failure() {
+  local case_dir="$TEST_TMP/transaction-custom-codex-cli-path-rollback"
+  local before
+  local after
+  local restored_codex_cli_path
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
+  printf '%s' '/custom/preinstall/codex' >"$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  if ! restored_codex_cli_path="$("$CC_SWITCH_LAUNCHCTL_BIN" getenv CODEX_CLI_PATH)"; then
+    fail 'rollback removed the previous CODEX_CLI_PATH'
+    return 1
+  fi
+  assert_equals "$restored_codex_cli_path" '/custom/preinstall/codex'
+}
+
+test_security_stub_requires_explicit_password_value() {
+  local case_dir="$TEST_TMP/security-stub-password-source"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  /bin/rm -f "$FAKE_KEYCHAIN_STATE"
+
+  assert_command_fails \
+    "$CC_SWITCH_SECURITY_BIN" add-generic-password -a test -s test -U -w
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'security stub accepted a missing password value'
+
+  "$CC_SWITCH_SECURITY_BIN" add-generic-password \
+    -a test \
+    -s test \
+    -U \
+    -w 'explicit-security-test-value'
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'explicit-security-test-value'
 }
 
 test_transaction_overwrites_golden_configuration_and_rolls_back() {
@@ -2980,6 +3094,11 @@ run_test "transaction detects startup ModelHub AK drift and rolls back" test_tra
 run_test "transaction detects routing-stage ModelHub AK drift and rolls back" test_transaction_detects_routing_stage_modelhub_ak_drift_and_rolls_back
 run_test "transaction restores existing ModelHub credential state after failure" test_transaction_restores_existing_modelhub_credential_state_after_failure
 run_test "transaction launchd snapshot error preserves existing state" test_transaction_launchd_snapshot_error_preserves_existing_state
+run_test "transaction rejects uniform credential drift from expected AK" test_transaction_rejects_uniform_credential_drift_from_expected_ak
+run_test "transaction restores existing keychain after write-then-fail" test_transaction_restores_existing_keychain_after_write_then_fail
+run_test "transaction removes new keychain after write-then-fail" test_transaction_removes_new_keychain_after_write_then_fail
+run_test "transaction restores custom CODEX_CLI_PATH after failure" test_transaction_restores_custom_codex_cli_path_after_failure
+run_test "security stub requires explicit password value" test_security_stub_requires_explicit_password_value
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
