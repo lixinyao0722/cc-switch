@@ -2890,6 +2890,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r5'
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
   export FAKE_SECURITY_MODE=success
