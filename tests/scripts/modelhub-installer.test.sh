@@ -1782,6 +1782,7 @@ create_transaction_stubs() {
     'case "${1:-}" in' \
     '  setenv) printf "%s" "$3" >"$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
     '  getenv)' \
+    '    if [[ -n "${FAKE_LAUNCHCTL_GETENV_STATUS:-}" ]]; then exit "$FAKE_LAUNCHCTL_GETENV_STATUS"; fi' \
     '    [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ]] || exit 1' \
     '    /bin/cat "$FAKE_LAUNCHCTL_STATE_DIR/env-$2"' \
     '    ;;' \
@@ -1986,6 +1987,7 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_COMPLETION_MARKER_DIR=''
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
+  export FAKE_LAUNCHCTL_GETENV_STATUS=''
   export FAKE_PGREP_MODE=stopped
 }
 
@@ -2368,6 +2370,37 @@ test_transaction_restores_existing_modelhub_credential_state_after_failure() {
   after="$(managed_state_digest "$case_dir")"
   assert_equals "$after" "$before"
   assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r5'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'existing-modelhub-ak-r5'
+}
+
+test_transaction_launchd_snapshot_error_preserves_existing_state() {
+  local case_dir="$TEST_TMP/transaction-launchd-snapshot-error"
+  local database
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+  /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
+  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_LAUNCHCTL_GETENV_STATUS=36
+
+  assert_command_fails perform_install
+
+  export FAKE_LAUNCHCTL_GETENV_STATUS=''
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r5'
+  assert_sql "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='existing-provider' AND app_type='codex';" \
+    'keep-existing'
+  assert_sql "$database" \
+    "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';" \
+    '0'
   assert_equals \
     "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
     'existing-modelhub-ak-r5'
@@ -2945,6 +2978,7 @@ run_test "transaction synchronizes ModelHub AK" test_transaction_synchronizes_mo
 run_test "transaction detects startup ModelHub AK drift and rolls back" test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back
 run_test "transaction detects routing-stage ModelHub AK drift and rolls back" test_transaction_detects_routing_stage_modelhub_ak_drift_and_rolls_back
 run_test "transaction restores existing ModelHub credential state after failure" test_transaction_restores_existing_modelhub_credential_state_after_failure
+run_test "transaction launchd snapshot error preserves existing state" test_transaction_launchd_snapshot_error_preserves_existing_state
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files

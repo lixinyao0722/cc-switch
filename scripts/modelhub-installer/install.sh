@@ -2843,7 +2843,6 @@ configure_keychain() {
   KEYCHAIN_CREATED_BY_RUN=0
   KEYCHAIN_UPDATED_BY_RUN=0
   KEYCHAIN_PREVIOUS_AK=''
-  snapshot_launchd_modelhub_ak || return 1
 
   if KEYCHAIN_PREVIOUS_AK="$("$security_bin" find-generic-password \
     -a "$account_name" \
@@ -3303,10 +3302,14 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
-  MUTATION_STARTED=1
-  INSTALL_COMPLETED=0
   KEYCHAIN_CREATED_BY_RUN=0
   clear_modelhub_credential_transaction_state
+  snapshot_launchd_modelhub_ak || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  MUTATION_STARTED=1
+  INSTALL_COMPLETED=0
   TRANSACTION_GUARD_ACTIVE=1
 
   if ! run_install_transaction "$asset_dir" "$resources_dir"; then
