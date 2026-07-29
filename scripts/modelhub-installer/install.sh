@@ -2639,11 +2639,45 @@ keychain_account_name() {
   /usr/bin/id -un
 }
 
+validate_modelhub_ak() {
+  local modelhub_ak="$1"
+
+  if [[ -z "$modelhub_ak" ]]; then
+    die 'MODELHUB_AK 不能为空'
+    return 1
+  fi
+  case "$modelhub_ak" in
+    *$'\n'*|*$'\r'*)
+      die 'MODELHUB_AK 不能包含换行符'
+      return 1
+      ;;
+  esac
+}
+
+read_modelhub_ak() {
+  local modelhub_ak=''
+
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    modelhub_ak="${CC_SWITCH_INSTALLER_TEST_MODELHUB_AK:-}"
+  else
+    printf '%s' '请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）：' >/dev/tty
+    if ! IFS= read -r -s modelhub_ak </dev/tty; then
+      printf '\n' >/dev/tty
+      die '读取 MODELHUB_AK 失败'
+      return 1
+    fi
+    printf '\n' >/dev/tty
+  fi
+  validate_modelhub_ak "$modelhub_ak" || return 1
+  printf '%s' "$modelhub_ak"
+}
+
 store_modelhub_api_key_in_provider() {
   local database="$1"
   local modelhub_ak="$2"
   local ak_sql
   local changed
+  local provider_ak
 
   ak_sql="$(sql_quote "$modelhub_ak")" || return 1
   changed="$(/usr/bin/sqlite3 "$database" <<SQL
@@ -2664,6 +2698,58 @@ SQL
     die 'failed to store MODELHUB_AK in the CC Switch ModelHub Provider'
     return 1
   fi
+  provider_ak="$(/usr/bin/sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='$MODELHUB_PROVIDER_ID' AND app_type='codex';")" \
+    || return 1
+  if [[ "$provider_ak" != "$modelhub_ak" ]]; then
+    provider_ak=''
+    die 'failed to verify MODELHUB_AK in the CC Switch ModelHub Provider'
+    return 1
+  fi
+  provider_ak=''
+}
+
+verify_modelhub_credential_sync() {
+  local database="$1"
+  local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
+  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
+  local account_name
+  local keychain_ak=''
+  local provider_ak=''
+  local launchd_ak=''
+
+  account_name="$(keychain_account_name)"
+  if ! keychain_ak="$("$security_bin" find-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -w 2>/dev/null)"; then
+    die 'failed to read MODELHUB_AK from Keychain during credential verification'
+    return 1
+  fi
+  if ! provider_ak="$(/usr/bin/sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='$MODELHUB_PROVIDER_ID' AND app_type='codex';")"; then
+    keychain_ak=''
+    die 'failed to read MODELHUB_AK from the CC Switch ModelHub Provider'
+    return 1
+  fi
+  if ! launchd_ak="$("$launchctl_bin" getenv MODELHUB_AK 2>/dev/null)"; then
+    keychain_ak=''
+    provider_ak=''
+    die 'failed to read MODELHUB_AK from launchd'
+    return 1
+  fi
+  if [[ -z "$keychain_ak" \
+    || "$provider_ak" != "$keychain_ak" \
+    || "$launchd_ak" != "$keychain_ak" ]]; then
+    keychain_ak=''
+    provider_ak=''
+    launchd_ak=''
+    die 'ModelHub credential synchronization verification failed'
+    return 1
+  fi
+  keychain_ak=''
+  provider_ak=''
+  launchd_ak=''
 }
 
 configure_keychain() {
@@ -2703,36 +2789,34 @@ configure_keychain() {
     KEYCHAIN_CREATED_BY_RUN=0
   fi
 
-  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
-    if ! "$security_bin" add-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" -U -w; then
-      return 1
-    fi
-  else
-    printf '%s' '请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）：' >/dev/tty
-    if ! IFS= read -r -s modelhub_ak </dev/tty; then
-      printf '\n' >/dev/tty
-      die '读取 MODELHUB_AK 失败'
-      return 1
-    fi
-    printf '\n' >/dev/tty
-    if [[ -z "$modelhub_ak" ]]; then
-      die 'MODELHUB_AK 不能为空'
-      return 1
-    fi
-    if ! "$security_bin" add-generic-password \
-      -a "$account_name" \
-      -s "$KEYCHAIN_SERVICE" \
-      -U \
-      -w "$modelhub_ak"; then
-      modelhub_ak=''
-      return 1
-    fi
-    if ! store_modelhub_api_key_in_provider "$CC_SWITCH_DATABASE_PATH" "$modelhub_ak"; then
-      modelhub_ak=''
-      return 1
-    fi
-    modelhub_ak=''
+  if ! modelhub_ak="$(read_modelhub_ak)"; then
+    return 1
   fi
+  if ! "$security_bin" add-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -U \
+    -w "$modelhub_ak"; then
+    modelhub_ak=''
+    return 1
+  fi
+  modelhub_ak=''
+  if ! modelhub_ak="$("$security_bin" find-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -w 2>/dev/null)"; then
+    die 'failed to read MODELHUB_AK back from Keychain'
+    return 1
+  fi
+  if ! validate_modelhub_ak "$modelhub_ak"; then
+    modelhub_ak=''
+    return 1
+  fi
+  if ! store_modelhub_api_key_in_provider "$CC_SWITCH_DATABASE_PATH" "$modelhub_ak"; then
+    modelhub_ak=''
+    return 1
+  fi
+  modelhub_ak=''
 }
 
 delete_keychain_item() {
@@ -3020,8 +3104,10 @@ run_install_transaction() {
   configure_keychain || return 1
   progress 8 8 '启动 CC Switch，检查健康状态和 ModelHub 路由'
   install_launch_agent || return 1
+  verify_modelhub_credential_sync "$CC_SWITCH_DATABASE_PATH" || return 1
   start_cc_switch || return 1
   wait_for_health 'http://127.0.0.1:15721/health' "$health_timeout" || return 1
+  verify_modelhub_credential_sync "$CC_SWITCH_DATABASE_PATH" || return 1
   wait_for_golden_routing_state \
     "$CC_SWITCH_DATABASE_PATH" \
     "$CODEX_CONFIG_PATH" \

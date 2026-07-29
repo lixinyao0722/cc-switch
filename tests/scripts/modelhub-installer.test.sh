@@ -1761,11 +1761,16 @@ create_transaction_stubs() {
     '  find-generic-password)' \
     '    if [[ -n "${FAKE_SECURITY_FIND_STATUS:-}" ]]; then exit "$FAKE_SECURITY_FIND_STATUS"; fi' \
     '    [[ -f "$FAKE_KEYCHAIN_STATE" ]] || exit 44' \
-    '    printf "fake-modelhub-ak\n"' \
+    '    /bin/cat "$FAKE_KEYCHAIN_STATE"' \
     '    ;;' \
     '  add-generic-password)' \
     '    [[ "${FAKE_SECURITY_MODE:-success}" != "cancel" ]] || exit 1' \
-    '    : >"$FAKE_KEYCHAIN_STATE"' \
+    '    modelhub_ak="${CC_SWITCH_INSTALLER_TEST_MODELHUB_AK:-}"' \
+    '    while [[ $# -gt 0 ]]; do' \
+    '      if [[ "$1" == "-w" && $# -gt 1 ]]; then modelhub_ak="$2"; break; fi' \
+    '      shift' \
+    '    done' \
+    '    printf "%s" "$modelhub_ak" >"$FAKE_KEYCHAIN_STATE"' \
     '    ;;' \
     '  delete-generic-password)' \
     '    rm -f "$FAKE_KEYCHAIN_STATE"' \
@@ -1774,7 +1779,11 @@ create_transaction_stubs() {
   write_executable_stub "$stub_dir/launchctl" \
     'mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"' \
     'case "${1:-}" in' \
-    '  setenv) : >"$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
+    '  setenv) printf "%s" "$3" >"$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
+    '  getenv)' \
+    '    [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ]] || exit 1' \
+    '    /bin/cat "$FAKE_LAUNCHCTL_STATE_DIR/env-$2"' \
+    '    ;;' \
     '  unsetenv) rm -f "$FAKE_LAUNCHCTL_STATE_DIR/env-$2" ;;' \
     '  bootstrap)' \
     '    : >"$FAKE_LAUNCHCTL_STATE_DIR/job"' \
@@ -1798,6 +1807,9 @@ create_transaction_stubs() {
     '  if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
     '    /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
     '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '  fi' \
+    '  if [[ -n "${FAKE_PROVIDER_REWRITE_AK:-}" ]]; then' \
+    '    /usr/bin/sqlite3 "$FAKE_PROVIDER_DATABASE_PATH" "UPDATE providers SET settings_config=json_set(settings_config, '\''$.auth'\'', json_object('\''OPENAI_API_KEY'\'', '\''$FAKE_PROVIDER_REWRITE_AK'\'')) WHERE id='\''bytedance-modelhub-official-cli'\'' AND app_type='\''codex'\'';"' \
     '  fi' \
     '  if [[ -n "${FAKE_COMPLETION_MARKER_DIR:-}" ]]; then chmod 500 "$FAKE_COMPLETION_MARKER_DIR"; fi' \
     '  printf "{\"status\":\"healthy\",\"timestamp\":\"test\"}\n"' \
@@ -1949,6 +1961,7 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r5'
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_SECURITY_LOG="$case_dir/security.log"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
@@ -1957,6 +1970,8 @@ prepare_transaction_case() {
   export FAKE_SECURITY_MODE=success
   export FAKE_SECURITY_FIND_STATUS=''
   export FAKE_HEALTH_MODE=healthy
+  export FAKE_PROVIDER_DATABASE_PATH="$case_dir/home/.cc-switch/cc-switch.db"
+  export FAKE_PROVIDER_REWRITE_AK=''
   export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_COMPLETION_MARKER_DIR=''
@@ -2268,6 +2283,43 @@ test_transaction_success_and_repeat_are_idempotent() {
   [[ -f "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'local installer was not saved'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] || fail 'MODELHUB_AK was not loaded into launchd'
   [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH" ]] || fail 'CODEX_CLI_PATH was not loaded into launchd'
+}
+
+test_transaction_synchronizes_modelhub_ak() {
+  local case_dir="$TEST_TMP/transaction-modelhub-ak-sync"
+  local database
+  local provider_ak
+  local launchd_ak
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+
+  perform_install
+
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'test-modelhub-ak-r5'
+  provider_ak="$(sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")"
+  assert_equals "$provider_ak" 'test-modelhub-ak-r5'
+  launchd_ak="$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)"
+  assert_equals "$launchd_ak" 'test-modelhub-ak-r5'
+}
+
+test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back() {
+  local case_dir="$TEST_TMP/transaction-modelhub-ak-drift"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_PROVIDER_REWRITE_AK='old-modelhub-ak'
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'credential drift rollback left a new keychain item'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] \
+    || fail 'credential drift rollback left MODELHUB_AK in launchd'
 }
 
 test_transaction_overwrites_golden_configuration_and_rolls_back() {
@@ -2837,6 +2889,8 @@ run_test "transaction waits for CC Switch exit before backup" test_transaction_w
 run_test "transaction WAL snapshot restores committed sentinel and cleans sidecars" test_transaction_wal_snapshot_restores_committed_sentinel_and_cleans_sidecars
 run_test "transaction same-second backup suffixes sort lexically" test_transaction_same_second_backup_suffixes_sort_lexically
 run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
+run_test "transaction synchronizes ModelHub AK" test_transaction_synchronizes_modelhub_ak
+run_test "transaction detects startup ModelHub AK drift and rolls back" test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
