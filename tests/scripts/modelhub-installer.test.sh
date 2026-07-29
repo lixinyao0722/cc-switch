@@ -9,6 +9,7 @@ TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
 RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
 GOLDEN_DB_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-golden-db.sh"
+LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local-golden-snapshot.sh"
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
@@ -1364,7 +1365,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260729-r4'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260729-r5'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1377,7 +1378,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260729-r4/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260729-r5/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1801,10 +1802,17 @@ create_transaction_stubs() {
     'exit 1'
   write_executable_stub "$stub_dir/open" 'exit 0'
   write_executable_stub "$stub_dir/xattr" 'exit 0'
-  write_executable_stub "$stub_dir/sleep" 'exit 0'
+  write_executable_stub "$stub_dir/sleep" \
+    'if [[ -n "${FAKE_ROUTING_REWRITE_AK:-}" && ! -e "$FAKE_ROUTING_REWRITE_STATE" ]]; then' \
+    '  /usr/bin/sqlite3 "$FAKE_PROVIDER_DATABASE_PATH" "UPDATE providers SET settings_config=json_set(settings_config, '\''$.auth'\'', json_object('\''OPENAI_API_KEY'\'', '\''$FAKE_ROUTING_REWRITE_AK'\'')) WHERE id='\''bytedance-modelhub-official-cli'\'' AND app_type='\''codex'\'';"' \
+    '  /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '  /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '  : >"$FAKE_ROUTING_REWRITE_STATE"' \
+    'fi' \
+    'exit 0'
   write_executable_stub "$stub_dir/curl" \
     'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
-    '  if [[ -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
+    '  if [[ -z "${FAKE_ROUTING_REWRITE_AK:-}" && -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
     '    /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
     '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
     '  fi' \
@@ -1972,6 +1980,8 @@ prepare_transaction_case() {
   export FAKE_HEALTH_MODE=healthy
   export FAKE_PROVIDER_DATABASE_PATH="$case_dir/home/.cc-switch/cc-switch.db"
   export FAKE_PROVIDER_REWRITE_AK=''
+  export FAKE_ROUTING_REWRITE_AK=''
+  export FAKE_ROUTING_REWRITE_STATE="$case_dir/routing-rewrite-state"
   export FAKE_LIVE_CONFIG_PATH="$case_dir/home/.codex/config.toml"
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
   export FAKE_COMPLETION_MARKER_DIR=''
@@ -2322,6 +2332,47 @@ test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back() {
     || fail 'credential drift rollback left MODELHUB_AK in launchd'
 }
 
+test_transaction_detects_routing_stage_modelhub_ak_drift_and_rolls_back() {
+  local case_dir="$TEST_TMP/transaction-modelhub-ak-routing-drift"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=2
+  export FAKE_ROUTING_REWRITE_AK='old-modelhub-ak'
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" ]] || fail 'routing drift rollback left a new keychain item'
+  [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK" ]] \
+    || fail 'routing drift rollback left MODELHUB_AK in launchd'
+}
+
+test_transaction_restores_existing_modelhub_credential_state_after_failure() {
+  local case_dir="$TEST_TMP/transaction-existing-modelhub-credential-rollback"
+  local before
+  local after
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
+  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r5'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'existing-modelhub-ak-r5'
+}
+
 test_transaction_overwrites_golden_configuration_and_rolls_back() {
   local case_dir="$TEST_TMP/transaction-golden-overwrite"
   local auth_path
@@ -2475,6 +2526,7 @@ create_packager_source() {
   mkdir -p "$source_dir/assets" "$source_dir/golden" "$source_dir/helpers" "$source_dir/templates"
   cp "$INSTALLER" "$source_dir/install.sh"
   cp "$GOLDEN_DB_BUILDER" "$source_dir/build-golden-db.sh"
+  cp "$LOCAL_GOLDEN_SNAPSHOT_BUILDER" "$source_dir/build-local-golden-snapshot.sh"
   cp "$GOLDEN_DB_SCHEMA" "$source_dir/golden/cc-switch-schema.sql"
   cp "$GOLDEN_CODEX_CONFIG" "$source_dir/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$source_dir/golden/settings.json"
@@ -2512,7 +2564,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260729-r4'"
+    "readonly RELEASE_TAG='modelhub-installer-20260729-r5'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.18.0-arm64.app.zip' \
@@ -2891,6 +2943,8 @@ run_test "transaction same-second backup suffixes sort lexically" test_transacti
 run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
 run_test "transaction synchronizes ModelHub AK" test_transaction_synchronizes_modelhub_ak
 run_test "transaction detects startup ModelHub AK drift and rolls back" test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back
+run_test "transaction detects routing-stage ModelHub AK drift and rolls back" test_transaction_detects_routing_stage_modelhub_ak_drift_and_rolls_back
+run_test "transaction restores existing ModelHub credential state after failure" test_transaction_restores_existing_modelhub_credential_state_after_failure
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
