@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260729-r4'
+readonly RELEASE_TAG='modelhub-installer-20260729-r5'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -41,6 +41,14 @@ NEEDS_SUDO=0
 MUTATION_STARTED=0
 INSTALL_COMPLETED=0
 KEYCHAIN_CREATED_BY_RUN=0
+KEYCHAIN_UPDATED_BY_RUN=0
+KEYCHAIN_PREVIOUS_AK=''
+MODELHUB_EXPECTED_AK=''
+LAUNCHD_ENVIRONMENT_SNAPSHOT_READY=0
+LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN=0
+LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+LAUNCHD_CODEX_CLI_PATH_EXISTED_BEFORE_RUN=0
+LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN=''
 TRANSACTION_GUARD_ACTIVE=0
 TRANSACTION_ROLLBACK_RUNNING=0
 TRANSACTION_STAGE_DIR=''
@@ -2639,11 +2647,46 @@ keychain_account_name() {
   /usr/bin/id -un
 }
 
+validate_modelhub_ak() {
+  local modelhub_ak="$1"
+
+  if [[ -z "$modelhub_ak" ]]; then
+    die 'MODELHUB_AK 不能为空'
+    return 1
+  fi
+  case "$modelhub_ak" in
+    *$'\n'*|*$'\r'*)
+      die 'MODELHUB_AK 不能包含换行符'
+      return 1
+      ;;
+  esac
+}
+
+read_modelhub_ak() {
+  local modelhub_ak=''
+
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    modelhub_ak="${CC_SWITCH_INSTALLER_TEST_MODELHUB_AK:-}"
+  else
+    printf '%s' '请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）：' >/dev/tty
+    if ! IFS= read -r -s modelhub_ak </dev/tty; then
+      printf '\n' >/dev/tty
+      die '读取 MODELHUB_AK 失败'
+      return 1
+    fi
+    printf '\n' >/dev/tty
+  fi
+  validate_modelhub_ak "$modelhub_ak" || return 1
+  printf '%s' "$modelhub_ak"
+}
+
 store_modelhub_api_key_in_provider() {
   local database="$1"
   local modelhub_ak="$2"
+  local expected_modelhub_ak="${3:-$modelhub_ak}"
   local ak_sql
   local changed
+  local provider_ak
 
   ak_sql="$(sql_quote "$modelhub_ak")" || return 1
   changed="$(/usr/bin/sqlite3 "$database" <<SQL
@@ -2664,6 +2707,171 @@ SQL
     die 'failed to store MODELHUB_AK in the CC Switch ModelHub Provider'
     return 1
   fi
+  provider_ak="$(/usr/bin/sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='$MODELHUB_PROVIDER_ID' AND app_type='codex';")" \
+    || return 1
+  if [[ -z "$expected_modelhub_ak" \
+    || "$provider_ak" != "$modelhub_ak" \
+    || "$provider_ak" != "$expected_modelhub_ak" ]]; then
+    provider_ak=''
+    die 'failed to verify MODELHUB_AK in the CC Switch ModelHub Provider'
+    return 1
+  fi
+  provider_ak=''
+}
+
+verify_modelhub_credential_sync() {
+  local database="$1"
+  local expected_modelhub_ak="${2:-$MODELHUB_EXPECTED_AK}"
+  local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
+  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
+  local account_name
+  local keychain_ak=''
+  local provider_ak=''
+  local launchd_ak=''
+
+  account_name="$(keychain_account_name)"
+  if ! keychain_ak="$("$security_bin" find-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -w 2>/dev/null)"; then
+    die 'failed to read MODELHUB_AK from Keychain during credential verification'
+    return 1
+  fi
+  if ! provider_ak="$(/usr/bin/sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='$MODELHUB_PROVIDER_ID' AND app_type='codex';")"; then
+    keychain_ak=''
+    die 'failed to read MODELHUB_AK from the CC Switch ModelHub Provider'
+    return 1
+  fi
+  if ! launchd_ak="$("$launchctl_bin" getenv MODELHUB_AK 2>/dev/null)"; then
+    keychain_ak=''
+    provider_ak=''
+    die 'failed to read MODELHUB_AK from launchd'
+    return 1
+  fi
+  if [[ -z "$expected_modelhub_ak" \
+    || "$keychain_ak" != "$expected_modelhub_ak" \
+    || "$provider_ak" != "$expected_modelhub_ak" \
+    || "$launchd_ak" != "$expected_modelhub_ak" ]]; then
+    keychain_ak=''
+    provider_ak=''
+    launchd_ak=''
+    die 'ModelHub credential synchronization verification failed'
+    return 1
+  fi
+  keychain_ak=''
+  provider_ak=''
+  launchd_ak=''
+}
+
+snapshot_launchd_environment() {
+  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
+  local launchd_status
+
+  LAUNCHD_ENVIRONMENT_SNAPSHOT_READY=0
+  LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN=0
+  LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+  LAUNCHD_CODEX_CLI_PATH_EXISTED_BEFORE_RUN=0
+  LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN=''
+  if LAUNCHD_MODELHUB_AK_BEFORE_RUN="$("$launchctl_bin" getenv MODELHUB_AK 2>/dev/null)"; then
+    launchd_status=0
+  else
+    launchd_status=$?
+  fi
+  case "$launchd_status" in
+    0)
+      LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN=1
+      ;;
+    1)
+      LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+      ;;
+    *)
+      LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+      die "unable to inspect the existing launchd MODELHUB_AK state"
+      return 1
+      ;;
+  esac
+  if LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN="$("$launchctl_bin" getenv CODEX_CLI_PATH 2>/dev/null)"; then
+    launchd_status=0
+  else
+    launchd_status=$?
+  fi
+  case "$launchd_status" in
+    0)
+      LAUNCHD_CODEX_CLI_PATH_EXISTED_BEFORE_RUN=1
+      ;;
+    1)
+      LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN=''
+      ;;
+    *)
+      LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN=0
+      LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+      LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN=''
+      die "unable to inspect the existing launchd CODEX_CLI_PATH state"
+      return 1
+      ;;
+  esac
+  LAUNCHD_ENVIRONMENT_SNAPSHOT_READY=1
+}
+
+restore_keychain_after_failed_install() {
+  local security_bin="${CC_SWITCH_SECURITY_BIN:-/usr/bin/security}"
+  local account_name
+
+  if [[ "$KEYCHAIN_UPDATED_BY_RUN" != "1" ]]; then
+    return 0
+  fi
+  if [[ "$KEYCHAIN_CREATED_BY_RUN" == "1" ]]; then
+    delete_keychain_item
+    return
+  fi
+  account_name="$(keychain_account_name)"
+  if ! "$security_bin" add-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -U \
+    -w "$KEYCHAIN_PREVIOUS_AK" >/dev/null 2>&1; then
+    die 'failed to restore the previous ModelHub Keychain item'
+    return 1
+  fi
+}
+
+restore_launchd_environment_after_failed_install() {
+  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
+
+  if [[ "$LAUNCHD_ENVIRONMENT_SNAPSHOT_READY" != "1" ]]; then
+    return 0
+  fi
+  if [[ "$LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN" == "1" ]]; then
+    if ! "$launchctl_bin" setenv MODELHUB_AK "$LAUNCHD_MODELHUB_AK_BEFORE_RUN" >/dev/null 2>&1; then
+      die 'failed to restore the previous launchd MODELHUB_AK state'
+      return 1
+    fi
+  elif ! "$launchctl_bin" unsetenv MODELHUB_AK >/dev/null 2>&1; then
+    die 'failed to restore the previous empty launchd MODELHUB_AK state'
+    return 1
+  fi
+  if [[ "$LAUNCHD_CODEX_CLI_PATH_EXISTED_BEFORE_RUN" == "1" ]]; then
+    if ! "$launchctl_bin" setenv CODEX_CLI_PATH "$LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN" >/dev/null 2>&1; then
+      die 'failed to restore the previous launchd CODEX_CLI_PATH state'
+      return 1
+    fi
+  elif ! "$launchctl_bin" unsetenv CODEX_CLI_PATH >/dev/null 2>&1; then
+    die 'failed to restore the previous empty launchd CODEX_CLI_PATH state'
+    return 1
+  fi
+}
+
+clear_modelhub_credential_transaction_state() {
+  KEYCHAIN_UPDATED_BY_RUN=0
+  KEYCHAIN_PREVIOUS_AK=''
+  MODELHUB_EXPECTED_AK=''
+  LAUNCHD_ENVIRONMENT_SNAPSHOT_READY=0
+  LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN=0
+  LAUNCHD_MODELHUB_AK_BEFORE_RUN=''
+  LAUNCHD_CODEX_CLI_PATH_EXISTED_BEFORE_RUN=0
+  LAUNCHD_CODEX_CLI_PATH_BEFORE_RUN=''
 }
 
 configure_keychain() {
@@ -2673,8 +2881,13 @@ configure_keychain() {
   local modelhub_ak=''
   account_name="$(keychain_account_name)"
   KEYCHAIN_CREATED_BY_RUN=0
+  KEYCHAIN_UPDATED_BY_RUN=0
+  KEYCHAIN_PREVIOUS_AK=''
 
-  if "$security_bin" find-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+  if KEYCHAIN_PREVIOUS_AK="$("$security_bin" find-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -w 2>/dev/null)"; then
     find_status=0
   else
     find_status=$?
@@ -2687,6 +2900,7 @@ configure_keychain() {
       fi
       ;;
     44)
+      KEYCHAIN_PREVIOUS_AK=''
       if ! printf '0\n' >"$ACTIVE_BACKUP_DIR/keychain-existed"; then
         die "failed to record absent Keychain state"
         return 1
@@ -2694,6 +2908,7 @@ configure_keychain() {
       KEYCHAIN_CREATED_BY_RUN=1
       ;;
     *)
+      KEYCHAIN_PREVIOUS_AK=''
       die "unable to inspect the ModelHub Keychain item (security status $find_status)"
       return 1
       ;;
@@ -2703,36 +2918,44 @@ configure_keychain() {
     KEYCHAIN_CREATED_BY_RUN=0
   fi
 
-  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
-    if ! "$security_bin" add-generic-password -a "$account_name" -s "$KEYCHAIN_SERVICE" -U -w; then
-      return 1
-    fi
-  else
-    printf '%s' '请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）：' >/dev/tty
-    if ! IFS= read -r -s modelhub_ak </dev/tty; then
-      printf '\n' >/dev/tty
-      die '读取 MODELHUB_AK 失败'
-      return 1
-    fi
-    printf '\n' >/dev/tty
-    if [[ -z "$modelhub_ak" ]]; then
-      die 'MODELHUB_AK 不能为空'
-      return 1
-    fi
-    if ! "$security_bin" add-generic-password \
-      -a "$account_name" \
-      -s "$KEYCHAIN_SERVICE" \
-      -U \
-      -w "$modelhub_ak"; then
-      modelhub_ak=''
-      return 1
-    fi
-    if ! store_modelhub_api_key_in_provider "$CC_SWITCH_DATABASE_PATH" "$modelhub_ak"; then
-      modelhub_ak=''
-      return 1
-    fi
-    modelhub_ak=''
+  if ! modelhub_ak="$(read_modelhub_ak)"; then
+    return 1
   fi
+  MODELHUB_EXPECTED_AK="$modelhub_ak"
+  KEYCHAIN_UPDATED_BY_RUN=1
+  if ! "$security_bin" add-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -U \
+    -w "$modelhub_ak"; then
+    modelhub_ak=''
+    return 1
+  fi
+  modelhub_ak=''
+  if ! modelhub_ak="$("$security_bin" find-generic-password \
+    -a "$account_name" \
+    -s "$KEYCHAIN_SERVICE" \
+    -w 2>/dev/null)"; then
+    die 'failed to read MODELHUB_AK back from Keychain'
+    return 1
+  fi
+  if ! validate_modelhub_ak "$modelhub_ak"; then
+    modelhub_ak=''
+    return 1
+  fi
+  if [[ "$modelhub_ak" != "$MODELHUB_EXPECTED_AK" ]]; then
+    modelhub_ak=''
+    die 'Keychain MODELHUB_AK does not match the requested credential'
+    return 1
+  fi
+  if ! store_modelhub_api_key_in_provider \
+    "$CC_SWITCH_DATABASE_PATH" \
+    "$modelhub_ak" \
+    "$MODELHUB_EXPECTED_AK"; then
+    modelhub_ak=''
+    return 1
+  fi
+  modelhub_ak=''
 }
 
 delete_keychain_item() {
@@ -2951,15 +3174,15 @@ rollback_failed_install() {
   fi
   unload_launch_agent
   clear_runtime_environment
-  if [[ "$KEYCHAIN_CREATED_BY_RUN" == "1" ]]; then
-    delete_keychain_item || rollback_status=1
-  fi
+  restore_keychain_after_failed_install || rollback_status=1
   if [[ -n "$ACTIVE_BACKUP_DIR" && "$restore_allowed" == "1" ]]; then
     restore_backup "$ACTIVE_BACKUP_DIR" || rollback_status=1
   fi
+  restore_launchd_environment_after_failed_install || rollback_status=1
   if [[ -n "$ACTIVE_BACKUP_DIR" && "$LAUNCHER_REPLACED_BY_RUN" == "1" ]]; then
     restore_launcher_after_failed_install "$ACTIVE_BACKUP_DIR" || rollback_status=1
   fi
+  clear_modelhub_credential_transaction_state
   TRANSACTION_ROLLBACK_RUNNING=0
   return "$rollback_status"
 }
@@ -3020,6 +3243,7 @@ run_install_transaction() {
   configure_keychain || return 1
   progress 8 8 '启动 CC Switch，检查健康状态和 ModelHub 路由'
   install_launch_agent || return 1
+  verify_modelhub_credential_sync "$CC_SWITCH_DATABASE_PATH" "$MODELHUB_EXPECTED_AK" || return 1
   start_cc_switch || return 1
   wait_for_health 'http://127.0.0.1:15721/health' "$health_timeout" || return 1
   wait_for_golden_routing_state \
@@ -3027,6 +3251,7 @@ run_install_transaction() {
     "$CODEX_CONFIG_PATH" \
     "$routing_timeout" \
     || return 1
+  verify_modelhub_credential_sync "$CC_SWITCH_DATABASE_PATH" "$MODELHUB_EXPECTED_AK" || return 1
 }
 
 perform_install() {
@@ -3069,7 +3294,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R4 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R5 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -3126,9 +3351,14 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
+  KEYCHAIN_CREATED_BY_RUN=0
+  clear_modelhub_credential_transaction_state
+  snapshot_launchd_environment || {
+    cleanup_transaction_stage || true
+    return 1
+  }
   MUTATION_STARTED=1
   INSTALL_COMPLETED=0
-  KEYCHAIN_CREATED_BY_RUN=0
   TRANSACTION_GUARD_ACTIVE=1
 
   if ! run_install_transaction "$asset_dir" "$resources_dir"; then
@@ -3163,6 +3393,7 @@ perform_install() {
   fi
   INSTALL_COMPLETED=1
   TRANSACTION_GUARD_ACTIVE=0
+  clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
   printf '\n安装完成：CC Switch 已启动，ModelHub 路由检查通过。\n' >&2
