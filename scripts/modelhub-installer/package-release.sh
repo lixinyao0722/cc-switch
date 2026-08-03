@@ -5,7 +5,7 @@ set -euo pipefail
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 
-readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.18.0-arm64.app.zip'
+readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.19.1-arm64.app.zip'
 readonly OUTPUT_INSTALLER_NAME='install.sh'
 readonly OUTPUT_RESOURCES_NAME='modelhub-installer-resources.tar.gz'
 readonly OUTPUT_CHECKSUM_NAME='SHA256SUMS.txt'
