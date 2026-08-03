@@ -1267,13 +1267,13 @@ test_preflight_verifies_all_release_checksums() {
   local case_dir="$TEST_TMP/preflight-checksums"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.18.0-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1289,14 +1289,14 @@ test_preflight_rejects_unexpected_checksum_entries() {
   local case_dir="$TEST_TMP/preflight-extra-checksum"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   printf 'extra\n' >"$case_dir/not-allowed.txt"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.18.0-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1362,10 +1362,10 @@ test_preflight_downloads_from_immutable_release_tag() {
   local curl_stub="$case_dir/curl"
   mkdir -p "$remote_dir" "$output_dir"
   printf 'installer\n' >"$remote_dir/install.sh"
-  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
+  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260729-r5'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260803-r6'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1378,7 +1378,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260729-r5/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260803-r6/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1387,7 +1387,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     download_release_assets "$output_dir"
 
   assert_contains "$output_dir/install.sh" 'installer'
-  assert_contains "$output_dir/CC-Switch-ModelHub-3.18.0-arm64.app.zip" 'app'
+  assert_contains "$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip" 'app'
   assert_contains "$output_dir/modelhub-installer-resources.tar.gz" 'resources'
   assert_contains "$output_dir/SHA256SUMS.txt" 'checksums'
 }
@@ -1862,7 +1862,7 @@ create_fake_app_zip() {
   mkdir -p "$app_dir/Contents/MacOS"
   printf 'new-app\n' >"$app_dir/Contents/MacOS/cc-switch"
   chmod +x "$app_dir/Contents/MacOS/cc-switch"
-  COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "$app_dir" "$case_dir/assets/CC-Switch-ModelHub-3.18.0-arm64.app.zip"
+  COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "$app_dir" "$case_dir/assets/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
 }
 
 create_transaction_assets() {
@@ -1899,7 +1899,7 @@ create_transaction_assets() {
     cd "$asset_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.18.0-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1987,7 +1987,7 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
-  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r5'
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r6'
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_SECURITY_LOG="$case_dir/security.log"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
@@ -2327,12 +2327,12 @@ test_transaction_synchronizes_modelhub_ak() {
 
   perform_install
 
-  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'test-modelhub-ak-r5'
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'test-modelhub-ak-r6'
   provider_ak="$(sqlite3 "$database" \
     "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")"
-  assert_equals "$provider_ak" 'test-modelhub-ak-r5'
+  assert_equals "$provider_ak" 'test-modelhub-ak-r6'
   launchd_ak="$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)"
-  assert_equals "$launchd_ak" 'test-modelhub-ak-r5'
+  assert_equals "$launchd_ak" 'test-modelhub-ak-r6'
 }
 
 test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back() {
@@ -2379,8 +2379,8 @@ test_transaction_restores_existing_modelhub_credential_state_after_failure() {
   mkdir -p "$case_dir"
   prepare_transaction_case "$case_dir"
   /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
-  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_KEYCHAIN_STATE"
-  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  printf '%s' 'existing-modelhub-ak-r6' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'existing-modelhub-ak-r6' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
   before="$(managed_state_digest "$case_dir")"
   export FAKE_HEALTH_MODE=timeout
 
@@ -2388,10 +2388,10 @@ test_transaction_restores_existing_modelhub_credential_state_after_failure() {
 
   after="$(managed_state_digest "$case_dir")"
   assert_equals "$after" "$before"
-  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r5'
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r6'
   assert_equals \
     "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
-    'existing-modelhub-ak-r5'
+    'existing-modelhub-ak-r6'
 }
 
 test_transaction_launchd_snapshot_error_preserves_existing_state() {
@@ -2403,8 +2403,8 @@ test_transaction_launchd_snapshot_error_preserves_existing_state() {
   prepare_transaction_case "$case_dir"
   database="$case_dir/home/.cc-switch/cc-switch.db"
   /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
-  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_KEYCHAIN_STATE"
-  printf '%s' 'existing-modelhub-ak-r5' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  printf '%s' 'existing-modelhub-ak-r6' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'existing-modelhub-ak-r6' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
   before="$(managed_state_digest "$case_dir")"
   export FAKE_LAUNCHCTL_GETENV_STATUS=36
 
@@ -2413,7 +2413,7 @@ test_transaction_launchd_snapshot_error_preserves_existing_state() {
   export FAKE_LAUNCHCTL_GETENV_STATUS=''
   after="$(managed_state_digest "$case_dir")"
   assert_equals "$after" "$before"
-  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r5'
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'existing-modelhub-ak-r6'
   assert_sql "$database" \
     "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='existing-provider' AND app_type='codex';" \
     'keep-existing'
@@ -2422,7 +2422,7 @@ test_transaction_launchd_snapshot_error_preserves_existing_state() {
     '0'
   assert_equals \
     "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
-    'existing-modelhub-ak-r5'
+    'existing-modelhub-ak-r6'
 }
 
 test_transaction_rejects_uniform_credential_drift_from_expected_ak() {
@@ -2433,7 +2433,7 @@ test_transaction_rejects_uniform_credential_drift_from_expected_ak() {
   prepare_transaction_case "$case_dir"
   before="$(managed_state_digest "$case_dir")"
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=2
-  export FAKE_ROUTING_REWRITE_AK='uniform-drift-test-r5'
+  export FAKE_ROUTING_REWRITE_AK='uniform-drift-test-r6'
   export FAKE_ROUTING_REWRITE_ALL=1
 
   assert_command_fails perform_install
@@ -2451,7 +2451,7 @@ test_transaction_restores_existing_keychain_after_write_then_fail() {
   local after
   mkdir -p "$case_dir"
   prepare_transaction_case "$case_dir"
-  printf '%s' 'existing-keychain-test-r5' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'existing-keychain-test-r6' >"$FAKE_KEYCHAIN_STATE"
   before="$(managed_state_digest "$case_dir")"
   export FAKE_SECURITY_MODE=write-then-fail
 
@@ -2459,7 +2459,7 @@ test_transaction_restores_existing_keychain_after_write_then_fail() {
 
   after="$(managed_state_digest "$case_dir")"
   assert_equals "$after" "$before"
-  [[ "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" == 'existing-keychain-test-r5' ]] \
+  [[ "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" == 'existing-keychain-test-r6' ]] \
     || fail 'write-then-fail rollback did not restore the previous keychain item'
 }
 
@@ -2711,10 +2711,10 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260729-r5'"
+    "readonly RELEASE_TAG='modelhub-installer-20260803-r6'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
-    'CC-Switch-ModelHub-3.18.0-arm64.app.zip' \
+    'CC-Switch-ModelHub-3.19.1-arm64.app.zip' \
     'SHA256SUMS.txt' \
     'install.sh' \
     'modelhub-installer-resources.tar.gz' \
@@ -2993,7 +2993,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
     asset_dir="$case_dir/publish"
     run_packager \
       "$REPO_ROOT/scripts/modelhub-installer" \
-      "$case_dir/assets/CC-Switch-ModelHub-3.18.0-arm64.app.zip" \
+      "$case_dir/assets/CC-Switch-ModelHub-3.19.1-arm64.app.zip" \
       "$asset_dir"
   fi
 
@@ -3004,7 +3004,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T130000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
   export CC_SWITCH_INSTALLER_ROUTING_TIMEOUT=1
-  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r5'
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r6'
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
   export FAKE_SECURITY_MODE=success
