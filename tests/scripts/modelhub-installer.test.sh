@@ -1267,13 +1267,13 @@ test_preflight_verifies_all_release_checksums() {
   local case_dir="$TEST_TMP/preflight-checksums"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.2-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1289,14 +1289,14 @@ test_preflight_rejects_unexpected_checksum_entries() {
   local case_dir="$TEST_TMP/preflight-extra-checksum"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   printf 'extra\n' >"$case_dir/not-allowed.txt"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.2-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1362,10 +1362,10 @@ test_preflight_downloads_from_immutable_release_tag() {
   local curl_stub="$case_dir/curl"
   mkdir -p "$remote_dir" "$output_dir"
   printf 'installer\n' >"$remote_dir/install.sh"
-  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260803-r6'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260813-r7'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1378,7 +1378,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260803-r6/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260813-r7/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1387,7 +1387,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     download_release_assets "$output_dir"
 
   assert_contains "$output_dir/install.sh" 'installer'
-  assert_contains "$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip" 'app'
+  assert_contains "$output_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip" 'app'
   assert_contains "$output_dir/modelhub-installer-resources.tar.gz" 'resources'
   assert_contains "$output_dir/SHA256SUMS.txt" 'checksums'
 }
@@ -1862,7 +1862,7 @@ create_fake_app_zip() {
   mkdir -p "$app_dir/Contents/MacOS"
   printf 'new-app\n' >"$app_dir/Contents/MacOS/cc-switch"
   chmod +x "$app_dir/Contents/MacOS/cc-switch"
-  COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "$app_dir" "$case_dir/assets/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "$app_dir" "$case_dir/assets/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
 }
 
 create_transaction_assets() {
@@ -1899,7 +1899,7 @@ create_transaction_assets() {
     cd "$asset_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.19.1-arm64.app.zip \
+      CC-Switch-ModelHub-3.19.2-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -2711,10 +2711,10 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260803-r6'"
+    "readonly RELEASE_TAG='modelhub-installer-20260813-r7'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
-    'CC-Switch-ModelHub-3.19.1-arm64.app.zip' \
+    'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
     'SHA256SUMS.txt' \
     'install.sh' \
     'modelhub-installer-resources.tar.gz' \
@@ -2993,7 +2993,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
     asset_dir="$case_dir/publish"
     run_packager \
       "$REPO_ROOT/scripts/modelhub-installer" \
-      "$case_dir/assets/CC-Switch-ModelHub-3.19.1-arm64.app.zip" \
+      "$case_dir/assets/CC-Switch-ModelHub-3.19.2-arm64.app.zip" \
       "$asset_dir"
   fi
 
