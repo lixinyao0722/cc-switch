@@ -13,6 +13,7 @@ LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
+MODEL_CATALOG="$REPO_ROOT/scripts/modelhub-installer/assets/models-modelhub-1m.json"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -97,6 +98,13 @@ assert_command_fails() {
   if "$@" >/dev/null 2>&1; then
     fail "expected command to fail: $*"
   fi
+}
+
+test_model_catalog_declares_reasoning_summary_capability() {
+  jq -e '
+    (.models | type == "array" and length > 0)
+      and all(.models[]; .supports_reasoning_summaries == true)
+  ' "$MODEL_CATALOG" >/dev/null
 }
 
 activate_fake_privilege_runner() {
@@ -3027,6 +3035,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
+run_test "model catalog declares reasoning summary capability" test_model_catalog_declares_reasoning_summary_capability
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
