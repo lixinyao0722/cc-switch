@@ -6,8 +6,6 @@ model_reasoning_effort = "high"
 model_auto_compact_token_limit = 829_674
 model_context_window = 921_860
 model_catalog_json = "__USER_HOME__/.codex/models-modelhub-1m.json"
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
 
 [model_providers.modelhub]
 name = "modelhub"

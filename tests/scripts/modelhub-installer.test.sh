@@ -348,6 +348,7 @@ test_merge_replaces_equivalent_modelhub_headers() {
   assert_not_contains "$case_dir/output.toml" 'x-stale-header'
   assert_not_contains "$case_dir/output.toml" 'also-stale'
   assert_contains "$case_dir/output.toml" '[model_providers.keepme]'
+  assert_occurrences "$case_dir/output.toml" 'approval_policy = "on-request"' 1
   cp "$case_dir/output.toml" "$parser_home/config.toml"
   CODEX_HOME="$parser_home" "$codex_bin" features list >/dev/null
 }
