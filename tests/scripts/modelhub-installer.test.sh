@@ -2952,6 +2952,9 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
     '0'
   assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '3'
+  assert_sql "$first_db" \
     "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex'" \
     '1:1:0:127.0.0.1:15721'
   assert_sql "$first_db" 'SELECT count(*) FROM proxy_request_logs' '0'
