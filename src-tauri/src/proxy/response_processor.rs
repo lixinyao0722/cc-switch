@@ -874,10 +874,7 @@ fn is_useful_sse_progress(event_text: &str) -> bool {
         || event_name.contains("tool_call")
         || matches!(
             event_name.as_str(),
-            "response.completed"
-                | "response.failed"
-                | "response.incomplete"
-                | "response.cancelled"
+            "response.completed" | "response.failed" | "response.incomplete" | "response.cancelled"
         )
 }
 
@@ -988,17 +985,18 @@ mod tests {
             total_timeout: 5,
             progress_timeout: 0,
         };
-        let results = create_logged_passthrough_stream(
-            heartbeat_stream,
-            "ModelHub/Test",
-            None,
-            config,
-            None,
-        )
-        .collect::<Vec<_>>()
-        .await;
+        let results =
+            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
+                .collect::<Vec<_>>()
+                .await;
 
-        assert!(results.last().unwrap().as_ref().unwrap_err().to_string().contains("总时长"));
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("总时长"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1016,17 +1014,18 @@ mod tests {
             total_timeout: 30,
             progress_timeout: 3,
         };
-        let results = create_logged_passthrough_stream(
-            heartbeat_stream,
-            "ModelHub/Test",
-            None,
-            config,
-            None,
-        )
-        .collect::<Vec<_>>()
-        .await;
+        let results =
+            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
+                .collect::<Vec<_>>()
+                .await;
 
-        assert!(results.last().unwrap().as_ref().unwrap_err().to_string().contains("有效进展"));
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("有效进展"));
     }
 
     #[test]
