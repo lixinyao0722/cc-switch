@@ -2824,6 +2824,25 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        let is_modelhub = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+            .and_then(|overrides| overrides.codex_session_header_adapter)
+            == Some(crate::provider::CodexSessionHeaderAdapter::Modelhub);
+        if is_modelhub
+            && matches!(
+                error,
+                ProxyError::AuthError(_)
+                    | ProxyError::UpstreamError {
+                        status: 400 | 401 | 403,
+                        ..
+                    }
+            )
+        {
+            return ErrorCategory::NonRetryable;
+        }
+
         // Authentication belongs to the Codex client for the built-in official
         // route. Retrying another provider would silently move the conversation
         // away from the selected official account and poison its health state.
@@ -4824,6 +4843,23 @@ mod tests {
             assert_eq!(
                 forwarder.categorize_proxy_error(&error, &provider),
                 ErrorCategory::NonRetryable
+            );
+        }
+    }
+
+    #[test]
+    fn modelhub_auth_and_invalid_request_failures_are_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let provider = provider_with_modelhub_header_adapter();
+
+        for status in [400, 401, 403] {
+            assert_eq!(
+                forwarder.categorize_proxy_error(
+                    &ProxyError::UpstreamError { status, body: None },
+                    &provider,
+                ),
+                ErrorCategory::NonRetryable,
+                "status={status}"
             );
         }
     }
