@@ -1744,6 +1744,15 @@ impl RequestForwarder {
                 }
             }
         }
+        if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+            let changed =
+                super::modelhub_compat::normalize_namespace_descriptions(&mut filtered_body);
+            if changed > 0 {
+                log::info!(
+                    "[{app_type:?}] [ModelHubCompat] filled {changed} empty namespace description(s)"
+                );
+            }
+        }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
             .get("model")

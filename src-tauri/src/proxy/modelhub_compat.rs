@@ -6,6 +6,49 @@ use serde_json::Value;
 
 const MAX_CODEX_IDENTITY_BYTES: usize = 256;
 
+pub(crate) fn normalize_namespace_descriptions(body: &mut Value) -> usize {
+    let mut changed = 0;
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        changed += normalize_namespace_tool_list(tools);
+    }
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        for item in input {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            if let Some(tools) = item.get_mut("tools").and_then(Value::as_array_mut) {
+                changed += normalize_namespace_tool_list(tools);
+            }
+        }
+    }
+    changed
+}
+
+fn normalize_namespace_tool_list(tools: &mut [Value]) -> usize {
+    let mut changed = 0;
+    for tool in tools {
+        if tool.get("type").and_then(Value::as_str) != Some("namespace") {
+            continue;
+        }
+        let has_description = tool
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| !description.trim().is_empty());
+        if has_description {
+            continue;
+        }
+        let description = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| format!("Tools in the {} namespace.", name.trim()))
+            .unwrap_or_else(|| "Tools in this namespace.".to_string());
+        tool["description"] = Value::String(description);
+        changed += 1;
+    }
+    changed
+}
+
 pub(crate) fn apply_modelhub_codex_headers(
     inbound: &HeaderMap,
     outbound: &mut HeaderMap,
@@ -119,7 +162,7 @@ fn parse_extra_object(headers: &HeaderMap) -> Result<Map<String, Value>, ProxyEr
 mod tests {
     use super::{
         apply_modelhub_codex_headers, is_invalid_encrypted_content_error,
-        remove_encrypted_reasoning_items,
+        normalize_namespace_descriptions, remove_encrypted_reasoning_items,
     };
     use crate::proxy::ProxyError;
     use http::HeaderMap;
@@ -300,5 +343,48 @@ mod tests {
         assert_eq!(body["input"].as_array().unwrap().len(), 2);
         assert_eq!(body["input"][0]["id"], "rs_summary_only");
         assert_eq!(body["input"][1]["content"][0]["text"], "continue");
+    }
+
+    #[test]
+    fn namespace_description_normalization_repairs_supported_tool_carriers() {
+        let mut body = json!({
+            "tools": [
+                {"type": "namespace", "name": "functions", "description": "", "tools": []},
+                {"type": "namespace", "name": "collaboration", "description": "Existing", "tools": []},
+                {"type": "function", "name": "plain", "description": "", "parameters": {}}
+            ],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "tools": [
+                        {"type": "namespace", "name": "plugins", "description": "   ", "tools": []},
+                        {"type": "custom", "name": "patch", "description": "", "format": {}}
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(normalize_namespace_descriptions(&mut body), 2);
+        assert_eq!(
+            body["tools"][0]["description"],
+            "Tools in the functions namespace."
+        );
+        assert_eq!(body["tools"][1]["description"], "Existing");
+        assert_eq!(body["tools"][2]["description"], "");
+        assert_eq!(
+            body["input"][0]["tools"][0]["description"],
+            "Tools in the plugins namespace."
+        );
+        assert_eq!(body["input"][0]["tools"][1]["description"], "");
+    }
+
+    #[test]
+    fn namespace_description_normalization_uses_generic_fallback_without_name() {
+        let mut body = json!({
+            "tools": [{"type": "namespace", "description": null, "tools": []}]
+        });
+
+        assert_eq!(normalize_namespace_descriptions(&mut body), 1);
+        assert_eq!(body["tools"][0]["description"], "Tools in this namespace.");
     }
 }
