@@ -1,5 +1,5 @@
 use crate::provider::Retry429Config;
-use crate::proxy::hyper_client::ProxyResponse;
+use crate::proxy::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use crate::proxy::ProxyError;
 use chrono::DateTime;
 use chrono::Utc;
@@ -82,7 +82,7 @@ where
 
         retry_number = retry_number.saturating_add(1);
         let retry_after = response.headers().get(http::header::RETRY_AFTER).cloned();
-        if let Err(error) = response.bytes().await {
+        if let Err(error) = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await {
             log::debug!(
                 "[Retry429] failed to drain intermediate 429 response before retry: {error}"
             );
