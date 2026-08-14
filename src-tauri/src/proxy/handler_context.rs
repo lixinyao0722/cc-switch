@@ -21,6 +21,25 @@ pub struct StreamingTimeoutConfig {
     pub first_byte_timeout: u64,
     /// 静默期超时（秒），0 表示禁用
     pub idle_timeout: u64,
+    /// 流总时长上限（秒），0 表示禁用
+    pub total_timeout: u64,
+    /// 无有效 SSE 进展上限（秒），0 表示禁用
+    pub progress_timeout: u64,
+}
+
+impl StreamingTimeoutConfig {
+    const MODELHUB_TOTAL_TIMEOUT_SECONDS: u64 = 600;
+    const MODELHUB_PROGRESS_TIMEOUT_FALLBACK_SECONDS: u64 = 120;
+
+    pub(crate) fn for_modelhub_codex(mut self, configured_idle_timeout: u64) -> Self {
+        self.total_timeout = Self::MODELHUB_TOTAL_TIMEOUT_SECONDS;
+        self.progress_timeout = if configured_idle_timeout > 0 {
+            configured_idle_timeout
+        } else {
+            Self::MODELHUB_PROGRESS_TIMEOUT_FALLBACK_SECONDS
+        };
+        self
+    }
 }
 
 /// 请求上下文
@@ -261,21 +280,40 @@ impl RequestContext {
     ///
     /// 配置生效规则：
     /// - 故障转移开启：返回配置的值（0 表示禁用超时检查）
-    /// - 故障转移关闭：返回 0（禁用超时检查）
+    /// - 故障转移关闭：普通 Provider 返回 0
+    /// - ModelHub Codex：无论故障转移状态都增加总时长与有效进展 watchdog
     #[inline]
     pub fn streaming_timeout_config(&self) -> StreamingTimeoutConfig {
-        if self.app_config.auto_failover_enabled {
+        let config = if self.app_config.auto_failover_enabled {
             // 故障转移开启：使用配置的值（0 = 禁用超时）
             StreamingTimeoutConfig {
                 first_byte_timeout: self.app_config.streaming_first_byte_timeout as u64,
                 idle_timeout: self.app_config.streaming_idle_timeout as u64,
+                total_timeout: 0,
+                progress_timeout: 0,
             }
         } else {
             // 故障转移关闭：禁用流式超时检查
             StreamingTimeoutConfig {
                 first_byte_timeout: 0,
                 idle_timeout: 0,
+                total_timeout: 0,
+                progress_timeout: 0,
             }
+        };
+
+        let is_modelhub_codex = matches!(self.app_type, AppType::Codex)
+            && self
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+                .and_then(|overrides| overrides.codex_session_header_adapter)
+                == Some(crate::provider::CodexSessionHeaderAdapter::Modelhub);
+        if is_modelhub_codex {
+            config.for_modelhub_codex(self.app_config.streaming_idle_timeout as u64)
+        } else {
+            config
         }
     }
 }
@@ -300,7 +338,39 @@ pub(crate) fn extract_gemini_model_from_path(endpoint: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_gemini_model_from_path;
+    use super::{extract_gemini_model_from_path, StreamingTimeoutConfig};
+
+    #[test]
+    fn modelhub_stream_watchdog_has_safe_defaults_without_failover_timeouts() {
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        }
+        .for_modelhub_codex(0);
+
+        assert_eq!(config.total_timeout, 600);
+        assert_eq!(config.progress_timeout, 120);
+        assert_eq!(config.first_byte_timeout, 0);
+        assert_eq!(config.idle_timeout, 0);
+    }
+
+    #[test]
+    fn modelhub_stream_watchdog_reuses_configured_idle_timeout_for_progress() {
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 60,
+            idle_timeout: 180,
+            total_timeout: 0,
+            progress_timeout: 0,
+        }
+        .for_modelhub_codex(180);
+
+        assert_eq!(config.total_timeout, 600);
+        assert_eq!(config.progress_timeout, 180);
+        assert_eq!(config.first_byte_timeout, 60);
+        assert_eq!(config.idle_timeout, 180);
+    }
 
     #[test]
     fn extract_model_with_action() {
