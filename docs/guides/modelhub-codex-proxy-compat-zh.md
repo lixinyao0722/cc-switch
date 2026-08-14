@@ -48,7 +48,7 @@ model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
-model_reasoning_effort = "max"
+model_reasoning_effort = "high"
 model_auto_compact_token_limit = 829_674
 model_context_window = 921_860
 model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
@@ -75,7 +75,7 @@ Provider 元数据还承接 ModelHub 会话适配和同 Provider 429 重试：
       "max_output_tokens": 128000
     },
     "retry429": {
-      "maxRetries": 10,
+    "maxRetries": 3,
       "baseDelayMs": 1000,
       "maxDelayMs": 30000,
       "honorRetryAfter": true
@@ -124,14 +124,20 @@ x-client-request-id: <current thread id>
 
 顶层 `stream` 属于受保护协议字段，不能通过 Body override 修改。Header、Body 和 adapter 均为 Provider 级配置，不得设置成全局默认。
 
+## 请求兼容与流式保护
+
+- ModelHub 出站前会为 `namespace` 工具补齐空白 `description`，避免上游严格校验路径随机返回 HTTP 400；既有非空描述保持原值。
+- HTTP 400、401、403 属于客户端请求或凭据问题，直接返回，不进入跨 Provider 重试。
+- Codex SSE 无论是否开启自动故障转移都设置 600 秒总时长上限；heartbeat、注释和 `response.created` / `response.in_progress` 不算有效进展，不能无限续命。
+
 ## HTTP 429 重试
 
 429 policy 位于单个 ModelHub Provider attempt 内，与跨 Provider 故障转移分离：
 
-- 初始请求之外最多重试 10 次。
+- 初始请求之外最多重试 3 次。
 - 所有尝试复用相同 method、URL、最终 Header 和序列化 body。
 - 优先解析 `Retry-After` 的秒数或 HTTP-date，并限制在 30 秒以内。
-- 无有效 `Retry-After` 时按 1、2、4、8、16、30 秒退避，后续保持 30 秒。
+- 有效 `Retry-After` 原样遵循但限制在 30 秒内；否则按 1、2、4 秒指数退避，并增加 0–25% 随机抖动，避免并发任务同步重试。
 - 中间 429 先排空响应体，不更新 Provider 熔断状态。
 - 重试耗尽后把最终 429 交给原有错误处理。
 - 自动故障转移保持关闭，不因 429 切换 Provider。

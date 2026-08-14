@@ -236,6 +236,11 @@ test_merge_preserves_unmanaged_sections() {
     '/Users/Test User'
 
   assert_contains "$case_dir/output.toml" 'model = "gpt-5.6-sol"'
+  assert_contains "$case_dir/output.toml" 'model_reasoning_effort = "high"'
+  assert_contains "$case_dir/output.toml" 'model_max_output_tokens = 128_000'
+  assert_contains "$case_dir/output.toml" 'request_max_retries = 10'
+  assert_contains "$case_dir/output.toml" 'stream_max_retries = 10'
+  assert_contains "$case_dir/output.toml" 'retry_429 = true'
   assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Test User/.codex/models-modelhub-1m.json"'
   assert_contains "$case_dir/output.toml" '# user heading'
   assert_contains "$case_dir/output.toml" '[plugins."browser@openai-bundled"]'
@@ -2951,6 +2956,12 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   assert_sql "$first_db" \
     "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
     '0'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'model_reasoning_effort = \"high\"') > 0 FROM providers" \
+    '1'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'model_max_output_tokens = 128_000') > 0 FROM providers" \
+    '1'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '3'
