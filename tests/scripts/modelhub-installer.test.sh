@@ -2925,6 +2925,39 @@ test_package_rejects_unsafe_golden_snapshot_source() {
     || fail 'unsafe golden source left a publishable resource archive'
 }
 
+test_package_normalizes_custom_snapshot_retry_policy() {
+  local case_dir="$TEST_TMP/package-custom-snapshot-retry"
+  local source_dir="$case_dir/source"
+  local snapshot_dir="$case_dir/snapshot"
+  local output_dir="$case_dir/output"
+  local extracted_dir="$case_dir/extracted"
+  mkdir -p "$case_dir"
+  create_packager_source "$source_dir"
+  mkdir -p "$snapshot_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$snapshot_dir/cc-switch.db" >/dev/null
+  sqlite3 "$snapshot_dir/cc-switch.db" \
+    "UPDATE providers SET meta=json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10);"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
+    run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  mkdir -p "$extracted_dir"
+  tar -xzf "$output_dir/modelhub-installer-resources.tar.gz" -C "$extracted_dir"
+
+  assert_sql "$snapshot_dir/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '10'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '3'
+}
+
 test_golden_db_builder_creates_minimal_public_snapshot() {
   local case_dir="$TEST_TMP/golden-db-builder"
   local first_db="$case_dir/first.db"
@@ -3128,6 +3161,7 @@ run_test "package rejects sensitive file types" test_package_rejects_sensitive_f
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
+run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 
