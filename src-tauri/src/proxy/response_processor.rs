@@ -736,35 +736,49 @@ pub fn create_logged_passthrough_stream(
             let now = tokio::time::Instant::now();
             let mut deadlines = Vec::with_capacity(3);
             if let Some(duration) = byte_timeout {
-                deadlines.push((duration, if is_first_chunk { "首字节" } else { "静默期" }));
+                deadlines.push((
+                    duration,
+                    if is_first_chunk { "首字节" } else { "静默期" },
+                    duration,
+                ));
             }
             if let Some(duration) = total_timeout {
                 deadlines.push((
                     duration.saturating_sub(now.duration_since(started_at)),
                     "总时长",
+                    duration,
                 ));
             }
             if let Some(duration) = progress_timeout {
                 deadlines.push((
                     duration.saturating_sub(now.duration_since(last_progress_at)),
                     "有效进展",
+                    duration,
                 ));
             }
-            let selected_timeout = deadlines.into_iter().min_by_key(|(duration, _)| *duration);
+            let selected_timeout = deadlines
+                .into_iter()
+                .min_by_key(|(remaining, _, _)| *remaining);
 
             let chunk_result = match selected_timeout {
-                Some((duration, timeout_type)) if duration.is_zero() => {
-                    log::error!("[{tag}] 流式响应{timeout_type}超时");
-                    yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
+                Some((remaining, timeout_type, configured)) if remaining.is_zero() => {
+                    log::error!("[{tag}] 流式响应{timeout_type}超时 ({}秒)", configured.as_secs());
+                    yield Err(std::io::Error::other(format!(
+                        "流式响应{timeout_type}超时 ({}秒)",
+                        configured.as_secs()
+                    )));
                     break;
                 }
-                Some((duration, timeout_type)) => {
-                    match tokio::time::timeout(duration, stream.next()).await {
+                Some((remaining, timeout_type, configured)) => {
+                    match tokio::time::timeout(remaining, stream.next()).await {
                         Ok(Some(chunk)) => Some(chunk),
                         Ok(None) => None, // 流结束
                         Err(_) => {
-                            log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
-                            yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
+                            log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, configured.as_secs());
+                            yield Err(std::io::Error::other(format!(
+                                "流式响应{timeout_type}超时 ({}秒)",
+                                configured.as_secs()
+                            )));
                             break;
                         }
                     }
@@ -1001,7 +1015,7 @@ mod tests {
             .as_ref()
             .unwrap_err()
             .to_string()
-            .contains("总时长"));
+            .contains("总时长超时 (5秒)"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1030,7 +1044,46 @@ mod tests {
             .as_ref()
             .unwrap_err()
             .to_string()
-            .contains("有效进展"));
+            .contains("有效进展超时 (3秒)"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn modelhub_stream_useful_progress_resets_only_progress_deadline() {
+        let events = vec![
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (
+                1,
+                Bytes::from_static(
+                    b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n",
+                ),
+            ),
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (2, Bytes::from_static(b": keepalive\n\n")),
+        ];
+        let stream = futures::stream::unfold(events.into_iter(), |mut events| async move {
+            let (delay, bytes) = events.next()?;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            Some((Ok(bytes), events))
+        });
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 30,
+            progress_timeout: 3,
+        };
+        let results = create_logged_passthrough_stream(stream, "ModelHub/Test", None, config, None)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 4);
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("有效进展超时 (3秒)"));
     }
 
     #[test]

@@ -308,6 +308,10 @@ main() {
       return 1
     fi
     output_dir="$(cd "$output_dir" && pwd -P)"
+    if find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      die "output directory must be empty: $output_dir"
+      return 1
+    fi
   fi
   if [[ "$output_dir" == "/" \
     || "$output_dir" == "$source_dir" \
@@ -346,11 +350,6 @@ main() {
   )
 
   mkdir -p "$output_dir"
-  rm -f \
-    "$output_dir/$OUTPUT_INSTALLER_NAME" \
-    "$output_dir/$OUTPUT_APP_NAME" \
-    "$output_dir/$OUTPUT_RESOURCES_NAME" \
-    "$output_dir/$OUTPUT_CHECKSUM_NAME"
   cp "$staged_output/$OUTPUT_INSTALLER_NAME" "$output_dir/$OUTPUT_INSTALLER_NAME"
   cp "$staged_output/$OUTPUT_APP_NAME" "$output_dir/$OUTPUT_APP_NAME"
   cp "$staged_output/$OUTPUT_RESOURCES_NAME" "$output_dir/$OUTPUT_RESOURCES_NAME"

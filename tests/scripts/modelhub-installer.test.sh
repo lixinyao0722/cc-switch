@@ -2899,6 +2899,21 @@ test_package_rejects_output_inside_source_tree() {
   [[ ! -e "$source_dir/nested-output" ]] || fail 'unsafe package run created nested output'
 }
 
+test_package_rejects_nonempty_output_directory() {
+  local case_dir="$TEST_TMP/package-nonempty-output"
+  local source_dir="$case_dir/source"
+  local output_dir="$case_dir/output"
+  mkdir -p "$output_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  printf 'old-app\n' >"$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  create_packager_source "$source_dir"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  assert_contains "$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip" 'old-app'
+  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip" ]] \
+    || fail 'failed package run wrote new assets into a non-empty output directory'
+}
+
 test_package_rejects_source_symlinks() {
   local case_dir="$TEST_TMP/package-source-symlink"
   local source_dir="$case_dir/source"
@@ -3159,6 +3174,7 @@ run_test "package rejects sensitive content" test_package_rejects_sensitive_cont
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
+run_test "package rejects nonempty output directory" test_package_rejects_nonempty_output_directory
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
 run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
