@@ -26,6 +26,14 @@ pub(crate) enum CodexMetadataRequestKind {
     ThreadTitleReconsideration,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnclassifiedCodexLunaObservation {
+    pub fingerprint: String,
+    pub input_items: usize,
+    pub user_messages: usize,
+    pub has_output_schema: bool,
+}
+
 pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataRequestKind> {
     if body.get("model").and_then(Value::as_str) != Some(CODEX_METADATA_MODEL) {
         return None;
@@ -41,6 +49,51 @@ pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataR
 
 pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
     codex_metadata_request_kind(body) == Some(CodexMetadataRequestKind::ActivitySummary)
+}
+
+pub(crate) fn unclassified_codex_luna_observation(
+    body: &Value,
+) -> Option<UnclassifiedCodexLunaObservation> {
+    if body.get("model").and_then(Value::as_str) != Some(CODEX_METADATA_MODEL)
+        || codex_metadata_request_kind(body).is_some()
+    {
+        return None;
+    }
+    let input = body.get("input").and_then(Value::as_array)?;
+    let mut normalized_texts = Vec::new();
+    let mut user_messages = 0;
+    for item in input {
+        let Some(texts) = user_message_texts(item) else {
+            continue;
+        };
+        let normalized = texts
+            .into_iter()
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>();
+        if normalized.is_empty() {
+            continue;
+        }
+        user_messages += 1;
+        normalized_texts.extend(normalized);
+    }
+    if normalized_texts.is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    for text in normalized_texts {
+        hasher.update(text.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    Some(UnclassifiedCodexLunaObservation {
+        fingerprint: digest[..16].to_string(),
+        input_items: input.len(),
+        user_messages,
+        has_output_schema: body.pointer("/text/format").is_some()
+            || body.get("response_format").is_some(),
+    })
 }
 
 pub(crate) fn activity_summary_fingerprint(
@@ -282,7 +335,7 @@ mod tests {
         apply_modelhub_codex_headers, codex_metadata_request_kind,
         is_invalid_encrypted_content_error, is_unsupported_activity_summary_request,
         normalize_namespace_descriptions, remove_encrypted_reasoning_items,
-        CodexMetadataRequestKind,
+        unclassified_codex_luna_observation, CodexMetadataRequestKind,
     };
     use crate::proxy::ProxyError;
     use http::HeaderMap;
@@ -357,6 +410,80 @@ mod tests {
             );
             assert_eq!(codex_metadata_request_kind(&body), Some(expected));
         }
+    }
+
+    #[test]
+    fn unclassified_luna_observation_is_stable_and_privacy_safe() {
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "  Coordinate   a delegated thread  "}]
+                },
+                {"type": "message", "role": "assistant", "content": "ignored"}
+            ],
+            "text": {"format": {"type": "json_schema", "name": "result"}}
+        });
+        let normalized = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Coordinate a delegated thread"}]
+                },
+                {"type": "message", "role": "assistant", "content": "ignored"}
+            ],
+            "text": {"format": {"type": "json_schema", "name": "result"}}
+        });
+
+        let observation = unclassified_codex_luna_observation(&body).expect("observation");
+        let normalized_observation =
+            unclassified_codex_luna_observation(&normalized).expect("normalized observation");
+
+        assert_eq!(observation.fingerprint.len(), 16);
+        assert_eq!(observation.fingerprint, normalized_observation.fingerprint);
+        assert_eq!(observation.input_items, 2);
+        assert_eq!(observation.user_messages, 1);
+        assert!(observation.has_output_schema);
+        assert!(!format!("{observation:?}").contains("Coordinate"));
+    }
+
+    #[test]
+    fn unclassified_luna_observation_excludes_known_or_non_user_requests() {
+        let known = metadata_body(
+            "gpt-5.6-luna",
+            "user",
+            &format!("{THREAD_DESCRIPTION_PROMPT}\nFill the field."),
+        );
+        let sol = metadata_body("gpt-5.6-sol", "user", "Coordinate a delegated thread");
+        let assistant_only =
+            metadata_body("gpt-5.6-luna", "assistant", "Coordinate a delegated thread");
+        let missing_text = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{"type": "message", "role": "user", "content": []}]
+        });
+
+        assert!(unclassified_codex_luna_observation(&known).is_none());
+        assert!(unclassified_codex_luna_observation(&sol).is_none());
+        assert!(unclassified_codex_luna_observation(&assistant_only).is_none());
+        assert!(unclassified_codex_luna_observation(&missing_text).is_none());
+
+        let first = unclassified_codex_luna_observation(&metadata_body(
+            "gpt-5.6-luna",
+            "user",
+            "Coordinate delegated thread A",
+        ))
+        .expect("first observation");
+        let second = unclassified_codex_luna_observation(&metadata_body(
+            "gpt-5.6-luna",
+            "user",
+            "Coordinate delegated thread B",
+        ))
+        .expect("second observation");
+        assert_ne!(first.fingerprint, second.fingerprint);
     }
 
     #[test]

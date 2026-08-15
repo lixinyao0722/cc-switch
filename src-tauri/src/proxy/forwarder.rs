@@ -224,6 +224,7 @@ pub struct RequestForwarder {
     modelhub_invalid_encrypted_reasoning_sessions: Arc<RwLock<std::collections::HashSet<String>>>,
     modelhub_activity_summary_dedup:
         Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
+    modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -312,6 +313,7 @@ impl RequestForwarder {
         modelhub_activity_summary_dedup: Arc<
             RwLock<std::collections::HashMap<String, std::time::Instant>>,
         >,
+        modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -335,6 +337,7 @@ impl RequestForwarder {
             codex_chat_history,
             modelhub_invalid_encrypted_reasoning_sessions,
             modelhub_activity_summary_dedup,
+            modelhub_unclassified_luna_fingerprints,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -408,6 +411,29 @@ impl RequestForwarder {
         }
         entries.insert(fingerprint, now);
         false
+    }
+
+    async fn observe_unclassified_modelhub_luna(&self, body: &Value) {
+        const MAX_KEYS: usize = 256;
+        let Some(observation) = super::modelhub_compat::unclassified_codex_luna_observation(body)
+        else {
+            return;
+        };
+        let mut fingerprints = self.modelhub_unclassified_luna_fingerprints.write().await;
+        if fingerprints.contains(&observation.fingerprint) {
+            return;
+        }
+        if fingerprints.len() >= MAX_KEYS {
+            fingerprints.clear();
+        }
+        fingerprints.insert(observation.fingerprint.clone());
+        log::info!(
+            "[ModelHubCompat] request_kind=unclassified_codex_luna fingerprint={} input_items={} user_messages={} has_output_schema={}",
+            observation.fingerprint,
+            observation.input_items,
+            observation.user_messages,
+            observation.has_output_schema
+        );
     }
 
     async fn record_success_result(
@@ -1898,6 +1924,8 @@ impl RequestForwarder {
                     "[{app_type:?}] [ModelHubCompat] filled {changed} empty namespace description(s)"
                 );
             }
+            self.observe_unclassified_modelhub_luna(&filtered_body)
+                .await;
         }
         let mut skip_modelhub_429_retry = false;
         if let Some(kind) = super::modelhub_compat::codex_metadata_request_kind(&filtered_body) {
@@ -4042,6 +4070,9 @@ mod tests {
                 std::collections::HashSet::new(),
             )),
             modelhub_activity_summary_dedup: Arc::new(RwLock::new(HashMap::new())),
+            modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -5116,6 +5147,94 @@ mod tests {
         assert_eq!(
             *received_models.lock().expect("received model lock"),
             vec!["gpt-5.6-luna".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_unclassified_luna_observation_is_logged_once_per_fingerprint() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_unclassified_luna",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Coordinate delegated thread A"}]
+            }]
+        });
+        let mut different_body = body.clone();
+        different_body["input"][0]["content"][0]["text"] =
+            Value::String("Coordinate delegated thread B".to_string());
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "unclassified-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "unclassified-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        for request_body in [body.clone(), body, different_body] {
+            assert!(forwarder
+                .forward_with_retry(
+                    &AppType::Codex,
+                    http::Method::POST,
+                    "/responses",
+                    request_body,
+                    headers.clone(),
+                    Extensions::new(),
+                    vec![provider.clone()],
+                )
+                .await
+                .is_ok());
+        }
+
+        server.abort();
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            forwarder
+                .modelhub_unclassified_luna_fingerprints
+                .read()
+                .await
+                .len(),
+            2
         );
     }
 

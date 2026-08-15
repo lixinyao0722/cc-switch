@@ -1248,6 +1248,9 @@ mod tests {
                 std::collections::HashSet::new(),
             )),
             modelhub_activity_summary_dedup: Arc::new(RwLock::new(HashMap::new())),
+            modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }
