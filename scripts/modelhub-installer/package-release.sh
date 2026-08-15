@@ -187,14 +187,26 @@ copy_allowlisted_resources() {
     cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
     cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
     local retry_max
+    local block_activity_summaries
     retry_max="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' \
       "$source_dir/templates/modelhub-provider-meta.json")"
     case "$retry_max" in
       ''|null|*[!0-9]*) die 'ModelHub retry429 default is invalid'; return 1 ;;
     esac
+    block_activity_summaries="$(/usr/bin/jq -r \
+      '.localProxyRequestOverrides.blockCodexActivitySummaries' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    if [[ "$block_activity_summaries" != 'true' ]]; then
+      die 'ModelHub activity summary guard default must be true'
+      return 1
+    fi
     /usr/bin/sqlite3 "$package_root/golden/cc-switch.db" \
       "UPDATE providers
-          SET meta=json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max)
+          SET meta=json_set(
+            meta,
+            '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max,
+            '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true')
+          )
         WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
   else
     cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"

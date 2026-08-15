@@ -1371,7 +1371,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260815-r8'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260815-r9'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1384,7 +1384,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260815-r8/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260815-r9/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2717,7 +2717,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260815-r8'"
+    "readonly RELEASE_TAG='modelhub-installer-20260815-r9'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -2957,7 +2957,11 @@ test_package_normalizes_custom_snapshot_retry_policy() {
     --provider-meta "$META_TEMPLATE" \
     --output "$snapshot_dir/cc-switch.db" >/dev/null
   sqlite3 "$snapshot_dir/cc-switch.db" \
-    "UPDATE providers SET meta=json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10);"
+    "UPDATE providers
+        SET meta=json_remove(
+          json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10),
+          '$.localProxyRequestOverrides.blockCodexActivitySummaries'
+        );"
   printf 'verified-app-zip\n' >"$case_dir/app.zip"
 
   CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
@@ -2968,9 +2972,15 @@ test_package_normalizes_custom_snapshot_retry_policy() {
   assert_sql "$snapshot_dir/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '10'
+  assert_sql "$snapshot_dir/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
+    '1'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '3'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') FROM providers" \
+    '1'
 }
 
 test_golden_db_builder_creates_minimal_public_snapshot() {
@@ -3014,6 +3024,9 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '3'
+  assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') FROM providers" \
+    '1'
   assert_sql "$first_db" \
     "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex'" \
     '1:1:0:127.0.0.1:15721'

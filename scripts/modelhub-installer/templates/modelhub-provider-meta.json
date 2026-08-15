@@ -3,6 +3,7 @@
   "endpointAutoSelect": false,
   "localProxyRequestOverrides": {
     "codexSessionHeaderAdapter": "modelhub",
+    "blockCodexActivitySummaries": true,
     "body": {
       "max_output_tokens": 128000
     },
