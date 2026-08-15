@@ -40,15 +40,12 @@ use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
-fn should_apply_modelhub_header_adapter(
+pub(crate) fn is_modelhub_codex_responses_route(
     app_type: &AppType,
     endpoint: &str,
     provider: &Provider,
-    is_copilot: bool,
 ) -> bool {
-    if !matches!(app_type, AppType::Codex)
-        || is_copilot
-        || super::providers::is_codex_official_provider(provider)
+    if !matches!(app_type, AppType::Codex) || super::providers::is_codex_official_provider(provider)
     {
         return false;
     }
@@ -72,6 +69,15 @@ fn should_apply_modelhub_header_adapter(
             .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
             .and_then(|overrides| overrides.codex_session_header_adapter)
             == Some(crate::provider::CodexSessionHeaderAdapter::Modelhub)
+}
+
+fn should_apply_modelhub_header_adapter(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &Provider,
+    is_copilot: bool,
+) -> bool {
+    !is_copilot && is_modelhub_codex_responses_route(app_type, endpoint, provider)
 }
 
 fn modelhub_retry_429_config<'a>(
@@ -1157,7 +1163,7 @@ impl RequestForwarder {
                     // 先分类错误，决定是否计入 provider 健康度
                     // —— NonRetryable / ClientAbort 是客户端层错误，无论换哪家 provider 都会被拒绝，
                     //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
-                    let category = self.categorize_proxy_error(&e, provider);
+                    let category = self.categorize_proxy_error(&e, provider, app_type, endpoint);
 
                     match category {
                         ErrorCategory::Retryable => {
@@ -1742,6 +1748,15 @@ impl RequestForwarder {
                 if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
                     filtered_body = prepare_upstream_request_body(filtered_body);
                 }
+            }
+        }
+        if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+            let changed =
+                super::modelhub_compat::normalize_namespace_descriptions(&mut filtered_body);
+            if changed > 0 {
+                log::info!(
+                    "[{app_type:?}] [ModelHubCompat] filled {changed} empty namespace description(s)"
+                );
             }
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
@@ -2824,7 +2839,26 @@ impl RequestForwarder {
         }
     }
 
-    fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+    fn categorize_proxy_error(
+        &self,
+        error: &ProxyError,
+        provider: &Provider,
+        app_type: &AppType,
+        endpoint: &str,
+    ) -> ErrorCategory {
+        if should_apply_modelhub_header_adapter(app_type, endpoint, provider, false)
+            && matches!(
+                error,
+                ProxyError::AuthError(_)
+                    | ProxyError::UpstreamError {
+                        status: 400 | 401 | 403,
+                        ..
+                    }
+            )
+        {
+            return ErrorCategory::NonRetryable;
+        }
+
         // Authentication belongs to the Codex client for the built-in official
         // route. Retrying another provider would silently move the conversation
         // away from the selected official account and poison its health state.
@@ -4805,6 +4839,8 @@ mod tests {
             forwarder.categorize_proxy_error(
                 &ProxyError::InvalidRequest("invalid historical tool arguments".to_string()),
                 &provider,
+                &AppType::Codex,
+                "/responses",
             ),
             ErrorCategory::NonRetryable
         );
@@ -4829,8 +4865,46 @@ mod tests {
             },
         ] {
             assert_eq!(
-                forwarder.categorize_proxy_error(&error, &provider),
+                forwarder.categorize_proxy_error(&error, &provider, &AppType::Codex, "/responses",),
                 ErrorCategory::NonRetryable
+            );
+        }
+    }
+
+    #[test]
+    fn modelhub_auth_and_invalid_request_failures_are_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let provider = provider_with_modelhub_header_adapter();
+
+        for status in [400, 401, 403] {
+            assert_eq!(
+                forwarder.categorize_proxy_error(
+                    &ProxyError::UpstreamError { status, body: None },
+                    &provider,
+                    &AppType::Codex,
+                    "/responses",
+                ),
+                ErrorCategory::NonRetryable,
+                "status={status}"
+            );
+        }
+    }
+
+    #[test]
+    fn modelhub_non_responses_auth_failures_remain_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let provider = provider_with_modelhub_header_adapter();
+
+        for status in [401, 403] {
+            assert_eq!(
+                forwarder.categorize_proxy_error(
+                    &ProxyError::UpstreamError { status, body: None },
+                    &provider,
+                    &AppType::Codex,
+                    "/chat/completions",
+                ),
+                ErrorCategory::Retryable,
+                "status={status}"
             );
         }
     }
@@ -4845,6 +4919,8 @@ mod tests {
             forwarder.categorize_proxy_error(
                 &ProxyError::AuthError("xAI OAuth 认证失败".to_string()),
                 &provider,
+                &AppType::Codex,
+                "/responses",
             ),
             ErrorCategory::NonRetryable
         );
@@ -4856,6 +4932,8 @@ mod tests {
                     body: None,
                 },
                 &provider,
+                &AppType::Codex,
+                "/responses",
             ),
             ErrorCategory::Retryable
         );

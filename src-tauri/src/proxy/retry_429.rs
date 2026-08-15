@@ -6,16 +6,41 @@ use chrono::Utc;
 use http::HeaderValue;
 use std::future::Future;
 use std::time::Duration;
+use std::time::SystemTime;
 
 const MAX_SAME_PROVIDER_RETRIES: u8 = 10;
 const MIN_BASE_DELAY_MS: u64 = 100;
 const MAX_DELAY_MS: u64 = 60_000;
 
-pub(crate) fn retry_delay(
+#[cfg(test)]
+fn retry_delay(
     config: &Retry429Config,
     retry_number: u8,
     retry_after: Option<&HeaderValue>,
     now: DateTime<Utc>,
+) -> Duration {
+    retry_delay_with_jitter(config, retry_number, retry_after, now, 0)
+}
+
+fn randomized_retry_delay(
+    config: &Retry429Config,
+    retry_number: u8,
+    retry_after: Option<&HeaderValue>,
+    now: DateTime<Utc>,
+) -> Duration {
+    let jitter_basis_points = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as u64 % 2_501)
+        .unwrap_or(0);
+    retry_delay_with_jitter(config, retry_number, retry_after, now, jitter_basis_points)
+}
+
+pub(crate) fn retry_delay_with_jitter(
+    config: &Retry429Config,
+    retry_number: u8,
+    retry_after: Option<&HeaderValue>,
+    now: DateTime<Utc>,
+    jitter_basis_points: u64,
 ) -> Duration {
     let max_delay_ms = config.max_delay_ms.clamp(MIN_BASE_DELAY_MS, MAX_DELAY_MS);
     if config.honor_retry_after {
@@ -27,7 +52,12 @@ pub(crate) fn retry_delay(
     let base_delay_ms = config.base_delay_ms.clamp(MIN_BASE_DELAY_MS, max_delay_ms);
     let exponent = u32::from(retry_number.saturating_sub(1).min(63));
     let multiplier = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    Duration::from_millis(base_delay_ms.saturating_mul(multiplier).min(max_delay_ms))
+    let delay_ms = base_delay_ms.saturating_mul(multiplier);
+    let jitter_ms = delay_ms
+        .saturating_mul(jitter_basis_points.min(2_500))
+        .checked_div(10_000)
+        .unwrap_or(0);
+    Duration::from_millis(delay_ms.saturating_add(jitter_ms).min(max_delay_ms))
 }
 
 pub(crate) async fn send_with_retry_429<F, Fut>(
@@ -57,7 +87,7 @@ where
                 "[Retry429] failed to drain intermediate 429 response before retry: {error}"
             );
         }
-        let delay = retry_delay(config, retry_number, retry_after.as_ref(), Utc::now());
+        let delay = randomized_retry_delay(config, retry_number, retry_after.as_ref(), Utc::now());
         log::warn!(
             "[Retry429] retrying same provider after HTTP 429 ({retry_number}/{max_retries}, delay_ms={})",
             delay.as_millis()
@@ -83,6 +113,7 @@ fn parse_retry_after(value: &HeaderValue, now: DateTime<Utc>) -> Option<Duration
 #[cfg(test)]
 mod tests {
     use super::retry_delay;
+    use super::retry_delay_with_jitter;
     use super::send_with_retry_429;
     use crate::provider::Retry429Config;
     use crate::proxy::hyper_client::ProxyResponse;
@@ -173,6 +204,41 @@ mod tests {
         assert_eq!(
             retry_delay(&config(), 2, Some(&retry_after), now),
             Duration::from_millis(2_000)
+        );
+    }
+
+    #[test]
+    fn retry_429_jitter_keeps_zero_basis_at_exponential_delay() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            retry_delay_with_jitter(&config(), 3, None, now, 0),
+            Duration::from_millis(4_000)
+        );
+    }
+
+    #[test]
+    fn retry_429_jitter_adds_at_most_twenty_five_percent_and_caps_delay() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            retry_delay_with_jitter(&config(), 3, None, now, 2_500),
+            Duration::from_millis(5_000)
+        );
+        assert_eq!(
+            retry_delay_with_jitter(&config(), 10, None, now, 2_500),
+            Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
+    fn retry_429_jitter_does_not_modify_retry_after() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap();
+        let retry_after = http::HeaderValue::from_static("12");
+
+        assert_eq!(
+            retry_delay_with_jitter(&config(), 1, Some(&retry_after), now, 2_500),
+            Duration::from_secs(12)
         );
     }
 

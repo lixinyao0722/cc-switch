@@ -236,6 +236,11 @@ test_merge_preserves_unmanaged_sections() {
     '/Users/Test User'
 
   assert_contains "$case_dir/output.toml" 'model = "gpt-5.6-sol"'
+  assert_contains "$case_dir/output.toml" 'model_reasoning_effort = "high"'
+  assert_contains "$case_dir/output.toml" 'model_max_output_tokens = 128_000'
+  assert_contains "$case_dir/output.toml" 'request_max_retries = 10'
+  assert_contains "$case_dir/output.toml" 'stream_max_retries = 10'
+  assert_contains "$case_dir/output.toml" 'retry_429 = true'
   assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Test User/.codex/models-modelhub-1m.json"'
   assert_contains "$case_dir/output.toml" '# user heading'
   assert_contains "$case_dir/output.toml" '[plugins."browser@openai-bundled"]'
@@ -343,6 +348,7 @@ test_merge_replaces_equivalent_modelhub_headers() {
   assert_not_contains "$case_dir/output.toml" 'x-stale-header'
   assert_not_contains "$case_dir/output.toml" 'also-stale'
   assert_contains "$case_dir/output.toml" '[model_providers.keepme]'
+  assert_occurrences "$case_dir/output.toml" 'approval_policy = "on-request"' 1
   cp "$case_dir/output.toml" "$parser_home/config.toml"
   CODEX_HOME="$parser_home" "$codex_bin" features list >/dev/null
 }
@@ -1365,7 +1371,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260813-r7'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260815-r8'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1378,7 +1384,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260813-r7/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260815-r8/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2711,7 +2717,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260813-r7'"
+    "readonly RELEASE_TAG='modelhub-installer-20260815-r8'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -2893,6 +2899,21 @@ test_package_rejects_output_inside_source_tree() {
   [[ ! -e "$source_dir/nested-output" ]] || fail 'unsafe package run created nested output'
 }
 
+test_package_rejects_nonempty_output_directory() {
+  local case_dir="$TEST_TMP/package-nonempty-output"
+  local source_dir="$case_dir/source"
+  local output_dir="$case_dir/output"
+  mkdir -p "$output_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  printf 'old-app\n' >"$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip"
+  create_packager_source "$source_dir"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  assert_contains "$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip" 'old-app'
+  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip" ]] \
+    || fail 'failed package run wrote new assets into a non-empty output directory'
+}
+
 test_package_rejects_source_symlinks() {
   local case_dir="$TEST_TMP/package-source-symlink"
   local source_dir="$case_dir/source"
@@ -2917,6 +2938,39 @@ test_package_rejects_unsafe_golden_snapshot_source() {
     "$source_dir" "$case_dir/app.zip" "$case_dir/output"
   [[ ! -e "$case_dir/output/modelhub-installer-resources.tar.gz" ]] \
     || fail 'unsafe golden source left a publishable resource archive'
+}
+
+test_package_normalizes_custom_snapshot_retry_policy() {
+  local case_dir="$TEST_TMP/package-custom-snapshot-retry"
+  local source_dir="$case_dir/source"
+  local snapshot_dir="$case_dir/snapshot"
+  local output_dir="$case_dir/output"
+  local extracted_dir="$case_dir/extracted"
+  mkdir -p "$case_dir"
+  create_packager_source "$source_dir"
+  mkdir -p "$snapshot_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$snapshot_dir/cc-switch.db" >/dev/null
+  sqlite3 "$snapshot_dir/cc-switch.db" \
+    "UPDATE providers SET meta=json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10);"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
+    run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  mkdir -p "$extracted_dir"
+  tar -xzf "$output_dir/modelhub-installer-resources.tar.gz" -C "$extracted_dir"
+
+  assert_sql "$snapshot_dir/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '10'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '3'
 }
 
 test_golden_db_builder_creates_minimal_public_snapshot() {
@@ -2951,6 +3005,15 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   assert_sql "$first_db" \
     "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers" \
     '0'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'model_reasoning_effort = \"high\"') > 0 FROM providers" \
+    '1'
+  assert_sql "$first_db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'model_max_output_tokens = 128_000') > 0 FROM providers" \
+    '1'
+  assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
+    '3'
   assert_sql "$first_db" \
     "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex'" \
     '1:1:0:127.0.0.1:15721'
@@ -3111,8 +3174,10 @@ run_test "package rejects sensitive content" test_package_rejects_sensitive_cont
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes
 run_test "package rejects sensitive file types" test_package_rejects_sensitive_file_types
 run_test "package rejects output inside source tree" test_package_rejects_output_inside_source_tree
+run_test "package rejects nonempty output directory" test_package_rejects_nonempty_output_directory
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
+run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 

@@ -189,6 +189,7 @@ async fn handle_messages_for_app(
     let endpoint = strip_prefix
         .and_then(|prefix| raw_endpoint.strip_prefix(prefix))
         .unwrap_or(raw_endpoint);
+    ctx.set_request_endpoint(endpoint);
 
     let is_stream = body
         .get("stream")
@@ -721,6 +722,7 @@ pub async fn handle_chat_completions(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
+    ctx.set_request_endpoint(&endpoint);
 
     let is_stream = body
         .get("stream")
@@ -811,6 +813,7 @@ async fn handle_responses_for_app(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
     let endpoint = endpoint_with_query(&uri, "/responses");
+    ctx.set_request_endpoint(&endpoint);
 
     let is_stream = body
         .get("stream")
@@ -948,6 +951,7 @@ async fn handle_responses_compact_for_app(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
+    ctx.set_request_endpoint(&endpoint);
 
     let is_stream = body
         .get("stream")
@@ -1959,6 +1963,7 @@ pub async fn handle_gemini(
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or(uri.path());
+    ctx.set_request_endpoint(endpoint);
 
     let is_stream = body
         .get("stream")

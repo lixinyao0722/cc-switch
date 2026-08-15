@@ -694,8 +694,12 @@ pub fn create_logged_passthrough_stream(
         let mut collector = usage_collector;
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
         let inspect_sse_events =
-            collector.is_some() || log::log_enabled!(log::Level::Debug);
+            collector.is_some()
+                || timeout_config.progress_timeout > 0
+                || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
+        let started_at = tokio::time::Instant::now();
+        let mut last_progress_at = started_at;
 
         // 超时配置
         let first_byte_timeout = if timeout_config.first_byte_timeout > 0 {
@@ -708,27 +712,73 @@ pub fn create_logged_passthrough_stream(
         } else {
             None
         };
+        let total_timeout = if timeout_config.total_timeout > 0 {
+            Some(Duration::from_secs(timeout_config.total_timeout))
+        } else {
+            None
+        };
+        let progress_timeout = if timeout_config.progress_timeout > 0 {
+            Some(Duration::from_secs(timeout_config.progress_timeout))
+        } else {
+            None
+        };
 
         tokio::pin!(stream);
 
         loop {
             // 选择超时时间：首字节超时或静默期超时
-            let timeout_duration = if is_first_chunk {
+            let byte_timeout = if is_first_chunk {
                 first_byte_timeout
             } else {
                 idle_timeout
             };
 
-            let chunk_result = match timeout_duration {
-                Some(duration) => {
-                    match tokio::time::timeout(duration, stream.next()).await {
+            let now = tokio::time::Instant::now();
+            let mut deadlines = Vec::with_capacity(3);
+            if let Some(duration) = byte_timeout {
+                deadlines.push((
+                    duration,
+                    if is_first_chunk { "首字节" } else { "静默期" },
+                    duration,
+                ));
+            }
+            if let Some(duration) = total_timeout {
+                deadlines.push((
+                    duration.saturating_sub(now.duration_since(started_at)),
+                    "总时长",
+                    duration,
+                ));
+            }
+            if let Some(duration) = progress_timeout {
+                deadlines.push((
+                    duration.saturating_sub(now.duration_since(last_progress_at)),
+                    "有效进展",
+                    duration,
+                ));
+            }
+            let selected_timeout = deadlines
+                .into_iter()
+                .min_by_key(|(remaining, _, _)| *remaining);
+
+            let chunk_result = match selected_timeout {
+                Some((remaining, timeout_type, configured)) if remaining.is_zero() => {
+                    log::error!("[{tag}] 流式响应{timeout_type}超时 ({}秒)", configured.as_secs());
+                    yield Err(std::io::Error::other(format!(
+                        "流式响应{timeout_type}超时 ({}秒)",
+                        configured.as_secs()
+                    )));
+                    break;
+                }
+                Some((remaining, timeout_type, configured)) => {
+                    match tokio::time::timeout(remaining, stream.next()).await {
                         Ok(Some(chunk)) => Some(chunk),
                         Ok(None) => None, // 流结束
                         Err(_) => {
-                            // 超时
-                            let timeout_type = if is_first_chunk { "首字节" } else { "静默期" };
-                            log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
-                            yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
+                            log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, configured.as_secs());
+                            yield Err(std::io::Error::other(format!(
+                                "流式响应{timeout_type}超时 ({}秒)",
+                                configured.as_secs()
+                            )));
                             break;
                         }
                     }
@@ -751,6 +801,9 @@ pub fn create_logged_passthrough_stream(
                         // 尝试解析并记录完整的 SSE 事件
                         while let Some(event_text) = take_sse_block(&mut buffer) {
                             if !event_text.trim().is_empty() {
+                                if progress_timeout.is_some() && is_useful_sse_progress(&event_text) {
+                                    last_progress_at = tokio::time::Instant::now();
+                                }
                                 // 提取 data 部分；只有 usage collector 存在时才解析 JSON。
                                 for line in event_text.lines() {
                                     if let Some(data) = strip_sse_field(line, "data") {
@@ -801,6 +854,47 @@ pub fn create_logged_passthrough_stream(
             guard.disarm();
         }
     }
+}
+
+fn is_useful_sse_progress(event_text: &str) -> bool {
+    let mut event_name = None::<String>;
+    for line in event_text.lines() {
+        if let Some(value) = strip_sse_field(line, "event") {
+            event_name = Some(value.trim().to_string());
+        }
+        let Some(data) = strip_sse_field(line, "data") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            return true;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(data) {
+            if let Some(kind) = value.get("type").and_then(Value::as_str) {
+                event_name = Some(kind.to_string());
+            }
+        }
+    }
+
+    let Some(event_name) = event_name else {
+        return false;
+    };
+    if matches!(
+        event_name.as_str(),
+        "response.created" | "response.in_progress" | "response.queued" | "ping" | "heartbeat"
+    ) {
+        return false;
+    }
+    event_name == "error"
+        || event_name.contains("output")
+        || event_name.contains("reasoning")
+        || event_name.contains("function_call")
+        || event_name.contains("custom_tool")
+        || event_name.contains("tool_call")
+        || matches!(
+            event_name.as_str(),
+            "response.completed" | "response.failed" | "response.incomplete" | "response.cancelled"
+        )
 }
 
 fn is_safe_diagnostic_header(name: &str) -> bool {
@@ -869,6 +963,128 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn modelhub_stream_progress_ignores_heartbeats_and_metadata() {
+        for event in [
+            ": keepalive",
+            "event: response.created\ndata: {\"type\":\"response.created\"}",
+            "event: response.in_progress\ndata: {\"type\":\"response.in_progress\"}",
+            "data: {}",
+        ] {
+            assert!(!is_useful_sse_progress(event), "{event}");
+        }
+    }
+
+    #[test]
+    fn modelhub_stream_progress_accepts_output_reasoning_tools_and_terminals() {
+        for event in [
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"x\"}",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}",
+            "event: response.completed\ndata: {\"type\":\"response.completed\"}",
+            "data: [DONE]",
+        ] {
+            assert!(is_useful_sse_progress(event), "{event}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn modelhub_stream_total_timeout_is_not_reset_by_heartbeats() {
+        let heartbeat_stream = futures::stream::unfold(0_u8, |count| async move {
+            if count >= 20 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some((Ok(Bytes::from_static(b": keepalive\n\n")), count + 1))
+        });
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 5,
+            progress_timeout: 0,
+        };
+        let results =
+            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
+                .collect::<Vec<_>>()
+                .await;
+
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("总时长超时 (5秒)"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn modelhub_stream_progress_timeout_ignores_heartbeats() {
+        let heartbeat_stream = futures::stream::unfold(0_u8, |count| async move {
+            if count >= 20 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some((Ok(Bytes::from_static(b": keepalive\n\n")), count + 1))
+        });
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 30,
+            progress_timeout: 3,
+        };
+        let results =
+            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
+                .collect::<Vec<_>>()
+                .await;
+
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("有效进展超时 (3秒)"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn modelhub_stream_useful_progress_resets_only_progress_deadline() {
+        let events = vec![
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (
+                1,
+                Bytes::from_static(
+                    b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n",
+                ),
+            ),
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (1, Bytes::from_static(b": keepalive\n\n")),
+            (2, Bytes::from_static(b": keepalive\n\n")),
+        ];
+        let stream = futures::stream::unfold(events.into_iter(), |mut events| async move {
+            let (delay, bytes) = events.next()?;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            Some((Ok(bytes), events))
+        });
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 30,
+            progress_timeout: 3,
+        };
+        let results = create_logged_passthrough_stream(stream, "ModelHub/Test", None, config, None)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 4);
+        assert!(results
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("有效进展超时 (3秒)"));
+    }
 
     #[test]
     fn format_headers_keeps_only_allowlisted_diagnostic_values() {

@@ -7,7 +7,7 @@
       "max_output_tokens": 128000
     },
     "retry429": {
-      "maxRetries": 10,
+      "maxRetries": 3,
       "baseDelayMs": 1000,
       "maxDelayMs": 30000,
       "honorRetryAfter": true

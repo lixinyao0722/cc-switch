@@ -17,15 +17,15 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R7 已合并上游 CC Switch 最新 `main`（应用版本 3.19.2）；一键安装入口保持不变，继续使用以下命令：
+R8 基于 CC Switch 3.19.2，加入 ModelHub namespace 修复、流式 watchdog 与重试治理；一键安装入口保持不变，继续使用以下命令：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R7 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R8 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
 
-安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。R7 将这次输入作为唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次，防止启动同步把 Provider 恢复为旧值。校验只比较一致性，不会把密钥写入进度提示、日志或命令输出；任何写入或校验失败都会触发自动回滚。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
+安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。R8 将这次输入作为唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次，防止启动同步把 Provider 恢复为旧值。校验只比较一致性，不会把密钥写入进度提示、日志或命令输出；任何写入或校验失败都会触发自动回滚。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
 
 整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖；Release 不包含 AK/OAuth、日志、请求/会话/用量记录或备份。本机绝对路径在包内统一为 `__USER_HOME__`，安装时替换为新电脑真实用户目录。
 
@@ -48,7 +48,7 @@ model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
-model_reasoning_effort = "max"
+model_reasoning_effort = "high"
 model_auto_compact_token_limit = 829_674
 model_context_window = 921_860
 model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
@@ -75,7 +75,7 @@ Provider 元数据还承接 ModelHub 会话适配和同 Provider 429 重试：
       "max_output_tokens": 128000
     },
     "retry429": {
-      "maxRetries": 10,
+    "maxRetries": 3,
       "baseDelayMs": 1000,
       "maxDelayMs": 30000,
       "honorRetryAfter": true
@@ -124,14 +124,20 @@ x-client-request-id: <current thread id>
 
 顶层 `stream` 属于受保护协议字段，不能通过 Body override 修改。Header、Body 和 adapter 均为 Provider 级配置，不得设置成全局默认。
 
+## 请求兼容与流式保护
+
+- ModelHub 出站前会为 `namespace` 工具补齐空白 `description`，避免上游严格校验路径随机返回 HTTP 400；既有非空描述保持原值。
+- HTTP 400、401、403 属于客户端请求或凭据问题，直接返回，不进入跨 Provider 重试。
+- Codex SSE 无论是否开启自动故障转移都设置 600 秒总时长上限；heartbeat、注释和 `response.created` / `response.in_progress` 不算有效进展，不能无限续命。
+
 ## HTTP 429 重试
 
 429 policy 位于单个 ModelHub Provider attempt 内，与跨 Provider 故障转移分离：
 
-- 初始请求之外最多重试 10 次。
+- 初始请求之外最多重试 3 次。
 - 所有尝试复用相同 method、URL、最终 Header 和序列化 body。
 - 优先解析 `Retry-After` 的秒数或 HTTP-date，并限制在 30 秒以内。
-- 无有效 `Retry-After` 时按 1、2、4、8、16、30 秒退避，后续保持 30 秒。
+- 有效 `Retry-After` 原样遵循但限制在 30 秒内；否则按 1、2、4 秒指数退避，并增加 0–25% 随机抖动，避免并发任务同步重试。
 - 中间 429 先排空响应体，不更新 Provider 熔断状态。
 - 重试耗尽后把最终 429 交给原有错误处理。
 - 自动故障转移保持关闭，不因 429 切换 Provider。

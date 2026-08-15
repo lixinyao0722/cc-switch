@@ -186,6 +186,16 @@ copy_allowlisted_resources() {
     cp "$snapshot_dir/codex-config.toml" "$package_root/golden/codex-config.toml"
     cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
     cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
+    local retry_max
+    retry_max="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    case "$retry_max" in
+      ''|null|*[!0-9]*) die 'ModelHub retry429 default is invalid'; return 1 ;;
+    esac
+    /usr/bin/sqlite3 "$package_root/golden/cc-switch.db" \
+      "UPDATE providers
+          SET meta=json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max)
+        WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
   else
     cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
     cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
@@ -298,6 +308,10 @@ main() {
       return 1
     fi
     output_dir="$(cd "$output_dir" && pwd -P)"
+    if find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      die "output directory must be empty: $output_dir"
+      return 1
+    fi
   fi
   if [[ "$output_dir" == "/" \
     || "$output_dir" == "$source_dir" \
@@ -336,11 +350,6 @@ main() {
   )
 
   mkdir -p "$output_dir"
-  rm -f \
-    "$output_dir/$OUTPUT_INSTALLER_NAME" \
-    "$output_dir/$OUTPUT_APP_NAME" \
-    "$output_dir/$OUTPUT_RESOURCES_NAME" \
-    "$output_dir/$OUTPUT_CHECKSUM_NAME"
   cp "$staged_output/$OUTPUT_INSTALLER_NAME" "$output_dir/$OUTPUT_INSTALLER_NAME"
   cp "$staged_output/$OUTPUT_APP_NAME" "$output_dir/$OUTPUT_APP_NAME"
   cp "$staged_output/$OUTPUT_RESOURCES_NAME" "$output_dir/$OUTPUT_RESOURCES_NAME"

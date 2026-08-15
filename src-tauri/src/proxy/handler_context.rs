@@ -21,6 +21,40 @@ pub struct StreamingTimeoutConfig {
     pub first_byte_timeout: u64,
     /// 静默期超时（秒），0 表示禁用
     pub idle_timeout: u64,
+    /// 流总时长上限（秒），0 表示禁用
+    pub total_timeout: u64,
+    /// 无有效 SSE 进展上限（秒），0 表示禁用
+    pub progress_timeout: u64,
+}
+
+impl StreamingTimeoutConfig {
+    const MODELHUB_TOTAL_TIMEOUT_SECONDS: u64 = 600;
+    const MODELHUB_PROGRESS_TIMEOUT_FALLBACK_SECONDS: u64 = 120;
+
+    pub(crate) fn for_modelhub_codex(mut self, configured_idle_timeout: u64) -> Self {
+        self.total_timeout = Self::MODELHUB_TOTAL_TIMEOUT_SECONDS;
+        self.progress_timeout = if configured_idle_timeout > 0 {
+            configured_idle_timeout
+        } else {
+            Self::MODELHUB_PROGRESS_TIMEOUT_FALLBACK_SECONDS
+        };
+        self
+    }
+
+    pub(crate) fn for_route(
+        self,
+        app_type: &AppType,
+        endpoint: &str,
+        provider: &Provider,
+        configured_idle_timeout: u64,
+    ) -> Self {
+        if crate::proxy::forwarder::is_modelhub_codex_responses_route(app_type, endpoint, provider)
+        {
+            self.for_modelhub_codex(configured_idle_timeout)
+        } else {
+            self
+        }
+    }
 }
 
 /// 请求上下文
@@ -60,6 +94,8 @@ pub struct RequestContext {
     /// 应用类型（预留，目前通过 app_type_str 使用）
     #[allow(dead_code)]
     pub app_type: AppType,
+    /// 当前请求的规范化代理端点，用于路由级响应策略
+    pub request_endpoint: String,
     /// Session ID（从客户端请求提取或新生成）
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
@@ -168,6 +204,7 @@ impl RequestContext {
             tag,
             app_type_str,
             app_type,
+            request_endpoint: String::new(),
             session_id,
             session_client_provided: session_result.client_provided,
             rectifier_config,
@@ -189,6 +226,10 @@ impl RequestContext {
             extract_gemini_model_from_path(endpoint).unwrap_or_else(|| "unknown".to_string());
 
         self
+    }
+
+    pub fn set_request_endpoint(&mut self, endpoint: &str) {
+        self.request_endpoint = endpoint.to_string();
     }
 
     /// 创建 RequestForwarder
@@ -261,22 +302,34 @@ impl RequestContext {
     ///
     /// 配置生效规则：
     /// - 故障转移开启：返回配置的值（0 表示禁用超时检查）
-    /// - 故障转移关闭：返回 0（禁用超时检查）
+    /// - 故障转移关闭：普通 Provider 返回 0
+    /// - ModelHub Codex：无论故障转移状态都增加总时长与有效进展 watchdog
     #[inline]
     pub fn streaming_timeout_config(&self) -> StreamingTimeoutConfig {
-        if self.app_config.auto_failover_enabled {
+        let config = if self.app_config.auto_failover_enabled {
             // 故障转移开启：使用配置的值（0 = 禁用超时）
             StreamingTimeoutConfig {
                 first_byte_timeout: self.app_config.streaming_first_byte_timeout as u64,
                 idle_timeout: self.app_config.streaming_idle_timeout as u64,
+                total_timeout: 0,
+                progress_timeout: 0,
             }
         } else {
             // 故障转移关闭：禁用流式超时检查
             StreamingTimeoutConfig {
                 first_byte_timeout: 0,
                 idle_timeout: 0,
+                total_timeout: 0,
+                progress_timeout: 0,
             }
-        }
+        };
+
+        config.for_route(
+            &self.app_type,
+            &self.request_endpoint,
+            &self.provider,
+            self.app_config.streaming_idle_timeout as u64,
+        )
     }
 }
 
@@ -300,7 +353,69 @@ pub(crate) fn extract_gemini_model_from_path(endpoint: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_gemini_model_from_path;
+    use super::{extract_gemini_model_from_path, StreamingTimeoutConfig};
+    use crate::app_config::AppType;
+
+    #[test]
+    fn modelhub_stream_watchdog_has_safe_defaults_without_failover_timeouts() {
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        }
+        .for_modelhub_codex(0);
+
+        assert_eq!(config.total_timeout, 600);
+        assert_eq!(config.progress_timeout, 120);
+        assert_eq!(config.first_byte_timeout, 0);
+        assert_eq!(config.idle_timeout, 0);
+    }
+
+    #[test]
+    fn modelhub_stream_watchdog_reuses_configured_idle_timeout_for_progress() {
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 60,
+            idle_timeout: 180,
+            total_timeout: 0,
+            progress_timeout: 0,
+        }
+        .for_modelhub_codex(180);
+
+        assert_eq!(config.total_timeout, 600);
+        assert_eq!(config.progress_timeout, 180);
+        assert_eq!(config.first_byte_timeout, 60);
+        assert_eq!(config.idle_timeout, 180);
+    }
+
+    #[test]
+    fn modelhub_stream_watchdog_skips_non_responses_routes() {
+        let mut provider = crate::provider::Provider::with_id(
+            "modelhub-test".to_string(),
+            "ModelHub Test".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        }
+        .for_route(&AppType::Codex, "/chat/completions", &provider, 120);
+
+        assert_eq!(config.total_timeout, 0);
+        assert_eq!(config.progress_timeout, 0);
+    }
 
     #[test]
     fn extract_model_with_action() {

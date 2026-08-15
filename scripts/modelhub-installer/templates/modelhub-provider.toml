@@ -1,9 +1,10 @@
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
+model_max_output_tokens = 128_000
 model_provider = "modelhub"
-model_reasoning_effort = "max"
-model_auto_compact_token_limit = 829674
-model_context_window = 921860
+model_reasoning_effort = "high"
+model_auto_compact_token_limit = 829_674
+model_context_window = 921_860
 model_catalog_json = "__USER_HOME__/.codex/models-modelhub-1m.json"
 
 [model_providers.modelhub]
@@ -12,6 +13,7 @@ wire_api = "responses"
 requires_openai_auth = true
 base_url = "https://aidp.bytedance.net/api/modelhub/online"
 env_key = "MODELHUB_AK"
-stream_idle_timeout_ms = 600000
+stream_idle_timeout_ms = 600_000
 request_max_retries = 10
 stream_max_retries = 10
+retry_429 = true
