@@ -3,6 +3,7 @@ use http::HeaderMap;
 use http::HeaderValue;
 use serde_json::Map;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const MAX_CODEX_IDENTITY_BYTES: usize = 256;
 const CODEX_METADATA_MODEL: &str = "gpt-5.6-luna";
@@ -40,6 +41,46 @@ pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataR
 
 pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
     codex_metadata_request_kind(body) == Some(CodexMetadataRequestKind::ActivitySummary)
+}
+
+pub(crate) fn activity_summary_fingerprint(
+    provider_id: &str,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<String> {
+    if codex_metadata_request_kind(body) != Some(CodexMetadataRequestKind::ActivitySummary) {
+        return None;
+    }
+    let thread = ["thread-id", "thread_id"]
+        .into_iter()
+        .find_map(|name| headers.get(name))?
+        .to_str()
+        .ok()?
+        .trim();
+    if thread.is_empty() {
+        return None;
+    }
+    let texts = body
+        .get("input")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(user_message_texts)
+        .flatten()
+        .collect::<Vec<_>>();
+    if texts.is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(provider_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(thread.as_bytes());
+    for text in texts {
+        hasher.update([0]);
+        hasher.update(text.as_bytes());
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    Some(digest[..32].to_string())
 }
 
 fn user_message_texts(item: &Value) -> Option<Vec<&str>> {

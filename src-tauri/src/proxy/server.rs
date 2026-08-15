@@ -47,6 +47,9 @@ pub struct ProxyState {
     /// 已确认 ModelHub 无法验证 encrypted reasoning 的 Provider + Codex 会话。
     pub modelhub_invalid_encrypted_reasoning_sessions:
         Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Recently forwarded activity-summary fingerprints for short-window deduplication.
+    pub modelhub_activity_summary_dedup:
+        Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -85,6 +88,9 @@ impl ProxyServer {
             modelhub_invalid_encrypted_reasoning_sessions: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_activity_summary_dedup: Arc::new(
+                RwLock::new(std::collections::HashMap::new()),
+            ),
             app_handle,
             failover_manager,
         };
