@@ -113,6 +113,24 @@ fn should_block_modelhub_activity_summary(
         && super::modelhub_compat::is_unsupported_activity_summary_request(body)
 }
 
+fn modelhub_codex_metadata_model<'a>(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &'a Provider,
+    is_copilot: bool,
+) -> Option<&'a str> {
+    if !should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+        return None;
+    }
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+        .and_then(|overrides| overrides.codex_metadata_model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -1790,6 +1808,18 @@ impl RequestForwarder {
                 "CC Switch blocked an unsupported Codex activity summary locally to protect ModelHub quota"
                     .to_string(),
             ));
+        }
+        if let Some(kind) = super::modelhub_compat::codex_metadata_request_kind(&filtered_body) {
+            if kind != super::modelhub_compat::CodexMetadataRequestKind::ActivitySummary {
+                if let Some(model) =
+                    modelhub_codex_metadata_model(app_type, endpoint, provider, is_copilot)
+                {
+                    filtered_body["model"] = Value::String(model.to_string());
+                    log::info!(
+                        "[{app_type:?}] [ModelHubCompat] mapped Codex metadata request kind={kind:?} to configured model"
+                    );
+                }
+            }
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
@@ -3899,6 +3929,7 @@ mod tests {
                     honor_retry_after: true,
                 }),
                 block_codex_activity_summaries: Some(true),
+                codex_metadata_model: Some("gpt-5.6-sol".to_string()),
                 ..LocalProxyRequestOverrides::default()
             }),
             ..crate::provider::ProviderMeta::default()
@@ -4267,6 +4298,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modelhub_internal_luna_metadata_is_mapped_to_sol_once() {
+        let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_models_for_route = received_models.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_models = received_models_for_route.clone();
+                async move {
+                    received_models.lock().expect("received model lock").push(
+                        body.get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_thread_title",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.\nGenerate a concise UI title."
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "metadata-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "metadata-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "metadata mapping should preserve the request"
+        );
+        assert_eq!(
+            *received_models.lock().expect("received model lock"),
+            vec!["gpt-5.6-sol".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn modelhub_activity_summary_guard_can_be_disabled() {
         let upstream_requests = Arc::new(AtomicUsize::new(0));
         let upstream_requests_for_route = upstream_requests.clone();
@@ -4355,14 +4475,17 @@ mod tests {
 
     #[tokio::test]
     async fn modelhub_activity_summary_guard_preserves_ordinary_luna_requests() {
-        let upstream_requests = Arc::new(AtomicUsize::new(0));
-        let upstream_requests_for_route = upstream_requests.clone();
+        let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_models_for_route = received_models.clone();
         let app = Router::new().route(
             "/v1/responses",
-            post(move || {
-                let upstream_requests = upstream_requests_for_route.clone();
+            post(move |Json(body): Json<Value>| {
+                let received_models = received_models_for_route.clone();
                 async move {
-                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    received_models
+                        .lock()
+                        .expect("received model lock")
+                        .push(body["model"].as_str().unwrap_or_default().to_string());
                     (
                         StatusCode::OK,
                         Json(json!({
@@ -4428,7 +4551,100 @@ mod tests {
             result.is_ok(),
             "ordinary Luna traffic should remain supported"
         );
-        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *received_models.lock().expect("received model lock"),
+            vec!["gpt-5.6-luna".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_internal_luna_metadata_mapping_can_be_disabled() {
+        let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_models_for_route = received_models.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_models = received_models_for_route.clone();
+                async move {
+                    received_models
+                        .lock()
+                        .expect("received model lock")
+                        .push(body["model"].as_str().unwrap_or_default().to_string());
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_thread_title",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides")
+            .codex_metadata_model = None;
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are in a fork of an existing Codex thread.\nFill the structured description field."
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "disabled-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "disabled-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_ok());
+        assert_eq!(
+            *received_models.lock().expect("received model lock"),
+            vec!["gpt-5.6-luna".to_string()]
+        );
     }
 
     #[test]
