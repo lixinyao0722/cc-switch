@@ -1325,8 +1325,8 @@ test_preflight_accepts_exact_resource_archive() {
   validate_resource_archive "$case_dir/resources.tar.gz"
 }
 
-test_preflight_rejects_golden_database_without_activity_summary_guard() {
-  local case_dir="$TEST_TMP/preflight-golden-activity-guard"
+test_preflight_rejects_golden_database_without_activity_summary_mode() {
+  local case_dir="$TEST_TMP/preflight-golden-activity-mode"
   local database="$case_dir/cc-switch.db"
   mkdir -p "$case_dir"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -1338,13 +1338,13 @@ test_preflight_rejects_golden_database_without_activity_summary_guard() {
   validate_golden_database "$database"
   sqlite3 "$database" \
     "UPDATE providers
-        SET meta=json_remove(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')
+        SET meta=json_remove(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')
       WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
   assert_command_fails validate_golden_database "$database"
 }
 
-test_preflight_rejects_golden_database_without_r10_resilience_defaults() {
-  local case_dir="$TEST_TMP/preflight-golden-r10-resilience"
+test_preflight_rejects_golden_database_without_r11_resilience_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r11-resilience"
   local database="$case_dir/cc-switch.db"
   local metadata_path
   mkdir -p "$case_dir"
@@ -1412,7 +1412,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260816-r10'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260816-r11'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1425,7 +1425,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260816-r10/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260816-r11/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2758,7 +2758,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260816-r10'"
+    "readonly RELEASE_TAG='modelhub-installer-20260816-r11'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -2999,11 +2999,14 @@ test_package_normalizes_custom_snapshot_retry_policy() {
     --output "$snapshot_dir/cc-switch.db" >/dev/null
   sqlite3 "$snapshot_dir/cc-switch.db" \
     "UPDATE providers
-        SET meta=json_remove(
-          json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10),
-          '$.localProxyRequestOverrides.blockCodexActivitySummaries',
-          '$.localProxyRequestOverrides.codexMetadataModel',
-          '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning'
+        SET meta=json_set(
+          json_remove(
+            json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10),
+            '$.localProxyRequestOverrides.codexActivitySummaryMode',
+            '$.localProxyRequestOverrides.codexMetadataModel',
+            '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning'
+          ),
+          '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true')
         );"
   printf 'verified-app-zip\n' >"$case_dir/app.zip"
 
@@ -3017,6 +3020,9 @@ test_package_normalizes_custom_snapshot_retry_policy() {
     '10'
   assert_sql "$snapshot_dir/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
+    '0'
+  assert_sql "$snapshot_dir/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') IS NULL FROM providers" \
     '1'
   assert_sql "$snapshot_dir/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') IS NULL FROM providers" \
@@ -3028,8 +3034,11 @@ test_package_normalizes_custom_snapshot_retry_policy() {
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '3'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') FROM providers" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
     '1'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') FROM providers" \
+    'map'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') FROM providers" \
     'gpt-5.6-sol'
@@ -3105,8 +3114,11 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
     '3'
   assert_sql "$first_db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') FROM providers" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
     '1'
+  assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') FROM providers" \
+    'map'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') FROM providers" \
     'gpt-5.6-sol'
@@ -3182,6 +3194,12 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') FROM providers WHERE id='bytedance-modelhub-official-cli'" \
     'gpt-5.6-sol'
   assert_sql "$database" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') FROM providers WHERE id='bytedance-modelhub-official-cli'" \
+    'map'
+  assert_sql "$database" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers WHERE id='bytedance-modelhub-official-cli'" \
+    '1'
+  assert_sql "$database" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning') FROM providers WHERE id='bytedance-modelhub-official-cli'" \
     '1'
 
@@ -3230,8 +3248,8 @@ run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_k
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
-run_test "preflight rejects golden database without activity summary guard" test_preflight_rejects_golden_database_without_activity_summary_guard
-run_test "preflight rejects golden database without R10 resilience defaults" test_preflight_rejects_golden_database_without_r10_resilience_defaults
+run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
+run_test "preflight rejects golden database without R11 resilience defaults" test_preflight_rejects_golden_database_without_r11_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
