@@ -13,6 +13,9 @@ describe("requestOverrides", () => {
   const modelhubPolicy = {
     appId: "codex" as const,
     codexSessionHeaderAdapter: "modelhub" as const,
+    blockCodexActivitySummaries: true,
+    codexMetadataModel: "gpt-5.6-sol",
+    rememberInvalidEncryptedReasoning: true,
     retry429: {
       maxRetries: 10,
       baseDelayMs: 1000,
@@ -95,6 +98,9 @@ describe("requestOverrides", () => {
       overrides: {
         body: { max_output_tokens: 128000 },
         codexSessionHeaderAdapter: "modelhub",
+        blockCodexActivitySummaries: true,
+        codexMetadataModel: "gpt-5.6-sol",
+        rememberInvalidEncryptedReasoning: true,
         retry429: {
           maxRetries: 10,
           baseDelayMs: 1000,

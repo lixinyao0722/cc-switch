@@ -8,6 +8,9 @@ export interface LocalProxyPolicyOptions {
   appId: "claude" | "codex";
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
+  blockCodexActivitySummaries?: boolean;
+  codexMetadataModel?: string;
+  rememberInvalidEncryptedReasoning?: boolean;
 }
 
 export interface RequestOverrideJsonResult {
@@ -203,6 +206,18 @@ export function buildLocalProxyRequestOverrides(
         return { error: retryError };
       }
       overrides.retry429 = { ...options.retry429 };
+    }
+    if (options.blockCodexActivitySummaries !== undefined) {
+      overrides.blockCodexActivitySummaries =
+        options.blockCodexActivitySummaries;
+    }
+    const codexMetadataModel = options.codexMetadataModel?.trim();
+    if (codexMetadataModel) {
+      overrides.codexMetadataModel = codexMetadataModel;
+    }
+    if (options.rememberInvalidEncryptedReasoning !== undefined) {
+      overrides.rememberInvalidEncryptedReasoning =
+        options.rememberInvalidEncryptedReasoning;
     }
   }
 
