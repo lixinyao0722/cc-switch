@@ -1325,6 +1325,24 @@ test_preflight_accepts_exact_resource_archive() {
   validate_resource_archive "$case_dir/resources.tar.gz"
 }
 
+test_preflight_rejects_golden_database_without_activity_summary_guard() {
+  local case_dir="$TEST_TMP/preflight-golden-activity-guard"
+  local database="$case_dir/cc-switch.db"
+  mkdir -p "$case_dir"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$database" >/dev/null
+
+  validate_golden_database "$database"
+  sqlite3 "$database" \
+    "UPDATE providers
+        SET meta=json_remove(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')
+      WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
+  assert_command_fails validate_golden_database "$database"
+}
+
 test_preflight_rejects_archive_symlink_and_extra_file() {
   local case_dir="$TEST_TMP/preflight-archive-bad"
   mkdir -p "$case_dir/safe-tree" "$case_dir/symlink-tree" "$case_dir/extra-tree"
@@ -2983,6 +3001,31 @@ test_package_normalizes_custom_snapshot_retry_policy() {
     '1'
 }
 
+test_package_rejects_custom_snapshot_with_unusable_modelhub_meta() {
+  local case_dir="$TEST_TMP/package-custom-snapshot-invalid-meta"
+  local source_dir="$case_dir/source"
+  local snapshot_dir="$case_dir/snapshot"
+  local output_dir="$case_dir/output"
+  mkdir -p "$case_dir" "$snapshot_dir"
+  create_packager_source "$source_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$snapshot_dir/cc-switch.db" >/dev/null
+  sqlite3 "$snapshot_dir/cc-switch.db" \
+    "UPDATE providers SET meta='null'
+      WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
+    assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'invalid ModelHub metadata still produced a resource archive'
+}
+
 test_golden_db_builder_creates_minimal_public_snapshot() {
   local case_dir="$TEST_TMP/golden-db-builder"
   local first_db="$case_dir/first.db"
@@ -3138,6 +3181,7 @@ run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_k
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
+run_test "preflight rejects golden database without activity summary guard" test_preflight_rejects_golden_database_without_activity_summary_guard
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
@@ -3191,6 +3235,7 @@ run_test "package rejects nonempty output directory" test_package_rejects_nonemp
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
 run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
+run_test "package rejects custom snapshot with unusable ModelHub metadata" test_package_rejects_custom_snapshot_with_unusable_modelhub_meta
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 

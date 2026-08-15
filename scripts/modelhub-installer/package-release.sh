@@ -208,6 +208,16 @@ copy_allowlisted_resources() {
             '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true')
           )
         WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
+    if [[ "$(/usr/bin/sqlite3 -readonly "$package_root/golden/cc-switch.db" \
+      "SELECT count(*) FROM providers
+        WHERE id='bytedance-modelhub-official-cli'
+          AND app_type='codex'
+          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=$retry_max
+          AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')='true'
+          AND json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')=1;")" != '1' ]]; then
+      die 'failed to normalize ModelHub release metadata'
+      return 1
+    fi
   else
     cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
     cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
