@@ -96,6 +96,23 @@ fn modelhub_retry_429_config<'a>(
         .and_then(|overrides| overrides.retry_429.as_ref())
 }
 
+fn should_block_modelhub_activity_summary(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &Provider,
+    is_copilot: bool,
+    body: &Value,
+) -> bool {
+    should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot)
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+            .and_then(|overrides| overrides.block_codex_activity_summaries)
+            == Some(true)
+        && super::modelhub_compat::is_unsupported_activity_summary_request(body)
+}
+
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -1758,6 +1775,21 @@ impl RequestForwarder {
                     "[{app_type:?}] [ModelHubCompat] filled {changed} empty namespace description(s)"
                 );
             }
+        }
+        if should_block_modelhub_activity_summary(
+            app_type,
+            endpoint,
+            provider,
+            is_copilot,
+            &filtered_body,
+        ) {
+            log::info!(
+                "[{app_type:?}] [ModelHubCompat] blocked unsupported Codex activity summary before upstream"
+            );
+            return Err(ProxyError::InvalidRequest(
+                "CC Switch blocked an unsupported Codex activity summary locally to protect ModelHub quota"
+                    .to_string(),
+            ));
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
@@ -3803,6 +3835,7 @@ mod tests {
     use http::StatusCode;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -3865,6 +3898,7 @@ mod tests {
                     max_delay_ms: 30_000,
                     honor_retry_after: true,
                 }),
+                block_codex_activity_summaries: Some(true),
                 ..LocalProxyRequestOverrides::default()
             }),
             ..crate::provider::ProviderMeta::default()
@@ -3943,6 +3977,61 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn activity_summary_guard_is_scoped_to_modelhub_codex_response_routes() {
+        let provider = provider_with_modelhub_header_adapter();
+        let mut official = provider.clone();
+        official.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        official.category = Some("official".to_string());
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title."
+                }]
+            }]
+        });
+
+        assert!(should_block_modelhub_activity_summary(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            false,
+            &body,
+        ));
+        assert!(!should_block_modelhub_activity_summary(
+            &AppType::Codex,
+            "/models",
+            &provider,
+            false,
+            &body,
+        ));
+        assert!(!should_block_modelhub_activity_summary(
+            &AppType::GrokBuild,
+            "/grokbuild/v1/responses",
+            &provider,
+            false,
+            &body,
+        ));
+        assert!(!should_block_modelhub_activity_summary(
+            &AppType::Codex,
+            "/responses",
+            &official,
+            false,
+            &body,
+        ));
+        assert!(!should_block_modelhub_activity_summary(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            true,
+            &body,
+        ));
     }
 
     #[tokio::test]
@@ -4089,6 +4178,257 @@ mod tests {
         assert!(retry_input
             .iter()
             .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
+    }
+
+    #[tokio::test]
+    async fn modelhub_luna_activity_summary_is_rejected_before_upstream() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nFill the structured summary field."
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        let error = match result {
+            Ok(_) => panic!("activity summary should fail locally"),
+            Err(error) => error,
+        };
+        assert!(matches!(error.error, ProxyError::InvalidRequest(_)));
+        assert_eq!(
+            upstream_requests.load(Ordering::SeqCst),
+            0,
+            "blocked activity summary traffic must not reach ModelHub"
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_activity_summary_guard_can_be_disabled() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides")
+            .block_codex_activity_summaries = Some(false);
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nFill the structured summary field."
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "disabled guard should preserve upstream traffic"
+        );
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn modelhub_activity_summary_guard_preserves_ordinary_luna_requests() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_ordinary_luna",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Implement the requested feature."}]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "ordinary-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "ordinary-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "ordinary Luna traffic should remain supported"
+        );
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
