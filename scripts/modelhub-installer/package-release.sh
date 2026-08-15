@@ -188,6 +188,8 @@ copy_allowlisted_resources() {
     cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
     local retry_max
     local block_activity_summaries
+    local codex_metadata_model
+    local remember_invalid_encrypted_reasoning
     retry_max="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' \
       "$source_dir/templates/modelhub-provider-meta.json")"
     case "$retry_max" in
@@ -200,12 +202,28 @@ copy_allowlisted_resources() {
       die 'ModelHub activity summary guard default must be true'
       return 1
     fi
+    codex_metadata_model="$(/usr/bin/jq -r \
+      '.localProxyRequestOverrides.codexMetadataModel' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    if [[ "$codex_metadata_model" != 'gpt-5.6-sol' ]]; then
+      die 'ModelHub Codex metadata model default must be gpt-5.6-sol'
+      return 1
+    fi
+    remember_invalid_encrypted_reasoning="$(/usr/bin/jq -r \
+      '.localProxyRequestOverrides.rememberInvalidEncryptedReasoning' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    if [[ "$remember_invalid_encrypted_reasoning" != 'true' ]]; then
+      die 'ModelHub encrypted reasoning memory default must be true'
+      return 1
+    fi
     /usr/bin/sqlite3 "$package_root/golden/cc-switch.db" \
       "UPDATE providers
           SET meta=json_set(
             meta,
             '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max,
-            '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true')
+            '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true'),
+            '$.localProxyRequestOverrides.codexMetadataModel', '$codex_metadata_model',
+            '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning', json('true')
           )
         WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
     if [[ "$(/usr/bin/sqlite3 -readonly "$package_root/golden/cc-switch.db" \
@@ -214,7 +232,11 @@ copy_allowlisted_resources() {
           AND app_type='codex'
           AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=$retry_max
           AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')='true'
-          AND json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')=1;")" != '1' ]]; then
+          AND json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')=1
+          AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text'
+          AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='$codex_metadata_model'
+          AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true'
+          AND json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')=1;")" != '1' ]]; then
       die 'failed to normalize ModelHub release metadata'
       return 1
     fi
