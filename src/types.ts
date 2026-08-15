@@ -164,6 +164,7 @@ export interface CodexChatReasoning {
 export type PromptCacheRoutingMode = "auto" | "enabled" | "disabled";
 
 export type CodexSessionHeaderAdapter = "modelhub";
+export type CodexActivitySummaryMode = "passthrough" | "block" | "map";
 
 export interface Retry429Config {
   maxRetries: number;
@@ -177,6 +178,7 @@ export interface LocalProxyRequestOverrides {
   body?: Record<string, unknown>;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
+  codexActivitySummaryMode?: CodexActivitySummaryMode;
   blockCodexActivitySummaries?: boolean;
   codexMetadataModel?: string;
   rememberInvalidEncryptedReasoning?: boolean;

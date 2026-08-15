@@ -4,7 +4,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import type { CodexSessionHeaderAdapter, Retry429Config } from "@/types";
+import type {
+  CodexActivitySummaryMode,
+  CodexSessionHeaderAdapter,
+  Retry429Config,
+} from "@/types";
 import {
   parseBodyOverrideJson,
   parseHeaderOverrideJson,
@@ -18,10 +22,20 @@ interface LocalProxyRequestOverridesFieldProps {
   showModelHubControls?: boolean;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
+  codexMetadataModel?: string;
+  codexActivitySummaryMode?: CodexActivitySummaryMode;
+  rememberInvalidEncryptedReasoning?: boolean;
   onCodexSessionHeaderAdapterChange?: (
     value: CodexSessionHeaderAdapter | undefined,
   ) => void;
   onRetry429Change?: (value: Retry429Config | undefined) => void;
+  onCodexMetadataModelChange?: (value: string | undefined) => void;
+  onCodexActivitySummaryModeChange?: (
+    value: CodexActivitySummaryMode | undefined,
+  ) => void;
+  onRememberInvalidEncryptedReasoningChange?: (
+    value: boolean | undefined,
+  ) => void;
 }
 
 const DEFAULT_RETRY_429: Retry429Config = {
@@ -39,8 +53,14 @@ export function LocalProxyRequestOverridesField({
   showModelHubControls = false,
   codexSessionHeaderAdapter,
   retry429,
+  codexMetadataModel,
+  codexActivitySummaryMode,
+  rememberInvalidEncryptedReasoning,
   onCodexSessionHeaderAdapterChange,
   onRetry429Change,
+  onCodexMetadataModelChange,
+  onCodexActivitySummaryModeChange,
+  onRememberInvalidEncryptedReasoningChange,
 }: LocalProxyRequestOverridesFieldProps) {
   const { t } = useTranslation();
   const headerError = parseHeaderOverrideJson(headersJson).error;
@@ -88,13 +108,137 @@ export function LocalProxyRequestOverridesField({
                 onCodexSessionHeaderAdapterChange?.(
                   checked ? "modelhub" : undefined,
                 );
-                if (!checked) onRetry429Change?.(undefined);
+                if (!checked) {
+                  onRetry429Change?.(undefined);
+                  onCodexMetadataModelChange?.(undefined);
+                  onCodexActivitySummaryModeChange?.(undefined);
+                  onRememberInvalidEncryptedReasoningChange?.(undefined);
+                }
               }}
             />
           </div>
 
           {codexSessionHeaderAdapter === "modelhub" && (
             <div className="space-y-3 border-t border-border-default pt-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="codex-metadata-mapping">
+                    {t("providerForm.codexMetadataMapping", {
+                      defaultValue: "Codex 内部元数据映射",
+                    })}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t("providerForm.codexMetadataMappingHint", {
+                      defaultValue:
+                        "将已识别的标题、描述等内部 Luna 请求映射到指定模型。",
+                    })}
+                  </p>
+                </div>
+                <Switch
+                  id="codex-metadata-mapping"
+                  aria-label={t("providerForm.codexMetadataMapping", {
+                    defaultValue: "Codex 内部元数据映射",
+                  })}
+                  checked={Boolean(codexMetadataModel?.trim())}
+                  onCheckedChange={(checked) => {
+                    onCodexMetadataModelChange?.(
+                      checked
+                        ? codexMetadataModel?.trim() || "gpt-5.6-sol"
+                        : undefined,
+                    );
+                    if (!checked && codexActivitySummaryMode === "map") {
+                      onCodexActivitySummaryModeChange?.("block");
+                    }
+                  }}
+                />
+              </div>
+
+              {codexMetadataModel !== undefined && (
+                <div className="space-y-1">
+                  <Label htmlFor="codex-metadata-model">
+                    {t("providerForm.codexMetadataModel", {
+                      defaultValue: "元数据目标模型",
+                    })}
+                  </Label>
+                  <Input
+                    id="codex-metadata-model"
+                    aria-label={t("providerForm.codexMetadataModel", {
+                      defaultValue: "元数据目标模型",
+                    })}
+                    value={codexMetadataModel}
+                    onChange={(event) =>
+                      onCodexMetadataModelChange?.(event.target.value)
+                    }
+                  />
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <Label htmlFor="codex-activity-summary-mode">
+                  {t("providerForm.codexActivitySummaryMode", {
+                    defaultValue: "活动摘要策略",
+                  })}
+                </Label>
+                <select
+                  id="codex-activity-summary-mode"
+                  aria-label={t("providerForm.codexActivitySummaryMode", {
+                    defaultValue: "活动摘要策略",
+                  })}
+                  className="flex h-9 w-full rounded-md border border-border-default bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:border-border-active"
+                  value={codexActivitySummaryMode ?? "passthrough"}
+                  onChange={(event) => {
+                    const mode = event.target.value as CodexActivitySummaryMode;
+                    if (mode === "map" && !codexMetadataModel?.trim()) {
+                      onCodexMetadataModelChange?.("gpt-5.6-sol");
+                    }
+                    onCodexActivitySummaryModeChange?.(mode);
+                  }}
+                >
+                  <option value="passthrough">
+                    {t("providerForm.codexActivitySummaryPassthrough", {
+                      defaultValue: "原样发送 Luna",
+                    })}
+                  </option>
+                  <option value="block">
+                    {t("providerForm.codexActivitySummaryBlock", {
+                      defaultValue: "本地拦截",
+                    })}
+                  </option>
+                  <option value="map">
+                    {t("providerForm.codexActivitySummaryMap", {
+                      defaultValue: "映射到元数据模型",
+                    })}
+                  </option>
+                </select>
+              </div>
+
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="remember-invalid-encrypted-reasoning">
+                    {t("providerForm.rememberInvalidEncryptedReasoning", {
+                      defaultValue: "记忆加密推理不兼容会话",
+                    })}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t("providerForm.rememberInvalidEncryptedReasoningHint", {
+                      defaultValue:
+                        "首次确认上游无法验证历史加密推理后，同会话后续请求提前清理。",
+                    })}
+                  </p>
+                </div>
+                <Switch
+                  id="remember-invalid-encrypted-reasoning"
+                  aria-label={t(
+                    "providerForm.rememberInvalidEncryptedReasoning",
+                    { defaultValue: "记忆加密推理不兼容会话" },
+                  )}
+                  checked={rememberInvalidEncryptedReasoning === true}
+                  onCheckedChange={(checked) =>
+                    onRememberInvalidEncryptedReasoningChange?.(checked)
+                  }
+                />
+              </div>
+
               <div className="flex items-start justify-between gap-3">
                 <div className="space-y-1">
                   <Label htmlFor="same-provider-retry-429">

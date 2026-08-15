@@ -7,13 +7,14 @@ import {
   parseBodyOverrideJson,
   parseHeaderOverrideJson,
   parseRequestOverrideJson,
+  resolveCodexActivitySummaryMode,
 } from "@/lib/requestOverrides";
 
 describe("requestOverrides", () => {
   const modelhubPolicy = {
     appId: "codex" as const,
     codexSessionHeaderAdapter: "modelhub" as const,
-    blockCodexActivitySummaries: true,
+    codexActivitySummaryMode: "map" as const,
     codexMetadataModel: "gpt-5.6-sol",
     rememberInvalidEncryptedReasoning: true,
     retry429: {
@@ -98,7 +99,7 @@ describe("requestOverrides", () => {
       overrides: {
         body: { max_output_tokens: 128000 },
         codexSessionHeaderAdapter: "modelhub",
-        blockCodexActivitySummaries: true,
+        codexActivitySummaryMode: "map",
         codexMetadataModel: "gpt-5.6-sol",
         rememberInvalidEncryptedReasoning: true,
         retry429: {
@@ -138,6 +139,37 @@ describe("requestOverrides", () => {
       buildLocalProxyRequestOverrides("", '{ "temperature": 0.2 }', {
         ...modelhubPolicy,
         appId: "claude",
+      }),
+    ).toEqual({ overrides: { body: { temperature: 0.2 } } });
+  });
+
+  it("resolves legacy activity-summary blocking without overriding the new mode", () => {
+    expect(
+      resolveCodexActivitySummaryMode({ blockCodexActivitySummaries: true }),
+    ).toBe("block");
+    expect(
+      resolveCodexActivitySummaryMode({
+        blockCodexActivitySummaries: true,
+        codexActivitySummaryMode: "map",
+      }),
+    ).toBe("map");
+    expect(resolveCodexActivitySummaryMode(undefined)).toBe("passthrough");
+  });
+
+  it("requires a metadata target when activity summaries are mapped", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        ...modelhubPolicy,
+        codexMetadataModel: "   ",
+      }).error,
+    ).toBe("Activity-summary mapping requires a metadata model");
+  });
+
+  it("drops every ModelHub-only policy when the session adapter is disabled", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", '{ "temperature": 0.2 }', {
+        ...modelhubPolicy,
+        codexSessionHeaderAdapter: undefined,
       }),
     ).toEqual({ overrides: { body: { temperature: 0.2 } } });
   });
