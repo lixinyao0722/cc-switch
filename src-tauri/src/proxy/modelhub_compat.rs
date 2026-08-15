@@ -47,6 +47,7 @@ pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataR
         .find_map(metadata_kind_from_text)
 }
 
+#[cfg(test)]
 pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
     codex_metadata_request_kind(body) == Some(CodexMetadataRequestKind::ActivitySummary)
 }

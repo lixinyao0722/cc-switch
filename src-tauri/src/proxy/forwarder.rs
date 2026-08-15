@@ -96,6 +96,7 @@ fn modelhub_retry_429_config<'a>(
         .and_then(|overrides| overrides.retry_429.as_ref())
 }
 
+#[cfg(test)]
 fn should_block_modelhub_activity_summary(
     app_type: &AppType,
     endpoint: &str,
