@@ -1931,48 +1931,51 @@ impl RequestForwarder {
         let mut skip_modelhub_429_retry = false;
         if let Some(kind) = super::modelhub_compat::codex_metadata_request_kind(&filtered_body) {
             if kind == super::modelhub_compat::CodexMetadataRequestKind::ActivitySummary {
-                match effective_activity_summary_mode(provider) {
-                    CodexActivitySummaryMode::Block => {
-                        log::info!(
+                if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+                    match effective_activity_summary_mode(provider) {
+                        CodexActivitySummaryMode::Block => {
+                            log::info!(
                             "[{app_type:?}] [ModelHubCompat] blocked unsupported Codex activity summary before upstream"
                         );
-                        return Err(ProxyError::InvalidRequest(
+                            return Err(ProxyError::InvalidRequest(
                             "CC Switch blocked an unsupported Codex activity summary locally to protect ModelHub quota"
                                 .to_string(),
                         ));
-                    }
-                    CodexActivitySummaryMode::Map => {
-                        skip_modelhub_429_retry = true;
-                        let model =
-                            modelhub_codex_metadata_model(app_type, endpoint, provider, is_copilot)
-                                .ok_or_else(|| {
-                                    ProxyError::ConfigError(
-                                "ModelHub activity-summary mapping requires codexMetadataModel"
-                                    .to_string(),
+                        }
+                        CodexActivitySummaryMode::Map => {
+                            skip_modelhub_429_retry = true;
+                            let model = modelhub_codex_metadata_model(
+                                app_type, endpoint, provider, is_copilot,
                             )
-                                })?;
-                        if self
-                            .is_duplicate_modelhub_activity_summary(
-                                provider,
-                                headers,
-                                &filtered_body,
-                            )
-                            .await
-                        {
-                            log::info!(
+                            .ok_or_else(|| {
+                                ProxyError::ConfigError(
+                                    "ModelHub activity-summary mapping requires codexMetadataModel"
+                                        .to_string(),
+                                )
+                            })?;
+                            if self
+                                .is_duplicate_modelhub_activity_summary(
+                                    provider,
+                                    headers,
+                                    &filtered_body,
+                                )
+                                .await
+                            {
+                                log::info!(
                                 "[{app_type:?}] [ModelHubCompat] suppressed duplicate Codex activity summary within short window"
                             );
-                            return Err(ProxyError::InvalidRequest(
-                                "CC Switch suppressed a duplicate Codex activity summary"
-                                    .to_string(),
-                            ));
-                        }
-                        filtered_body["model"] = Value::String(model.to_string());
-                        log::info!(
+                                return Err(ProxyError::InvalidRequest(
+                                    "CC Switch suppressed a duplicate Codex activity summary"
+                                        .to_string(),
+                                ));
+                            }
+                            filtered_body["model"] = Value::String(model.to_string());
+                            log::info!(
                             "[{app_type:?}] [ModelHubCompat] mapped Codex metadata request kind={kind:?} to configured model"
                         );
+                        }
+                        CodexActivitySummaryMode::Passthrough => {}
                     }
-                    CodexActivitySummaryMode::Passthrough => {}
                 }
             } else if let Some(model) =
                 modelhub_codex_metadata_model(app_type, endpoint, provider, is_copilot)
@@ -5064,6 +5067,80 @@ mod tests {
             result.is_ok(),
             "disabled guard should preserve upstream traffic"
         );
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn activity_summary_policy_does_not_affect_non_modelhub_provider() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let address = listener.local_addr().expect("mock upstream address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock upstream");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("overrides")
+            .codex_session_header_adapter = None;
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: keep upstream behavior"
+                }]
+            }]
+        });
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_ok());
         assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
     }
 

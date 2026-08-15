@@ -10,7 +10,6 @@ export interface LocalProxyPolicyOptions {
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
   codexActivitySummaryMode?: CodexActivitySummaryMode;
-  blockCodexActivitySummaries?: boolean;
   codexMetadataModel?: string;
   rememberInvalidEncryptedReasoning?: boolean;
 }
