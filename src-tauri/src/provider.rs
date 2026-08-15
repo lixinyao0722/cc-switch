@@ -441,6 +441,11 @@ pub struct LocalProxyRequestOverrides {
     pub block_codex_activity_summaries: Option<bool>,
     #[serde(rename = "codexMetadataModel", skip_serializing_if = "Option::is_none")]
     pub codex_metadata_model: Option<String>,
+    #[serde(
+        rename = "rememberInvalidEncryptedReasoning",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub remember_invalid_encrypted_reasoning: Option<bool>,
 }
 
 impl LocalProxyRequestOverrides {
@@ -451,6 +456,7 @@ impl LocalProxyRequestOverrides {
             && self.retry_429.is_none()
             && self.block_codex_activity_summaries.is_none()
             && self.codex_metadata_model.is_none()
+            && self.remember_invalid_encrypted_reasoning.is_none()
     }
 }
 
@@ -1130,6 +1136,7 @@ mod tests {
             }),
             block_codex_activity_summaries: Some(true),
             codex_metadata_model: Some("gpt-5.6-sol".to_string()),
+            remember_invalid_encrypted_reasoning: Some(true),
         };
         let meta = ProviderMeta {
             local_proxy_request_overrides: Some(overrides.clone()),
@@ -1143,6 +1150,7 @@ mod tests {
                 "codexSessionHeaderAdapter": "modelhub",
                 "blockCodexActivitySummaries": true,
                 "codexMetadataModel": "gpt-5.6-sol",
+                "rememberInvalidEncryptedReasoning": true,
                 "body": { "max_output_tokens": 128000 },
                 "retry429": {
                     "maxRetries": 10,

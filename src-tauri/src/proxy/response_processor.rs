@@ -1244,6 +1244,9 @@ mod tests {
             provider_router: Arc::new(ProviderRouter::new(db.clone())),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            modelhub_invalid_encrypted_reasoning_sessions: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }

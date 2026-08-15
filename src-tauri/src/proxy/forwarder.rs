@@ -211,6 +211,7 @@ pub struct RequestForwarder {
     current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
+    modelhub_invalid_encrypted_reasoning_sessions: Arc<RwLock<std::collections::HashSet<String>>>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -293,6 +294,9 @@ impl RequestForwarder {
         current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
         gemini_shadow: Arc<GeminiShadowStore>,
         codex_chat_history: Arc<CodexChatHistoryStore>,
+        modelhub_invalid_encrypted_reasoning_sessions: Arc<
+            RwLock<std::collections::HashSet<String>>,
+        >,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -314,6 +318,7 @@ impl RequestForwarder {
             current_providers,
             gemini_shadow,
             codex_chat_history,
+            modelhub_invalid_encrypted_reasoning_sessions,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -328,6 +333,39 @@ impl RequestForwarder {
             ),
             max_attempts,
         }
+    }
+
+    fn modelhub_invalid_encrypted_reasoning_session_key(
+        &self,
+        app_type: &AppType,
+        endpoint: &str,
+        provider: &Provider,
+    ) -> Option<String> {
+        if !self.session_client_provided
+            || self.session_id.trim().is_empty()
+            || !is_modelhub_codex_responses_route(app_type, endpoint, provider)
+            || provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+                .and_then(|overrides| overrides.remember_invalid_encrypted_reasoning)
+                != Some(true)
+        {
+            return None;
+        }
+        Some(format!("{}\0{}", provider.id, self.session_id))
+    }
+
+    async fn remember_modelhub_invalid_encrypted_reasoning_session(&self, key: String) {
+        const MAX_KEYS: usize = 2048;
+        let mut sessions = self
+            .modelhub_invalid_encrypted_reasoning_sessions
+            .write()
+            .await;
+        if sessions.len() >= MAX_KEYS && !sessions.contains(&key) {
+            sessions.clear();
+        }
+        sessions.insert(key);
     }
 
     async fn record_success_result(
@@ -553,6 +591,25 @@ impl RequestForwarder {
                 } else {
                     body.clone()
                 };
+            let modelhub_invalid_encrypted_reasoning_session_key =
+                self.modelhub_invalid_encrypted_reasoning_session_key(app_type, endpoint, provider);
+            if let Some(key) = modelhub_invalid_encrypted_reasoning_session_key.as_deref() {
+                if self
+                    .modelhub_invalid_encrypted_reasoning_sessions
+                    .read()
+                    .await
+                    .contains(key)
+                {
+                    let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
+                        &mut provider_body,
+                    );
+                    if removed > 0 {
+                        log::info!(
+                            "[{app_type_str}] [ModelHubCompat] pre-cleaned {removed} encrypted reasoning item(s) for a learned incompatible session"
+                        );
+                    }
+                }
+            }
 
             attempted_providers += 1;
 
@@ -649,6 +706,12 @@ impl RequestForwarder {
                             &mut provider_body,
                         );
                         if removed > 0 {
+                            if let Some(key) =
+                                modelhub_invalid_encrypted_reasoning_session_key.clone()
+                            {
+                                self.remember_modelhub_invalid_encrypted_reasoning_session(key)
+                                    .await;
+                            }
                             log::warn!(
                                 "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after removing {removed} encrypted reasoning item(s)",
                                 provider.id
@@ -3901,6 +3964,9 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            modelhub_invalid_encrypted_reasoning_sessions: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -3930,6 +3996,7 @@ mod tests {
                 }),
                 block_codex_activity_summaries: Some(true),
                 codex_metadata_model: Some("gpt-5.6-sol".to_string()),
+                remember_invalid_encrypted_reasoning: Some(true),
                 ..LocalProxyRequestOverrides::default()
             }),
             ..crate::provider::ProviderMeta::default()
@@ -4074,12 +4141,20 @@ mod tests {
             post(move |Json(body): Json<Value>| {
                 let received_bodies = received_bodies_for_route.clone();
                 async move {
-                    let attempt = {
+                    let has_encrypted_reasoning = body
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .is_some_and(|input| {
+                            input.iter().any(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("reasoning")
+                                    && item.get("encrypted_content").is_some()
+                            })
+                        });
+                    {
                         let mut bodies = received_bodies.lock().expect("request body lock");
                         bodies.push(body);
-                        bodies.len()
-                    };
-                    if attempt == 1 {
+                    }
+                    if has_encrypted_reasoning {
                         (
                             StatusCode::BAD_REQUEST,
                             Json(json!({
@@ -4168,9 +4243,23 @@ mod tests {
                 "child-thread".parse().unwrap(),
             ),
         ]);
-        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "child-session".to_string();
+        forwarder.session_client_provided = true;
 
-        let result = forwarder
+        let first_result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body.clone(),
+                headers.clone(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await;
+
+        let second_result = forwarder
             .forward_with_retry(
                 &AppType::Codex,
                 http::Method::POST,
@@ -4183,16 +4272,28 @@ mod tests {
             .await;
 
         server.abort();
-        let result = match result {
+        let first_result = match first_result {
             Ok(result) => result,
             Err(error) => panic!(
                 "sanitized retry should recover the fork request: {}",
                 error.error
             ),
         };
-        assert_eq!(result.response.status(), StatusCode::OK);
+        let second_result = match second_result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "learned session cleanup should preserve later requests: {}",
+                error.error
+            ),
+        };
+        assert_eq!(first_result.response.status(), StatusCode::OK);
+        assert_eq!(second_result.response.status(), StatusCode::OK);
         let bodies = received_bodies.lock().expect("request body lock");
-        assert_eq!(bodies.len(), 2, "exactly one sanitized retry is expected");
+        assert_eq!(
+            bodies.len(),
+            3,
+            "the learned second request must skip the failing encrypted attempt"
+        );
         assert_eq!(
             bodies[0]["input"]
                 .as_array()
@@ -4209,6 +4310,98 @@ mod tests {
         assert!(retry_input
             .iter()
             .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
+        assert!(bodies[2]["input"]
+            .as_array()
+            .expect("learned request input")
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
+    }
+
+    #[tokio::test]
+    async fn modelhub_encrypted_reasoning_learning_is_scoped_and_configurable() {
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "session-a".to_string();
+        forwarder.session_client_provided = true;
+        let provider = provider_with_modelhub_header_adapter();
+
+        let key_a = forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &provider,
+            )
+            .expect("enabled ModelHub session key");
+
+        let mut other_provider = provider.clone();
+        other_provider.id = "provider-b".to_string();
+        let provider_b_key = forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &other_provider,
+            )
+            .expect("second provider session key");
+        assert_ne!(key_a, provider_b_key);
+
+        forwarder.session_id = "session-b".to_string();
+        let session_b_key = forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &provider,
+            )
+            .expect("second session key");
+        assert_ne!(key_a, session_b_key);
+
+        forwarder.session_client_provided = false;
+        assert!(forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &provider,
+            )
+            .is_none());
+
+        forwarder.session_client_provided = true;
+        let mut disabled_provider = provider;
+        disabled_provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides")
+            .remember_invalid_encrypted_reasoning = Some(false);
+        assert!(forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &disabled_provider,
+            )
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn modelhub_encrypted_reasoning_learning_cache_is_bounded() {
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        {
+            let mut sessions = forwarder
+                .modelhub_invalid_encrypted_reasoning_sessions
+                .write()
+                .await;
+            sessions.extend((0..2048).map(|index| format!("provider\0session-{index}")));
+        }
+
+        forwarder
+            .remember_modelhub_invalid_encrypted_reasoning_session(
+                "current-provider\0current-session".to_string(),
+            )
+            .await;
+
+        let sessions = forwarder
+            .modelhub_invalid_encrypted_reasoning_sessions
+            .read()
+            .await;
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.contains("current-provider\0current-session"));
     }
 
     #[tokio::test]
