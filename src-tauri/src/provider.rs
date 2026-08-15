@@ -434,6 +434,11 @@ pub struct LocalProxyRequestOverrides {
     pub codex_session_header_adapter: Option<CodexSessionHeaderAdapter>,
     #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
     pub retry_429: Option<Retry429Config>,
+    #[serde(
+        rename = "blockCodexActivitySummaries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub block_codex_activity_summaries: Option<bool>,
 }
 
 impl LocalProxyRequestOverrides {
@@ -442,6 +447,7 @@ impl LocalProxyRequestOverrides {
             && self.body.is_none()
             && self.codex_session_header_adapter.is_none()
             && self.retry_429.is_none()
+            && self.block_codex_activity_summaries.is_none()
     }
 }
 
@@ -1119,6 +1125,7 @@ mod tests {
                 max_delay_ms: 30_000,
                 honor_retry_after: true,
             }),
+            block_codex_activity_summaries: Some(true),
         };
         let meta = ProviderMeta {
             local_proxy_request_overrides: Some(overrides.clone()),
@@ -1130,6 +1137,7 @@ mod tests {
             value["localProxyRequestOverrides"],
             json!({
                 "codexSessionHeaderAdapter": "modelhub",
+                "blockCodexActivitySummaries": true,
                 "body": { "max_output_tokens": 128000 },
                 "retry429": {
                     "maxRetries": 10,

@@ -5,6 +5,44 @@ use serde_json::Map;
 use serde_json::Value;
 
 const MAX_CODEX_IDENTITY_BYTES: usize = 256;
+const CODEX_ACTIVITY_SUMMARY_MODEL: &str = "gpt-5.6-luna";
+const CODEX_ACTIVITY_SUMMARY_PROMPT: &str =
+    "You write the one-line activity update displayed beneath an existing Codex task title.";
+
+pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
+    if body.get("model").and_then(Value::as_str) != Some(CODEX_ACTIVITY_SUMMARY_MODEL) {
+        return false;
+    }
+
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| input.iter().any(is_activity_summary_user_message))
+}
+
+fn is_activity_summary_user_message(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_str) != Some("message")
+        || item.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return false;
+    }
+
+    let Some(content) = item.get("content") else {
+        return false;
+    };
+    if let Some(text) = content.as_str() {
+        return text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT);
+    }
+
+    content.as_array().is_some_and(|blocks| {
+        blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("input_text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT))
+        })
+    })
+}
 
 pub(crate) fn normalize_namespace_descriptions(body: &mut Value) -> usize {
     let mut changed = 0;
@@ -162,14 +200,98 @@ fn parse_extra_object(headers: &HeaderMap) -> Result<Map<String, Value>, ProxyEr
 mod tests {
     use super::{
         apply_modelhub_codex_headers, is_invalid_encrypted_content_error,
-        normalize_namespace_descriptions, remove_encrypted_reasoning_items,
+        is_unsupported_activity_summary_request, normalize_namespace_descriptions,
+        remove_encrypted_reasoning_items,
     };
     use crate::proxy::ProxyError;
     use http::HeaderMap;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     const SESSION_ID: &str = "67e55044-10b1-426f-9247-bb680e5fe0c7";
     const THREAD_ID: &str = "77e55044-10b1-426f-9247-bb680e5fe0c8";
+    const ACTIVITY_SUMMARY_PROMPT: &str =
+        "You write the one-line activity update displayed beneath an existing Codex task title.";
+
+    fn activity_summary_body(model: &str, content: Value) -> Value {
+        json!({
+            "model": model,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": content
+            }]
+        })
+    }
+
+    #[test]
+    fn luna_activity_summary_request_is_unsupported() {
+        let body = activity_summary_body(
+            "gpt-5.6-luna",
+            json!([{
+                "type": "input_text",
+                "text": format!("{ACTIVITY_SUMMARY_PROMPT}\nFill the structured summary field.")
+            }]),
+        );
+
+        assert!(is_unsupported_activity_summary_request(&body));
+    }
+
+    #[test]
+    fn luna_activity_summary_string_content_is_unsupported() {
+        let body = activity_summary_body(
+            "gpt-5.6-luna",
+            Value::String(format!("{ACTIVITY_SUMMARY_PROMPT}\nLatest message: hello")),
+        );
+
+        assert!(is_unsupported_activity_summary_request(&body));
+    }
+
+    #[test]
+    fn ordinary_luna_request_remains_supported() {
+        let body = activity_summary_body(
+            "gpt-5.6-luna",
+            json!([{"type": "input_text", "text": "Implement the requested feature."}]),
+        );
+
+        assert!(!is_unsupported_activity_summary_request(&body));
+    }
+
+    #[test]
+    fn sol_activity_summary_request_remains_supported() {
+        let body = activity_summary_body(
+            "gpt-5.6-sol",
+            json!([{"type": "input_text", "text": ACTIVITY_SUMMARY_PROMPT}]),
+        );
+
+        assert!(!is_unsupported_activity_summary_request(&body));
+    }
+
+    #[test]
+    fn similar_luna_prompt_without_exact_prefix_remains_supported() {
+        let body = activity_summary_body(
+            "gpt-5.6-luna",
+            json!([{
+                "type": "input_text",
+                "text": "Please explain the one-line activity update beneath a task title."
+            }]),
+        );
+
+        assert!(!is_unsupported_activity_summary_request(&body));
+    }
+
+    #[test]
+    fn activity_summary_text_outside_user_message_remains_supported() {
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": ACTIVITY_SUMMARY_PROMPT}]
+            }]
+        });
+
+        assert!(!is_unsupported_activity_summary_request(&body));
+    }
 
     fn headers(entries: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
