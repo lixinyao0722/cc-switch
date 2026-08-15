@@ -1054,6 +1054,15 @@ function ProviderFormFull({
                 appId: "codex",
                 codexSessionHeaderAdapter,
                 retry429,
+                blockCodexActivitySummaries:
+                  initialData?.meta?.localProxyRequestOverrides
+                    ?.blockCodexActivitySummaries,
+                codexMetadataModel:
+                  initialData?.meta?.localProxyRequestOverrides
+                    ?.codexMetadataModel,
+                rememberInvalidEncryptedReasoning:
+                  initialData?.meta?.localProxyRequestOverrides
+                    ?.rememberInvalidEncryptedReasoning,
               }
             : { appId: "claude" },
         )

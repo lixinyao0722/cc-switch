@@ -5,43 +5,82 @@ use serde_json::Map;
 use serde_json::Value;
 
 const MAX_CODEX_IDENTITY_BYTES: usize = 256;
-const CODEX_ACTIVITY_SUMMARY_MODEL: &str = "gpt-5.6-luna";
+const CODEX_METADATA_MODEL: &str = "gpt-5.6-luna";
 const CODEX_ACTIVITY_SUMMARY_PROMPT: &str =
     "You write the one-line activity update displayed beneath an existing Codex task title.";
+const CODEX_NEW_THREAD_TITLE_PROMPT: &str =
+    "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.";
+const CODEX_EXISTING_THREAD_TITLE_PROMPT: &str =
+    "You are a helpful assistant. You will be presented with the most recent messages in an existing conversation, and your job is to provide a short title for the task represented by that conversation.";
+const CODEX_THREAD_DESCRIPTION_PROMPT: &str = "You are in a fork of an existing Codex thread.";
+const CODEX_TITLE_RECONSIDERATION_PROMPT: &str =
+    "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
+const CODEX_VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
 
-pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
-    if body.get("model").and_then(Value::as_str) != Some(CODEX_ACTIVITY_SUMMARY_MODEL) {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexMetadataRequestKind {
+    ActivitySummary,
+    ThreadTitle,
+    ThreadDescription,
+    ThreadTitleReconsideration,
+}
+
+pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataRequestKind> {
+    if body.get("model").and_then(Value::as_str) != Some(CODEX_METADATA_MODEL) {
+        return None;
     }
 
     body.get("input")
-        .and_then(Value::as_array)
-        .is_some_and(|input| input.iter().any(is_activity_summary_user_message))
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(user_message_texts)
+        .flatten()
+        .find_map(metadata_kind_from_text)
 }
 
-fn is_activity_summary_user_message(item: &Value) -> bool {
+pub(crate) fn is_unsupported_activity_summary_request(body: &Value) -> bool {
+    codex_metadata_request_kind(body) == Some(CodexMetadataRequestKind::ActivitySummary)
+}
+
+fn user_message_texts(item: &Value) -> Option<Vec<&str>> {
     if item.get("type").and_then(Value::as_str) != Some("message")
         || item.get("role").and_then(Value::as_str) != Some("user")
     {
-        return false;
+        return None;
     }
 
-    let Some(content) = item.get("content") else {
-        return false;
-    };
+    let content = item.get("content")?;
     if let Some(text) = content.as_str() {
-        return text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT);
+        return Some(vec![text]);
     }
 
-    content.as_array().is_some_and(|blocks| {
-        blocks.iter().any(|block| {
-            block.get("type").and_then(Value::as_str) == Some("input_text")
-                && block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT))
-        })
-    })
+    Some(
+        content
+            .as_array()?
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("input_text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect(),
+    )
+}
+
+fn metadata_kind_from_text(text: &str) -> Option<CodexMetadataRequestKind> {
+    if text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT) {
+        return Some(CodexMetadataRequestKind::ActivitySummary);
+    }
+    if text.starts_with(CODEX_TITLE_RECONSIDERATION_PROMPT) {
+        return Some(CodexMetadataRequestKind::ThreadTitleReconsideration);
+    }
+    if text.starts_with(CODEX_NEW_THREAD_TITLE_PROMPT)
+        || text.starts_with(CODEX_EXISTING_THREAD_TITLE_PROMPT)
+        || text.starts_with(CODEX_VOICE_TITLE_PROMPT)
+    {
+        return Some(CodexMetadataRequestKind::ThreadTitle);
+    }
+    if text.starts_with(CODEX_THREAD_DESCRIPTION_PROMPT) {
+        return Some(CodexMetadataRequestKind::ThreadDescription);
+    }
+    None
 }
 
 pub(crate) fn normalize_namespace_descriptions(body: &mut Value) -> usize {
@@ -199,9 +238,10 @@ fn parse_extra_object(headers: &HeaderMap) -> Result<Map<String, Value>, ProxyEr
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_modelhub_codex_headers, is_invalid_encrypted_content_error,
-        is_unsupported_activity_summary_request, normalize_namespace_descriptions,
-        remove_encrypted_reasoning_items,
+        apply_modelhub_codex_headers, codex_metadata_request_kind,
+        is_invalid_encrypted_content_error, is_unsupported_activity_summary_request,
+        normalize_namespace_descriptions, remove_encrypted_reasoning_items,
+        CodexMetadataRequestKind,
     };
     use crate::proxy::ProxyError;
     use http::HeaderMap;
@@ -211,6 +251,14 @@ mod tests {
     const THREAD_ID: &str = "77e55044-10b1-426f-9247-bb680e5fe0c8";
     const ACTIVITY_SUMMARY_PROMPT: &str =
         "You write the one-line activity update displayed beneath an existing Codex task title.";
+    const NEW_THREAD_TITLE_PROMPT: &str =
+        "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.";
+    const EXISTING_THREAD_TITLE_PROMPT: &str =
+        "You are a helpful assistant. You will be presented with the most recent messages in an existing conversation, and your job is to provide a short title for the task represented by that conversation.";
+    const THREAD_DESCRIPTION_PROMPT: &str = "You are in a fork of an existing Codex thread.";
+    const TITLE_RECONSIDERATION_PROMPT: &str =
+        "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
+    const VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
 
     fn activity_summary_body(model: &str, content: Value) -> Value {
         json!({
@@ -221,6 +269,71 @@ mod tests {
                 "content": content
             }]
         })
+    }
+
+    fn metadata_body(model: &str, role: &str, text: &str) -> Value {
+        json!({
+            "model": model,
+            "input": [{
+                "type": "message",
+                "role": role,
+                "content": [{"type": "input_text", "text": text}]
+            }]
+        })
+    }
+
+    #[test]
+    fn codex_internal_metadata_prompts_are_classified_by_kind() {
+        let cases = [
+            (
+                NEW_THREAD_TITLE_PROMPT,
+                CodexMetadataRequestKind::ThreadTitle,
+            ),
+            (
+                EXISTING_THREAD_TITLE_PROMPT,
+                CodexMetadataRequestKind::ThreadTitle,
+            ),
+            (
+                THREAD_DESCRIPTION_PROMPT,
+                CodexMetadataRequestKind::ThreadDescription,
+            ),
+            (
+                TITLE_RECONSIDERATION_PROMPT,
+                CodexMetadataRequestKind::ThreadTitleReconsideration,
+            ),
+            (VOICE_TITLE_PROMPT, CodexMetadataRequestKind::ThreadTitle),
+            (
+                ACTIVITY_SUMMARY_PROMPT,
+                CodexMetadataRequestKind::ActivitySummary,
+            ),
+        ];
+
+        for (prompt, expected) in cases {
+            let body = metadata_body(
+                "gpt-5.6-luna",
+                "user",
+                &format!("{prompt}\nFill the structured field."),
+            );
+            assert_eq!(codex_metadata_request_kind(&body), Some(expected));
+        }
+    }
+
+    #[test]
+    fn codex_metadata_classifier_preserves_non_internal_requests() {
+        let cases = [
+            metadata_body("gpt-5.6-luna", "user", "Implement the requested feature."),
+            metadata_body("gpt-5.6-sol", "user", NEW_THREAD_TITLE_PROMPT),
+            metadata_body(
+                "gpt-5.6-luna",
+                "user",
+                "Please explain how Codex generates a concise UI title.",
+            ),
+            metadata_body("gpt-5.6-luna", "developer", NEW_THREAD_TITLE_PROMPT),
+        ];
+
+        for body in cases {
+            assert_eq!(codex_metadata_request_kind(&body), None);
+        }
     }
 
     #[test]

@@ -271,6 +271,7 @@ impl RequestContext {
             state.current_providers.clone(),
             state.gemini_shadow.clone(),
             state.codex_chat_history.clone(),
+            state.modelhub_invalid_encrypted_reasoning_sessions.clone(),
             state.failover_manager.clone(),
             state.app_handle.clone(),
             self.current_provider_id.clone(),

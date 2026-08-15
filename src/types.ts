@@ -177,6 +177,9 @@ export interface LocalProxyRequestOverrides {
   body?: Record<string, unknown>;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
+  blockCodexActivitySummaries?: boolean;
+  codexMetadataModel?: string;
+  rememberInvalidEncryptedReasoning?: boolean;
 }
 
 // 供应商元数据（字段名与后端一致，保持 snake_case）
