@@ -17,10 +17,12 @@ const CODEX_THREAD_DESCRIPTION_PROMPT: &str = "You are in a fork of an existing 
 const CODEX_TITLE_RECONSIDERATION_PROMPT: &str =
     "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
 const CODEX_VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
+const CODEX_SKILL_USAGE_MARKER: &str = "### How to use skills";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexMetadataRequestKind {
     ActivitySummary,
+    ActivitySummarySkillSelection,
     ThreadTitle,
     ThreadDescription,
     ThreadTitleReconsideration,
@@ -39,12 +41,40 @@ pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataR
         return None;
     }
 
-    body.get("input")
-        .and_then(Value::as_array)?
+    let input = body.get("input").and_then(Value::as_array)?;
+    if let Some(kind) = input
         .iter()
         .filter_map(user_message_texts)
         .flatten()
         .find_map(metadata_kind_from_text)
+    {
+        return Some(kind);
+    }
+
+    is_activity_summary_skill_selection(body, input)
+        .then_some(CodexMetadataRequestKind::ActivitySummarySkillSelection)
+}
+
+fn is_activity_summary_skill_selection(body: &Value, input: &[Value]) -> bool {
+    if input.len() != 3
+        || (body.pointer("/text/format").is_none() && body.get("response_format").is_none())
+    {
+        return false;
+    }
+
+    let user_messages = input
+        .iter()
+        .filter_map(user_message_texts)
+        .collect::<Vec<_>>();
+    if user_messages.len() != 1 {
+        return false;
+    }
+
+    user_messages[0].iter().any(|text| {
+        text.contains(CODEX_SKILL_USAGE_MARKER)
+            && text.contains(CODEX_ACTIVITY_SUMMARY_PROMPT)
+            && !text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT)
+    })
 }
 
 #[cfg(test)]
@@ -354,6 +384,7 @@ mod tests {
     const TITLE_RECONSIDERATION_PROMPT: &str =
         "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
     const VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
+    const SKILL_USAGE_MARKER: &str = "### How to use skills";
 
     fn activity_summary_body(model: &str, content: Value) -> Value {
         json!({
@@ -374,6 +405,43 @@ mod tests {
                 "role": role,
                 "content": [{"type": "input_text", "text": text}]
             }]
+        })
+    }
+
+    fn activity_summary_skill_selection_body(user_text: &str) -> Value {
+        json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Select relevant capabilities."}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Catalog loaded."}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_text}]
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "skill_selection",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "selected": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["selected"],
+                        "additionalProperties": false
+                    }
+                }
+            }
         })
     }
 
@@ -410,6 +478,49 @@ mod tests {
                 &format!("{prompt}\nFill the structured field."),
             );
             assert_eq!(codex_metadata_request_kind(&body), Some(expected));
+        }
+    }
+
+    #[test]
+    fn activity_summary_skill_selection_is_classified_independently() {
+        let body = activity_summary_skill_selection_body(&format!(
+            "{SKILL_USAGE_MARKER}\nSelect only relevant skills for this request:\n{ACTIVITY_SUMMARY_PROMPT}\nLatest message: verify R12"
+        ));
+
+        assert_eq!(
+            codex_metadata_request_kind(&body),
+            Some(CodexMetadataRequestKind::ActivitySummarySkillSelection)
+        );
+    }
+
+    #[test]
+    fn activity_summary_skill_selection_requires_exact_structure_and_markers() {
+        let ordinary_structured = activity_summary_skill_selection_body(
+            "Select only relevant skills for an ordinary user task.",
+        );
+        let quoted_prompt = activity_summary_skill_selection_body(&format!(
+            "Please explain this quoted prompt:\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        let similar_prompt = activity_summary_skill_selection_body(&format!(
+            "{SKILL_USAGE_MARKER}\nSelect skills for an activity update shown below a task title."
+        ));
+        let mut wrong_shape = activity_summary_skill_selection_body(&format!(
+            "{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        wrong_shape["input"].as_array_mut().unwrap().pop();
+        let mut sol = activity_summary_skill_selection_body(&format!(
+            "{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        sol["model"] = Value::String("gpt-5.6-sol".to_string());
+
+        for body in [
+            ordinary_structured,
+            quoted_prompt,
+            similar_prompt,
+            wrong_shape,
+            sol,
+        ] {
+            assert_eq!(codex_metadata_request_kind(&body), None);
         }
     }
 
