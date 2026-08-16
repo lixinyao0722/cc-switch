@@ -669,12 +669,13 @@ impl RequestForwarder {
                     .await
                     .contains(key)
                 {
-                    let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
-                        &mut provider_body,
-                    );
-                    if removed > 0 {
+                    let sanitization =
+                        super::modelhub_compat::sanitize_encrypted_reasoning(&mut provider_body);
+                    if sanitization.changed() {
                         log::info!(
-                            "[{app_type_str}] [ModelHubCompat] pre-cleaned {removed} encrypted reasoning item(s) for a learned incompatible session"
+                            "[{app_type_str}] [ModelHubCompat] pre-cleaned encrypted reasoning for a learned incompatible session (removed_fields={}, removed_empty_items={})",
+                            sanitization.removed_encrypted_fields,
+                            sanitization.removed_empty_items
                         );
                     }
                 }
@@ -771,10 +772,10 @@ impl RequestForwarder {
                     if should_apply_modelhub_header_adapter(app_type, endpoint, provider, false)
                         && super::modelhub_compat::is_invalid_encrypted_content_error(&e)
                     {
-                        let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
+                        let sanitization = super::modelhub_compat::sanitize_encrypted_reasoning(
                             &mut provider_body,
                         );
-                        if removed > 0 {
+                        if sanitization.changed() {
                             if let Some(key) =
                                 modelhub_invalid_encrypted_reasoning_session_key.clone()
                             {
@@ -782,8 +783,10 @@ impl RequestForwarder {
                                     .await;
                             }
                             log::warn!(
-                                "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after removing {removed} encrypted reasoning item(s)",
-                                provider.id
+                                "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after sanitizing reasoning (removed_fields={}, removed_empty_items={})",
+                                provider.id,
+                                sanitization.removed_encrypted_fields,
+                                sanitization.removed_empty_items
                             );
 
                             match self
@@ -4416,19 +4419,27 @@ mod tests {
             6
         );
         let retry_input = bodies[1]["input"].as_array().expect("retry input");
-        assert_eq!(retry_input.len(), 4);
-        assert_eq!(retry_input[0]["content"][0]["text"], "parent answer");
-        assert_eq!(retry_input[1]["call_id"], "call_parent");
-        assert_eq!(retry_input[2]["output"], "file contents");
-        assert_eq!(retry_input[3]["content"][0]["text"], "continue in the fork");
+        assert_eq!(retry_input.len(), 5);
+        assert_eq!(retry_input[0]["id"], "rs_parent_1");
+        assert_eq!(retry_input[0]["summary"][0]["text"], "parent reasoning");
+        assert!(retry_input[0].get("encrypted_content").is_none());
+        assert_eq!(retry_input[1]["content"][0]["text"], "parent answer");
+        assert_eq!(retry_input[2]["call_id"], "call_parent");
+        assert_eq!(retry_input[3]["output"], "file contents");
+        assert_eq!(retry_input[4]["content"][0]["text"], "continue in the fork");
         assert!(retry_input
             .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
-        assert!(bodies[2]["input"]
-            .as_array()
-            .expect("learned request input")
-            .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
+            .all(|item| item.get("encrypted_content").is_none()));
+        assert_eq!(bodies[2]["input"], bodies[1]["input"]);
+        assert_eq!(
+            bodies[2]["input"]
+                .as_array()
+                .expect("learned request input")
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

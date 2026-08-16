@@ -311,17 +311,66 @@ pub(crate) fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
         })
 }
 
-pub(crate) fn remove_encrypted_reasoning_items(body: &mut Value) -> usize {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ReasoningSanitization {
+    pub removed_encrypted_fields: usize,
+    pub removed_empty_items: usize,
+}
+
+impl ReasoningSanitization {
+    pub(crate) fn changed(self) -> bool {
+        self.removed_encrypted_fields > 0 || self.removed_empty_items > 0
+    }
+}
+
+pub(crate) fn sanitize_encrypted_reasoning(body: &mut Value) -> ReasoningSanitization {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
-        return 0;
+        return ReasoningSanitization::default();
     };
 
-    let before = input.len();
-    input.retain(|item| {
-        item.get("type").and_then(Value::as_str) != Some("reasoning")
-            || item.get("encrypted_content").is_none()
-    });
-    before.saturating_sub(input.len())
+    let mut result = ReasoningSanitization::default();
+    let mut retained = Vec::with_capacity(input.len());
+    for mut item in input.drain(..) {
+        let is_encrypted_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning")
+            && item.get("encrypted_content").is_some();
+        if !is_encrypted_reasoning {
+            retained.push(item);
+            continue;
+        }
+
+        if item
+            .as_object_mut()
+            .and_then(|object| object.remove("encrypted_content"))
+            .is_some()
+        {
+            result.removed_encrypted_fields += 1;
+        }
+        if reasoning_has_visible_text(&item) {
+            retained.push(item);
+        } else {
+            result.removed_empty_items += 1;
+        }
+    }
+    *input = retained;
+    result
+}
+
+fn reasoning_has_visible_text(item: &Value) -> bool {
+    ["summary", "content"].into_iter().any(|field| {
+        item.get(field)
+            .is_some_and(reasoning_text_container_has_visible_text)
+    })
+}
+
+fn reasoning_text_container_has_visible_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items.iter().any(reasoning_text_container_has_visible_text),
+        Value::Object(object) => object
+            .get("text")
+            .is_some_and(reasoning_text_container_has_visible_text),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 fn required_identity(
@@ -365,7 +414,7 @@ mod tests {
     use super::{
         apply_modelhub_codex_headers, codex_metadata_request_kind,
         is_invalid_encrypted_content_error, is_unsupported_activity_summary_request,
-        normalize_namespace_descriptions, remove_encrypted_reasoning_items,
+        normalize_namespace_descriptions, sanitize_encrypted_reasoning,
         unclassified_codex_luna_observation, CodexMetadataRequestKind,
     };
     use crate::proxy::ProxyError;
@@ -833,18 +882,39 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_reasoning_cleanup_preserves_visible_and_unencrypted_items() {
+    fn encrypted_reasoning_sanitizer_preserves_plaintext_and_removes_empty_items() {
         let mut body = json!({
             "input": [
                 {
                     "type": "reasoning",
-                    "id": "rs_parent",
-                    "encrypted_content": "parent-ciphertext"
+                    "id": "rs_summary",
+                    "summary": [{"type": "summary_text", "text": "visible summary"}],
+                    "encrypted_content": "summary-ciphertext",
+                    "internal_chat_message_metadata_passthrough": {"source": "test"}
                 },
                 {
                     "type": "reasoning",
-                    "id": "rs_summary_only",
-                    "summary": [{"type": "summary_text", "text": "visible summary"}]
+                    "id": "rs_content",
+                    "content": [{"type": "reasoning_text", "text": "visible content"}],
+                    "encrypted_content": "content-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_whitespace",
+                    "summary": [{"type": "summary_text", "text": "   "}],
+                    "encrypted_content": "whitespace-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_empty",
+                    "summary": [],
+                    "content": [],
+                    "encrypted_content": "empty-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_unencrypted",
+                    "summary": [{"type": "summary_text", "text": "already visible"}]
                 },
                 {
                     "type": "message",
@@ -854,10 +924,23 @@ mod tests {
             ]
         });
 
-        assert_eq!(remove_encrypted_reasoning_items(&mut body), 1);
-        assert_eq!(body["input"].as_array().unwrap().len(), 2);
-        assert_eq!(body["input"][0]["id"], "rs_summary_only");
-        assert_eq!(body["input"][1]["content"][0]["text"], "continue");
+        let result = sanitize_encrypted_reasoning(&mut body);
+
+        assert_eq!(result.removed_encrypted_fields, 4);
+        assert_eq!(result.removed_empty_items, 2);
+        assert_eq!(body["input"].as_array().unwrap().len(), 4);
+        assert_eq!(body["input"][0]["id"], "rs_summary");
+        assert_eq!(body["input"][0]["summary"][0]["text"], "visible summary");
+        assert_eq!(
+            body["input"][0]["internal_chat_message_metadata_passthrough"]["source"],
+            "test"
+        );
+        assert!(body["input"][0].get("encrypted_content").is_none());
+        assert_eq!(body["input"][1]["id"], "rs_content");
+        assert_eq!(body["input"][1]["content"][0]["text"], "visible content");
+        assert!(body["input"][1].get("encrypted_content").is_none());
+        assert_eq!(body["input"][2]["id"], "rs_unencrypted");
+        assert_eq!(body["input"][3]["content"][0]["text"], "continue");
     }
 
     #[test]
