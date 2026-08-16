@@ -17,15 +17,15 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R12 基于 CC Switch 3.19.2，继续默认把活动摘要精确映射到 Sol，并补齐活动摘要 helper thread 内的动态 Skill 选择请求；所有明确 metadata/helper 请求均不做 429 重试。历史 encrypted reasoning 只删除不可验证的密文字段，保留可用明文 summary/content。主请求的 429 策略收紧为一次恢复尝试，并通过 Provider 共享冷却避免并发 retry storm。一键安装入口保持不变：
+R13 基于 CC Switch 3.19.2，将符合 Codex 稳定协议的动态 Skill 选择请求统一映射到 Sol，覆盖主任务、标题和活动摘要 helper，同时不泛化改写普通 Luna 请求；所有明确 metadata/helper 请求均不做 429 重试。R12 的 encrypted reasoning 明文保留和 Provider 共享 429 冷却继续保持不变。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R12 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、确认或输入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R13 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
 
-安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。R12 将这次输入作为唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次，防止启动同步把 Provider 恢复为旧值。校验只比较一致性，不会把密钥写入进度提示、日志或命令输出；任何写入或校验失败都会触发自动回滚。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
+如果安装器进程已继承非空 `MODELHUB_AK`，R13 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
 
 整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖；Release 不包含 AK/OAuth、日志、请求/会话/用量记录或备份。本机绝对路径在包内统一为 `__USER_HOME__`，安装时替换为新电脑真实用户目录。
 
@@ -86,13 +86,13 @@ Provider 元数据承接全部 CC Switch ModelHub 兼容策略。这些字段在
 }
 ```
 
-`codexActivitySummaryMode` 只作用于 Codex Desktop 固定的 `gpt-5.6-luna` 活动摘要提示词，可选 `passthrough`、`block`、`map`。R12 默认 `map`，复用 `codexMetadataModel` 生成侧边栏摘要；`block` 在本地返回不可重试 400；`passthrough` 保留 Luna，适用于拥有 Luna 权限的 Provider。完全相同的 Provider/thread/摘要内容在 5 秒内只允许一次上游请求，映射摘要及其 Skill 选择辅助请求遇到 429 都只访问上游一次。
+`codexActivitySummaryMode` 只作用于 Codex Desktop 固定的 `gpt-5.6-luna` 活动摘要提示词，可选 `passthrough`、`block`、`map`。R13 默认 `map`，复用 `codexMetadataModel` 生成侧边栏摘要；`block` 在本地返回不可重试 400；`passthrough` 保留 Luna，适用于拥有 Luna 权限的 Provider。完全相同的 Provider/thread/摘要内容在 5 秒内只允许一次上游请求，映射摘要及动态 Skill 选择辅助请求遇到 429 都只访问上游一次。
 
-`codexMetadataModel` 改写 Codex Desktop 固定的任务标题、任务描述、标题重考虑、语音标题和活动摘要 Skill 选择请求，也是活动摘要 `map` 模式的目标模型。普通 Luna 请求不匹配精确分类，仍按原路由转发。App 中关闭“内部元数据映射”会清除该字段；活动摘要处于 `map` 时必须提供非空目标模型。
+`codexMetadataModel` 改写 Codex Desktop 固定的任务标题、任务描述、标题重考虑、语音标题，以及使用 `skill_selection` schema、developer/assistant/user 三段角色结构和完整有序 Skill 指令标记的动态 Skill 选择请求，也是活动摘要 `map` 模式的目标模型。主任务、标题和活动摘要 helper 都使用这一协议。普通 Luna、错误 schema、角色乱序或缺少稳定标记的结构化请求不匹配精确分类，仍按原路由转发。App 中关闭“内部元数据映射”会清除该字段；活动摘要处于 `map` 时必须提供非空目标模型。
 
 `rememberInvalidEncryptedReasoning` 在 ModelHub 精确返回 `invalid_encrypted_content` 后，按 Provider + 客户端会话在进程内记录不兼容状态。同会话后续请求会在第一次发送前删除 reasoning item 的 `encrypted_content`；含非空明文 `summary/content` 的 item 继续保留，只有密文且没有可用明文的 item 才整项删除。状态不写数据库，CC Switch 重启后自动清空；将该字段改为 `false` 可关闭学习与预清理。
 
-作用域内仍使用 Luna、但未命中上述已知提示词的请求不会被 R12 自动映射。CC Switch 只记录一次脱敏的短指纹、input/user 数量和 schema 标志；日志不记录提示词、session/thread ID 或凭据。
+作用域内仍使用 Luna、但未命中上述精确提示词或 Skill 选择协议的请求不会被 R13 自动映射。CC Switch 只记录一次脱敏的短指纹、input/user 数量和 schema 标志；日志不记录提示词、session/thread ID 或凭据。发布验收要求一个完整 Codex 回合中的有效 Skill 选择均映射到 Sol，未分类 Luna 与 ModelHub Luna 401 均为 0。
 
 Codex 的 `request_max_retries` 负责 5xx、超时和传输错误，`stream_max_retries` 负责 SSE 中断重连；OpenAI 官方 schema 不包含 `retry_429`。ModelHub HTTP 429 由 CC Switch 独立处理：主请求最多额外尝试一次，优先遵循 `Retry-After` 且最长等待 30 秒。任一主请求收到 429 后会建立 Provider 共享冷却，冷却结束时只放行一个 recovery probe；probe 仍为 429 时延长冷却，避免每个并发请求分别启动完整重试链。
 
