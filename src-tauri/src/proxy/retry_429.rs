@@ -4,13 +4,138 @@ use crate::proxy::ProxyError;
 use chrono::DateTime;
 use chrono::Utc;
 use http::HeaderValue;
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 const MAX_SAME_PROVIDER_RETRIES: u8 = 10;
 const MIN_BASE_DELAY_MS: u64 = 100;
 const MAX_DELAY_MS: u64 = 60_000;
+const MAX_COOLDOWN_KEYS: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CooldownPermit {
+    Open,
+    Probe,
+}
+
+#[derive(Debug)]
+struct ProviderCooldownState {
+    until: Instant,
+    probe_in_flight: bool,
+    notify: Arc<Notify>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Provider429Cooldown {
+    states: Mutex<HashMap<String, ProviderCooldownState>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Provider429Scope {
+    cooldown: Arc<Provider429Cooldown>,
+    key: String,
+}
+
+impl Provider429Scope {
+    pub(crate) fn new(cooldown: Arc<Provider429Cooldown>, key: impl Into<String>) -> Self {
+        Self {
+            cooldown,
+            key: key.into(),
+        }
+    }
+}
+
+impl Provider429Cooldown {
+    pub(crate) async fn acquire(&self, key: &str) -> CooldownPermit {
+        loop {
+            let wait = {
+                let mut states = self.states.lock().await;
+                let now = Instant::now();
+                states.retain(|state_key, state| {
+                    state_key == key || state.probe_in_flight || state.until > now
+                });
+                let Some(state) = states.get_mut(key) else {
+                    return CooldownPermit::Open;
+                };
+                let notified = state.notify.clone().notified_owned();
+                if state.until > now {
+                    Some((Some(state.until), notified))
+                } else if state.probe_in_flight {
+                    Some((None, notified))
+                } else {
+                    state.probe_in_flight = true;
+                    return CooldownPermit::Probe;
+                }
+            };
+
+            let Some((deadline, notified)) = wait else {
+                continue;
+            };
+            if let Some(deadline) = deadline {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => {}
+                    _ = notified => {}
+                }
+            } else {
+                notified.await;
+            }
+        }
+    }
+
+    pub(crate) async fn record_429(&self, key: &str, delay: Duration) {
+        let now = Instant::now();
+        let until = now + delay;
+        let (notify, evicted_notify) = {
+            let mut states = self.states.lock().await;
+            states.retain(|_, state| state.probe_in_flight || state.until > now);
+            let evicted_notify = if states.len() >= MAX_COOLDOWN_KEYS && !states.contains_key(key) {
+                if let Some(oldest_key) = states
+                    .iter()
+                    .min_by_key(|(_, state)| state.until)
+                    .map(|(key, _)| key.clone())
+                {
+                    states.remove(&oldest_key).map(|state| state.notify)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let state = states
+                .entry(key.to_string())
+                .or_insert_with(|| ProviderCooldownState {
+                    until,
+                    probe_in_flight: false,
+                    notify: Arc::new(Notify::new()),
+                });
+            state.until = state.until.max(until);
+            state.probe_in_flight = false;
+            (state.notify.clone(), evicted_notify)
+        };
+        if let Some(evicted_notify) = evicted_notify {
+            evicted_notify.notify_waiters();
+        }
+        notify.notify_waiters();
+    }
+
+    pub(crate) async fn finish_probe(&self, key: &str) {
+        let notify = self
+            .states
+            .lock()
+            .await
+            .remove(key)
+            .map(|state| state.notify);
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
+    }
+}
 
 #[cfg(test)]
 fn retry_delay(
@@ -62,6 +187,7 @@ pub(crate) fn retry_delay_with_jitter(
 
 pub(crate) async fn send_with_retry_429<F, Fut>(
     config: Option<&Retry429Config>,
+    scope: Option<Provider429Scope>,
     mut send: F,
 ) -> Result<ProxyResponse, ProxyError>
 where
@@ -75,24 +201,53 @@ where
     let mut retry_number = 0_u8;
 
     loop {
-        let response = send().await?;
-        if response.status() != http::StatusCode::TOO_MANY_REQUESTS || retry_number >= max_retries {
+        let permit = if let Some(scope) = scope.as_ref() {
+            scope.cooldown.acquire(&scope.key).await
+        } else {
+            CooldownPermit::Open
+        };
+        let response = match send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if permit == CooldownPermit::Probe {
+                    if let Some(scope) = scope.as_ref() {
+                        scope.cooldown.finish_probe(&scope.key).await;
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if response.status() != http::StatusCode::TOO_MANY_REQUESTS {
+            if permit == CooldownPermit::Probe {
+                if let Some(scope) = scope.as_ref() {
+                    scope.cooldown.finish_probe(&scope.key).await;
+                }
+            }
             return Ok(response);
         }
 
-        retry_number = retry_number.saturating_add(1);
         let retry_after = response.headers().get(http::header::RETRY_AFTER).cloned();
+        let next_retry_number = retry_number.saturating_add(1);
+        let delay =
+            randomized_retry_delay(config, next_retry_number, retry_after.as_ref(), Utc::now());
+        if let Some(scope) = scope.as_ref() {
+            scope.cooldown.record_429(&scope.key, delay).await;
+        }
+        if retry_number >= max_retries {
+            return Ok(response);
+        }
+
+        retry_number = next_retry_number;
         if let Err(error) = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await {
             log::debug!(
                 "[Retry429] failed to drain intermediate 429 response before retry: {error}"
             );
         }
-        let delay = randomized_retry_delay(config, retry_number, retry_after.as_ref(), Utc::now());
         log::warn!(
             "[Retry429] retrying same provider after HTTP 429 ({retry_number}/{max_retries}, delay_ms={})",
             delay.as_millis()
         );
-        if !delay.is_zero() {
+        if scope.is_none() && !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
     }
@@ -115,6 +270,9 @@ mod tests {
     use super::retry_delay;
     use super::retry_delay_with_jitter;
     use super::send_with_retry_429;
+    use super::CooldownPermit;
+    use super::Provider429Cooldown;
+    use super::Provider429Scope;
     use crate::provider::Retry429Config;
     use crate::proxy::hyper_client::ProxyResponse;
     use bytes::Bytes;
@@ -124,6 +282,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn config() -> Retry429Config {
         Retry429Config {
@@ -252,7 +411,7 @@ mod tests {
             ("thread_id".parse().unwrap(), "thread-1".parse().unwrap()),
         ]);
 
-        let response = send_with_retry_429(Some(&config()), || {
+        let response = send_with_retry_429(Some(&config()), None, || {
             let attempts = attempts_for_send.clone();
             let body = request_body.clone();
             let headers = request_headers.clone();
@@ -297,7 +456,7 @@ mod tests {
             ..config()
         };
 
-        let response = send_with_retry_429(Some(&config), || {
+        let response = send_with_retry_429(Some(&config), None, || {
             let attempts = attempts_for_send.clone();
             async move {
                 *attempts.lock().unwrap() += 1;
@@ -315,5 +474,137 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(*attempts.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn shared_cooldown_allows_only_one_recovery_probe() {
+        let cooldown = Arc::new(Provider429Cooldown::default());
+        cooldown
+            .record_429("codex\0modelhub", Duration::from_millis(100))
+            .await;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let cooldown = cooldown.clone();
+            let sender = sender.clone();
+            tasks.push(tokio::spawn(async move {
+                let permit = cooldown.acquire("codex\0modelhub").await;
+                sender.send(permit).unwrap();
+            }));
+        }
+        drop(sender);
+
+        let first = tokio::time::timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .expect("one recovery probe after cooldown")
+            .expect("permit");
+        assert_eq!(first, CooldownPermit::Probe);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        cooldown.finish_probe("codex\0modelhub").await;
+        let second = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("second waiter released")
+            .expect("permit");
+        let third = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("third waiter released")
+            .expect("permit");
+        assert_eq!(second, CooldownPermit::Open);
+        assert_eq!(third, CooldownPermit::Open);
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cooldown_extends_when_recovery_probe_hits_429() {
+        let cooldown = Arc::new(Provider429Cooldown::default());
+        cooldown
+            .record_429("codex\0modelhub", Duration::from_millis(50))
+            .await;
+        let first = cooldown.clone();
+        let first_task = tokio::spawn(async move { first.acquire("codex\0modelhub").await });
+        let second = cooldown.clone();
+        let second_task = tokio::spawn(async move { second.acquire("codex\0modelhub").await });
+
+        let first_permit = tokio::time::timeout(Duration::from_millis(150), first_task)
+            .await
+            .expect("first probe ready")
+            .unwrap();
+        assert_eq!(first_permit, CooldownPermit::Probe);
+
+        cooldown
+            .record_429("codex\0modelhub", Duration::from_millis(100))
+            .await;
+        let mut second_task = second_task;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), &mut second_task)
+                .await
+                .is_err()
+        );
+        let second_permit = tokio::time::timeout(Duration::from_millis(150), second_task)
+            .await
+            .expect("extended cooldown probe ready")
+            .unwrap();
+        assert_eq!(second_permit, CooldownPermit::Probe);
+        cooldown.finish_probe("codex\0modelhub").await;
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_uses_one_shared_recovery_probe() {
+        let cooldown = Arc::new(Provider429Cooldown::default());
+        let key = "codex\0modelhub";
+        cooldown.record_429(key, Duration::from_millis(50)).await;
+        let scope = Provider429Scope::new(cooldown, key);
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = Retry429Config {
+            max_retries: 1,
+            base_delay_ms: 100,
+            max_delay_ms: 100,
+            honor_retry_after: true,
+        };
+
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let scope = scope.clone();
+            let attempts = attempts.clone();
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let config = config.clone();
+            tasks.push(tokio::spawn(async move {
+                send_with_retry_429(Some(&config), Some(scope), || {
+                    let attempts = attempts.clone();
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    async move {
+                        attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(ProxyResponse::buffered(
+                            StatusCode::OK,
+                            HeaderMap::new(),
+                            Bytes::from_static(b"ok"),
+                        ))
+                    }
+                })
+                .await
+                .unwrap()
+            }));
+        }
+
+        for task in tasks {
+            assert_eq!(task.await.unwrap().status(), StatusCode::OK);
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

@@ -62,8 +62,8 @@ describe("LocalProxyRequestOverridesField", () => {
       }),
     );
     expect(onRetry429Change).toHaveBeenCalledWith({
-      maxRetries: 10,
-      baseDelayMs: 1000,
+      maxRetries: 1,
+      baseDelayMs: 2000,
       maxDelayMs: 30000,
       honorRetryAfter: true,
     });

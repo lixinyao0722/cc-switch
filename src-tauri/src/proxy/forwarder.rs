@@ -96,6 +96,25 @@ fn modelhub_retry_429_config<'a>(
         .and_then(|overrides| overrides.retry_429.as_ref())
 }
 
+fn modelhub_retry_429_scope(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &Provider,
+    is_copilot: bool,
+    skip_modelhub_429_retry: bool,
+    cooldown: Arc<super::retry_429::Provider429Cooldown>,
+) -> Option<super::retry_429::Provider429Scope> {
+    if skip_modelhub_429_retry
+        || modelhub_retry_429_config(app_type, endpoint, provider, is_copilot).is_none()
+    {
+        return None;
+    }
+    Some(super::retry_429::Provider429Scope::new(
+        cooldown,
+        format!("{app_type:?}\0{}", provider.id),
+    ))
+}
+
 #[cfg(test)]
 fn should_block_modelhub_activity_summary(
     app_type: &AppType,
@@ -226,6 +245,7 @@ pub struct RequestForwarder {
     modelhub_activity_summary_dedup:
         Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
     modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
+    modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -315,6 +335,7 @@ impl RequestForwarder {
             RwLock<std::collections::HashMap<String, std::time::Instant>>,
         >,
         modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
+        modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -339,6 +360,7 @@ impl RequestForwarder {
             modelhub_invalid_encrypted_reasoning_sessions,
             modelhub_activity_summary_dedup,
             modelhub_unclassified_luna_fingerprints,
+            modelhub_429_cooldown,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -2633,7 +2655,18 @@ impl RequestForwarder {
         } else {
             modelhub_retry_429_config(app_type, endpoint, provider, is_copilot)
         };
-        let response = super::retry_429::send_with_retry_429(retry_429_config, || {
+        let retry_429_scope = modelhub_retry_429_scope(
+            app_type,
+            endpoint,
+            provider,
+            is_copilot,
+            skip_modelhub_429_retry,
+            self.modelhub_429_cooldown.clone(),
+        );
+        let response = super::retry_429::send_with_retry_429(
+            retry_429_config,
+            retry_429_scope,
+            || {
             let method = method.clone();
             let url = url.clone();
             let ordered_headers = ordered_headers.clone();
@@ -2701,7 +2734,8 @@ impl RequestForwarder {
                     .await
                 }
             }
-        })
+            },
+        )
         .await?;
 
         // 检查响应状态
@@ -4084,6 +4118,7 @@ mod tests {
             modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_429_cooldown: Arc::new(super::super::retry_429::Provider429Cooldown::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -4190,6 +4225,49 @@ mod tests {
             "/grokbuild/v1/responses",
             &provider,
             false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn shared_429_cooldown_scope_is_limited_to_retryable_modelhub_main_requests() {
+        let provider = provider_with_modelhub_header_adapter();
+        let cooldown = Arc::new(super::super::retry_429::Provider429Cooldown::default());
+
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            false,
+            false,
+            cooldown.clone(),
+        )
+        .is_some());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            false,
+            true,
+            cooldown.clone(),
+        )
+        .is_none());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/models",
+            &provider,
+            false,
+            false,
+            cooldown.clone(),
+        )
+        .is_none());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            true,
+            false,
+            cooldown,
         )
         .is_none());
     }

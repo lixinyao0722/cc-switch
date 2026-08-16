@@ -1251,6 +1251,7 @@ mod tests {
             modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_429_cooldown: Arc::new(crate::proxy::retry_429::Provider429Cooldown::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }
