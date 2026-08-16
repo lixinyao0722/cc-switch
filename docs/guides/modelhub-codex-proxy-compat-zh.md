@@ -17,15 +17,15 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R10 基于 CC Switch 3.19.2，在 R9 活动摘要保护之上，新增 Codex 内部标题/描述元数据到 Sol 的精确映射，以及 ModelHub 加密推理不兼容会话的进程内记忆；一键安装入口保持不变，继续使用以下命令：
+R11 基于 CC Switch 3.19.2，将 R10 的 ModelHub 兼容策略开放为 Provider 配置，并默认把活动摘要精确映射到 Sol；相同摘要短窗去重，摘要 429 不重试，避免 UI 辅助流量放大主任务限流。一键安装入口保持不变，继续使用以下命令：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R10 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、写入 AK、启动和验真进度；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`。R11 使用清洗后的本机完整配置，包括 Provider、MCP、Prompt、模型价格、技能仓库和偏好，但排除日志、请求/会话/用量记录、备份和凭据。
 
-安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。R10 将这次输入作为唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次，防止启动同步把 Provider 恢复为旧值。校验只比较一致性，不会把密钥写入进度提示、日志或命令输出；任何写入或校验失败都会触发自动回滚。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
+安装器会显示中文提示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`。R11 将这次输入作为唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次，防止启动同步把 Provider 恢复为旧值。校验只比较一致性，不会把密钥写入进度提示、日志或命令输出；任何写入或校验失败都会触发自动回滚。写入 `/Applications` 时可能另行提示 Mac 管理员密码。
 
 整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖；Release 不包含 AK/OAuth、日志、请求/会话/用量记录或备份。本机绝对路径在包内统一为 `__USER_HOME__`，安装时替换为新电脑真实用户目录。
 
@@ -65,20 +65,20 @@ stream_max_retries = 10
 retry_429 = true
 ```
 
-Provider 元数据还承接 ModelHub 会话适配和同 Provider 429 重试：
+Provider 元数据承接全部 CC Switch ModelHub 兼容策略。这些字段在 CC Switch App 的 Codex Provider 高级配置中管理，不写入 Codex `config.toml`：
 
 ```json
 {
   "localProxyRequestOverrides": {
     "codexSessionHeaderAdapter": "modelhub",
-    "blockCodexActivitySummaries": true,
+    "codexActivitySummaryMode": "map",
     "codexMetadataModel": "gpt-5.6-sol",
     "rememberInvalidEncryptedReasoning": true,
     "body": {
       "max_output_tokens": 128000
     },
     "retry429": {
-    "maxRetries": 3,
+      "maxRetries": 3,
       "baseDelayMs": 1000,
       "maxDelayMs": 30000,
       "honorRetryAfter": true
@@ -87,11 +87,13 @@ Provider 元数据还承接 ModelHub 会话适配和同 Provider 429 重试：
 }
 ```
 
-`blockCodexActivitySummaries` 只拦截 Codex Desktop 固定使用 `gpt-5.6-luna` 生成任务列表活动摘要的内部请求。当前 ModelHub AK 没有 Luna 权限时，Codex 会把一次摘要失败重放成多次真实上游请求；R9 在 CC Switch 本地返回不可重试的 HTTP 400，不访问 ModelHub，也不把流量改投 Sol。用户主动发起的普通 Luna 请求不匹配固定摘要提示词，仍按原路由转发。将该字段改为 `false` 可恢复活动摘要转发。
+`codexActivitySummaryMode` 只作用于 Codex Desktop 固定的 `gpt-5.6-luna` 活动摘要提示词，可选 `passthrough`、`block`、`map`。R11 默认 `map`，复用 `codexMetadataModel` 生成侧边栏摘要；`block` 在本地返回不可重试 400；`passthrough` 保留 Luna，适用于拥有 Luna 权限的 Provider。完全相同的 Provider/thread/摘要内容在 5 秒内只允许一次上游请求，映射摘要遇到 429 直接失败，不使用主请求的三次退避。
 
-`codexMetadataModel` 只改写 Codex Desktop 固定的任务标题、任务描述、标题重考虑和语音标题提示词。R10 将这些内部 Luna 请求改投 Sol，以保留 UI 元数据并避免无权限 Luna 401 重放；普通 Luna 请求和活动摘要不受该映射影响。删除该字段可关闭映射。
+`codexMetadataModel` 改写 Codex Desktop 固定的任务标题、任务描述、标题重考虑和语音标题提示词，也是活动摘要 `map` 模式的目标模型。普通 Luna 请求不匹配固定提示词，仍按原路由转发。App 中关闭“内部元数据映射”会清除该字段；活动摘要处于 `map` 时必须提供非空目标模型。
 
 `rememberInvalidEncryptedReasoning` 在 ModelHub 精确返回 `invalid_encrypted_content` 后，按 Provider + 客户端会话在进程内记录不兼容状态。同会话后续请求会在第一次发送前删除历史加密 reasoning items，避免再次先失败再整包重发。状态不写数据库，CC Switch 重启后自动清空；将该字段改为 `false` 可关闭学习与预清理。
+
+作用域内仍使用 Luna、但未命中上述已知提示词的请求不会被 R11 自动映射。CC Switch 只记录一次脱敏的短指纹、input/user 数量和 schema 标志，用于后续锁定线程协调辅助请求；日志不记录提示词、session/thread ID 或凭据。
 
 ## Header 映射
 
@@ -202,7 +204,8 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 1. Provider 元数据类型；
 2. ModelHub session header adapter；
 3. 同 Provider 429 retry loop；
-4. Provider UI 与四语文案。
+4. 活动摘要模式、去重与未分类 Luna 观测；
+5. Provider UI 与四语文案。
 
 在重新验证完成前，不使用上游 updater 覆盖定制 App。
 

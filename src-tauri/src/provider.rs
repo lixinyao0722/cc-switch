@@ -410,6 +410,15 @@ pub enum CodexSessionHeaderAdapter {
     Modelhub,
 }
 
+/// Provider-scoped handling for Codex Desktop activity-summary requests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexActivitySummaryMode {
+    Passthrough,
+    Block,
+    Map,
+}
+
 /// Same-provider retry policy for upstream HTTP 429 responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -435,6 +444,11 @@ pub struct LocalProxyRequestOverrides {
     #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
     pub retry_429: Option<Retry429Config>,
     #[serde(
+        rename = "codexActivitySummaryMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_activity_summary_mode: Option<CodexActivitySummaryMode>,
+    #[serde(
         rename = "blockCodexActivitySummaries",
         skip_serializing_if = "Option::is_none"
     )]
@@ -454,6 +468,7 @@ impl LocalProxyRequestOverrides {
             && self.body.is_none()
             && self.codex_session_header_adapter.is_none()
             && self.retry_429.is_none()
+            && self.codex_activity_summary_mode.is_none()
             && self.block_codex_activity_summaries.is_none()
             && self.codex_metadata_model.is_none()
             && self.remember_invalid_encrypted_reasoning.is_none()
@@ -1037,9 +1052,9 @@ pub struct OpenCodeModelLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeModelConfig, CodexModelConfig, CodexSessionHeaderAdapter, GeminiModelConfig,
-        LocalProxyRequestOverrides, OpenCodeProviderConfig, Provider, ProviderManager,
-        ProviderMeta, Retry429Config, UniversalProvider,
+        ClaudeModelConfig, CodexActivitySummaryMode, CodexModelConfig, CodexSessionHeaderAdapter,
+        GeminiModelConfig, LocalProxyRequestOverrides, OpenCodeProviderConfig, Provider,
+        ProviderManager, ProviderMeta, Retry429Config, UniversalProvider,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1135,6 +1150,7 @@ mod tests {
                 honor_retry_after: true,
             }),
             block_codex_activity_summaries: Some(true),
+            codex_activity_summary_mode: Some(CodexActivitySummaryMode::Map),
             codex_metadata_model: Some("gpt-5.6-sol".to_string()),
             remember_invalid_encrypted_reasoning: Some(true),
         };
@@ -1149,6 +1165,7 @@ mod tests {
             json!({
                 "codexSessionHeaderAdapter": "modelhub",
                 "blockCodexActivitySummaries": true,
+                "codexActivitySummaryMode": "map",
                 "codexMetadataModel": "gpt-5.6-sol",
                 "rememberInvalidEncryptedReasoning": true,
                 "body": { "max_output_tokens": 128000 },

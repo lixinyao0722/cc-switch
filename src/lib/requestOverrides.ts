@@ -1,4 +1,5 @@
 import type {
+  CodexActivitySummaryMode,
   CodexSessionHeaderAdapter,
   LocalProxyRequestOverrides,
   Retry429Config,
@@ -8,7 +9,7 @@ export interface LocalProxyPolicyOptions {
   appId: "claude" | "codex";
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
-  blockCodexActivitySummaries?: boolean;
+  codexActivitySummaryMode?: CodexActivitySummaryMode;
   codexMetadataModel?: string;
   rememberInvalidEncryptedReasoning?: boolean;
 }
@@ -21,6 +22,15 @@ export interface RequestOverrideJsonResult {
 export interface HeaderOverrideValidationResult {
   headers?: Record<string, string>;
   error?: string;
+}
+
+export function resolveCodexActivitySummaryMode(
+  overrides: LocalProxyRequestOverrides | undefined,
+): CodexActivitySummaryMode {
+  if (overrides?.codexActivitySummaryMode) {
+    return overrides.codexActivitySummaryMode;
+  }
+  return overrides?.blockCodexActivitySummaries ? "block" : "passthrough";
 }
 
 // RFC 9110 HTTP field-name token. Keep this aligned with Rust's
@@ -192,32 +202,29 @@ export function buildLocalProxyRequestOverrides(
     overrides.body = bodyResult.value;
   }
   if (options?.appId === "codex") {
-    if (options.retry429 && !options.codexSessionHeaderAdapter) {
-      return {
-        error: "HTTP 429 retry requires a Codex session header adapter",
-      };
-    }
     if (options.codexSessionHeaderAdapter) {
       overrides.codexSessionHeaderAdapter = options.codexSessionHeaderAdapter;
-    }
-    if (options.retry429) {
-      const retryError = validateRetry429(options.retry429);
-      if (retryError) {
-        return { error: retryError };
+      if (options.retry429) {
+        const retryError = validateRetry429(options.retry429);
+        if (retryError) {
+          return { error: retryError };
+        }
+        overrides.retry429 = { ...options.retry429 };
       }
-      overrides.retry429 = { ...options.retry429 };
-    }
-    if (options.blockCodexActivitySummaries !== undefined) {
-      overrides.blockCodexActivitySummaries =
-        options.blockCodexActivitySummaries;
-    }
-    const codexMetadataModel = options.codexMetadataModel?.trim();
-    if (codexMetadataModel) {
-      overrides.codexMetadataModel = codexMetadataModel;
-    }
-    if (options.rememberInvalidEncryptedReasoning !== undefined) {
-      overrides.rememberInvalidEncryptedReasoning =
-        options.rememberInvalidEncryptedReasoning;
+      if (options.codexActivitySummaryMode) {
+        overrides.codexActivitySummaryMode = options.codexActivitySummaryMode;
+      }
+      const codexMetadataModel = options.codexMetadataModel?.trim();
+      if (options.codexActivitySummaryMode === "map" && !codexMetadataModel) {
+        return { error: "Activity-summary mapping requires a metadata model" };
+      }
+      if (codexMetadataModel) {
+        overrides.codexMetadataModel = codexMetadataModel;
+      }
+      if (options.rememberInvalidEncryptedReasoning !== undefined) {
+        overrides.rememberInvalidEncryptedReasoning =
+          options.rememberInvalidEncryptedReasoning;
+      }
     }
   }
 

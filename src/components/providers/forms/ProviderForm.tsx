@@ -11,6 +11,7 @@ import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import {
   buildLocalProxyRequestOverrides,
   formatRequestOverrideObject,
+  resolveCodexActivitySummaryMode,
 } from "@/lib/requestOverrides";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import { useDarkMode } from "@/hooks/useDarkMode";
@@ -19,6 +20,7 @@ import type {
   ProviderMeta,
   ClaudeApiFormat,
   CodexApiFormat,
+  CodexActivitySummaryMode,
   CodexCatalogModel,
   CodexChatReasoning,
   CodexSessionHeaderAdapter,
@@ -388,6 +390,26 @@ function ProviderFormFull({
         ? initialData?.meta?.localProxyRequestOverrides?.retry429
         : undefined,
     );
+    setCodexMetadataModel(
+      appId === "codex"
+        ? initialData?.meta?.localProxyRequestOverrides?.codexMetadataModel
+        : undefined,
+    );
+    setCodexActivitySummaryMode(
+      appId === "codex" &&
+        initialData?.meta?.localProxyRequestOverrides
+          ?.codexSessionHeaderAdapter === "modelhub"
+        ? resolveCodexActivitySummaryMode(
+            initialData?.meta?.localProxyRequestOverrides,
+          )
+        : undefined,
+    );
+    setRememberInvalidEncryptedReasoning(
+      appId === "codex"
+        ? initialData?.meta?.localProxyRequestOverrides
+            ?.rememberInvalidEncryptedReasoning
+        : undefined,
+    );
   }, [appId, initialData, supportsFullUrl]);
 
   const defaultValues: ProviderFormData = useMemo(
@@ -590,6 +612,33 @@ function ProviderFormFull({
   const [retry429, setRetry429] = useState<Retry429Config | undefined>(() =>
     appId === "codex"
       ? initialData?.meta?.localProxyRequestOverrides?.retry429
+      : undefined,
+  );
+  const [codexMetadataModel, setCodexMetadataModel] = useState<
+    string | undefined
+  >(() =>
+    appId === "codex"
+      ? initialData?.meta?.localProxyRequestOverrides?.codexMetadataModel
+      : undefined,
+  );
+  const [codexActivitySummaryMode, setCodexActivitySummaryMode] = useState<
+    CodexActivitySummaryMode | undefined
+  >(() =>
+    appId === "codex" &&
+    initialData?.meta?.localProxyRequestOverrides?.codexSessionHeaderAdapter ===
+      "modelhub"
+      ? resolveCodexActivitySummaryMode(
+          initialData?.meta?.localProxyRequestOverrides,
+        )
+      : undefined,
+  );
+  const [
+    rememberInvalidEncryptedReasoning,
+    setRememberInvalidEncryptedReasoning,
+  ] = useState<boolean | undefined>(() =>
+    appId === "codex"
+      ? initialData?.meta?.localProxyRequestOverrides
+          ?.rememberInvalidEncryptedReasoning
       : undefined,
   );
 
@@ -1054,15 +1103,9 @@ function ProviderFormFull({
                 appId: "codex",
                 codexSessionHeaderAdapter,
                 retry429,
-                blockCodexActivitySummaries:
-                  initialData?.meta?.localProxyRequestOverrides
-                    ?.blockCodexActivitySummaries,
-                codexMetadataModel:
-                  initialData?.meta?.localProxyRequestOverrides
-                    ?.codexMetadataModel,
-                rememberInvalidEncryptedReasoning:
-                  initialData?.meta?.localProxyRequestOverrides
-                    ?.rememberInvalidEncryptedReasoning,
+                codexActivitySummaryMode,
+                codexMetadataModel,
+                rememberInvalidEncryptedReasoning,
               }
             : { appId: "claude" },
         )
@@ -2373,6 +2416,16 @@ function ProviderFormFull({
               onCodexSessionHeaderAdapterChange={setCodexSessionHeaderAdapter}
               retry429={retry429}
               onRetry429Change={setRetry429}
+              codexMetadataModel={codexMetadataModel}
+              onCodexMetadataModelChange={setCodexMetadataModel}
+              codexActivitySummaryMode={codexActivitySummaryMode}
+              onCodexActivitySummaryModeChange={setCodexActivitySummaryMode}
+              rememberInvalidEncryptedReasoning={
+                rememberInvalidEncryptedReasoning
+              }
+              onRememberInvalidEncryptedReasoningChange={
+                setRememberInvalidEncryptedReasoning
+              }
             />
           )}
 

@@ -187,7 +187,7 @@ copy_allowlisted_resources() {
     cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
     cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
     local retry_max
-    local block_activity_summaries
+    local activity_summary_mode
     local codex_metadata_model
     local remember_invalid_encrypted_reasoning
     retry_max="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' \
@@ -195,11 +195,11 @@ copy_allowlisted_resources() {
     case "$retry_max" in
       ''|null|*[!0-9]*) die 'ModelHub retry429 default is invalid'; return 1 ;;
     esac
-    block_activity_summaries="$(/usr/bin/jq -r \
-      '.localProxyRequestOverrides.blockCodexActivitySummaries' \
+    activity_summary_mode="$(/usr/bin/jq -r \
+      '.localProxyRequestOverrides.codexActivitySummaryMode' \
       "$source_dir/templates/modelhub-provider-meta.json")"
-    if [[ "$block_activity_summaries" != 'true' ]]; then
-      die 'ModelHub activity summary guard default must be true'
+    if [[ "$activity_summary_mode" != 'map' ]]; then
+      die 'ModelHub activity summary mode default must be map'
       return 1
     fi
     codex_metadata_model="$(/usr/bin/jq -r \
@@ -219,9 +219,9 @@ copy_allowlisted_resources() {
     /usr/bin/sqlite3 "$package_root/golden/cc-switch.db" \
       "UPDATE providers
           SET meta=json_set(
-            meta,
+            json_remove(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries'),
             '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max,
-            '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true'),
+            '$.localProxyRequestOverrides.codexActivitySummaryMode', '$activity_summary_mode',
             '$.localProxyRequestOverrides.codexMetadataModel', '$codex_metadata_model',
             '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning', json('true')
           )
@@ -231,8 +231,9 @@ copy_allowlisted_resources() {
         WHERE id='bytedance-modelhub-official-cli'
           AND app_type='codex'
           AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=$retry_max
-          AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')='true'
-          AND json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries')=1
+          AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL
+          AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text'
+          AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='$activity_summary_mode'
           AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text'
           AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='$codex_metadata_model'
           AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true'

@@ -1247,6 +1247,10 @@ mod tests {
             modelhub_invalid_encrypted_reasoning_sessions: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_activity_summary_dedup: Arc::new(RwLock::new(HashMap::new())),
+            modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }

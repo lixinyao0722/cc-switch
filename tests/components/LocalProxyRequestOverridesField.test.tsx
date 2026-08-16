@@ -98,4 +98,84 @@ describe("LocalProxyRequestOverridesField", () => {
       honorRetryAfter: true,
     });
   });
+
+  it("renders configurable metadata, activity-summary, and encrypted-reasoning policies", () => {
+    render(
+      <FieldWithForm
+        {...baseProps}
+        showModelHubControls
+        codexSessionHeaderAdapter="modelhub"
+        codexMetadataModel="gpt-5.6-sol"
+        codexActivitySummaryMode="map"
+        rememberInvalidEncryptedReasoning
+        onCodexSessionHeaderAdapterChange={vi.fn()}
+        onCodexMetadataModelChange={vi.fn()}
+        onCodexActivitySummaryModeChange={vi.fn()}
+        onRememberInvalidEncryptedReasoningChange={vi.fn()}
+        onRetry429Change={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("switch", {
+        name: "providerForm.codexMetadataMapping",
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByLabelText("providerForm.codexMetadataModel"),
+    ).toHaveValue("gpt-5.6-sol");
+    expect(
+      screen.getByLabelText("providerForm.codexActivitySummaryMode"),
+    ).toHaveValue("map");
+    expect(
+      screen.getByRole("switch", {
+        name: "providerForm.rememberInvalidEncryptedReasoning",
+      }),
+    ).toBeChecked();
+  });
+
+  it("clears every ModelHub policy when the session adapter is disabled", () => {
+    const onCodexSessionHeaderAdapterChange = vi.fn();
+    const onRetry429Change = vi.fn();
+    const onCodexMetadataModelChange = vi.fn();
+    const onCodexActivitySummaryModeChange = vi.fn();
+    const onRememberInvalidEncryptedReasoningChange = vi.fn();
+    render(
+      <FieldWithForm
+        {...baseProps}
+        showModelHubControls
+        codexSessionHeaderAdapter="modelhub"
+        retry429={{
+          maxRetries: 3,
+          baseDelayMs: 1000,
+          maxDelayMs: 30000,
+          honorRetryAfter: true,
+        }}
+        codexMetadataModel="gpt-5.6-sol"
+        codexActivitySummaryMode="block"
+        rememberInvalidEncryptedReasoning
+        onCodexSessionHeaderAdapterChange={onCodexSessionHeaderAdapterChange}
+        onRetry429Change={onRetry429Change}
+        onCodexMetadataModelChange={onCodexMetadataModelChange}
+        onCodexActivitySummaryModeChange={onCodexActivitySummaryModeChange}
+        onRememberInvalidEncryptedReasoningChange={
+          onRememberInvalidEncryptedReasoningChange
+        }
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "providerForm.modelhubSessionHeaderAdapter",
+      }),
+    );
+
+    expect(onCodexSessionHeaderAdapterChange).toHaveBeenCalledWith(undefined);
+    expect(onRetry429Change).toHaveBeenCalledWith(undefined);
+    expect(onCodexMetadataModelChange).toHaveBeenCalledWith(undefined);
+    expect(onCodexActivitySummaryModeChange).toHaveBeenCalledWith(undefined);
+    expect(onRememberInvalidEncryptedReasoningChange).toHaveBeenCalledWith(
+      undefined,
+    );
+  });
 });

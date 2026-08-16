@@ -28,7 +28,7 @@ use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
     app_config::AppType,
-    provider::{LocalProxyRequestOverrides, Provider},
+    provider::{CodexActivitySummaryMode, LocalProxyRequestOverrides, Provider},
 };
 use bytes::Bytes;
 use futures::StreamExt;
@@ -96,6 +96,7 @@ fn modelhub_retry_429_config<'a>(
         .and_then(|overrides| overrides.retry_429.as_ref())
 }
 
+#[cfg(test)]
 fn should_block_modelhub_activity_summary(
     app_type: &AppType,
     endpoint: &str,
@@ -104,13 +105,23 @@ fn should_block_modelhub_activity_summary(
     body: &Value,
 ) -> bool {
     should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot)
-        && provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
-            .and_then(|overrides| overrides.block_codex_activity_summaries)
-            == Some(true)
+        && effective_activity_summary_mode(provider) == CodexActivitySummaryMode::Block
         && super::modelhub_compat::is_unsupported_activity_summary_request(body)
+}
+
+fn effective_activity_summary_mode(provider: &Provider) -> CodexActivitySummaryMode {
+    let overrides = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.local_proxy_request_overrides.as_ref());
+    if let Some(mode) = overrides.and_then(|overrides| overrides.codex_activity_summary_mode) {
+        return mode;
+    }
+    if overrides.and_then(|overrides| overrides.block_codex_activity_summaries) == Some(true) {
+        CodexActivitySummaryMode::Block
+    } else {
+        CodexActivitySummaryMode::Passthrough
+    }
 }
 
 fn modelhub_codex_metadata_model<'a>(
@@ -212,6 +223,9 @@ pub struct RequestForwarder {
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
     modelhub_invalid_encrypted_reasoning_sessions: Arc<RwLock<std::collections::HashSet<String>>>,
+    modelhub_activity_summary_dedup:
+        Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
+    modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -297,6 +311,10 @@ impl RequestForwarder {
         modelhub_invalid_encrypted_reasoning_sessions: Arc<
             RwLock<std::collections::HashSet<String>>,
         >,
+        modelhub_activity_summary_dedup: Arc<
+            RwLock<std::collections::HashMap<String, std::time::Instant>>,
+        >,
+        modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -319,6 +337,8 @@ impl RequestForwarder {
             gemini_shadow,
             codex_chat_history,
             modelhub_invalid_encrypted_reasoning_sessions,
+            modelhub_activity_summary_dedup,
+            modelhub_unclassified_luna_fingerprints,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -366,6 +386,55 @@ impl RequestForwarder {
             sessions.clear();
         }
         sessions.insert(key);
+    }
+
+    async fn is_duplicate_modelhub_activity_summary(
+        &self,
+        provider: &Provider,
+        headers: &http::HeaderMap,
+        body: &Value,
+    ) -> bool {
+        const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+        const MAX_KEYS: usize = 2048;
+        let Some(fingerprint) =
+            super::modelhub_compat::activity_summary_fingerprint(&provider.id, headers, body)
+        else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let mut entries = self.modelhub_activity_summary_dedup.write().await;
+        entries.retain(|_, seen_at| now.duration_since(*seen_at) < WINDOW);
+        if entries.contains_key(&fingerprint) {
+            return true;
+        }
+        if entries.len() >= MAX_KEYS {
+            entries.clear();
+        }
+        entries.insert(fingerprint, now);
+        false
+    }
+
+    async fn observe_unclassified_modelhub_luna(&self, body: &Value) {
+        const MAX_KEYS: usize = 256;
+        let Some(observation) = super::modelhub_compat::unclassified_codex_luna_observation(body)
+        else {
+            return;
+        };
+        let mut fingerprints = self.modelhub_unclassified_luna_fingerprints.write().await;
+        if fingerprints.contains(&observation.fingerprint) {
+            return;
+        }
+        if fingerprints.len() >= MAX_KEYS {
+            fingerprints.clear();
+        }
+        fingerprints.insert(observation.fingerprint.clone());
+        log::info!(
+            "[ModelHubCompat] request_kind=unclassified_codex_luna fingerprint={} input_items={} user_messages={} has_output_schema={}",
+            observation.fingerprint,
+            observation.input_items,
+            observation.user_messages,
+            observation.has_output_schema
+        );
     }
 
     async fn record_success_result(
@@ -1856,32 +1925,65 @@ impl RequestForwarder {
                     "[{app_type:?}] [ModelHubCompat] filled {changed} empty namespace description(s)"
                 );
             }
+            self.observe_unclassified_modelhub_luna(&filtered_body)
+                .await;
         }
-        if should_block_modelhub_activity_summary(
-            app_type,
-            endpoint,
-            provider,
-            is_copilot,
-            &filtered_body,
-        ) {
-            log::info!(
-                "[{app_type:?}] [ModelHubCompat] blocked unsupported Codex activity summary before upstream"
-            );
-            return Err(ProxyError::InvalidRequest(
-                "CC Switch blocked an unsupported Codex activity summary locally to protect ModelHub quota"
-                    .to_string(),
-            ));
-        }
+        let mut skip_modelhub_429_retry = false;
         if let Some(kind) = super::modelhub_compat::codex_metadata_request_kind(&filtered_body) {
-            if kind != super::modelhub_compat::CodexMetadataRequestKind::ActivitySummary {
-                if let Some(model) =
-                    modelhub_codex_metadata_model(app_type, endpoint, provider, is_copilot)
-                {
-                    filtered_body["model"] = Value::String(model.to_string());
-                    log::info!(
-                        "[{app_type:?}] [ModelHubCompat] mapped Codex metadata request kind={kind:?} to configured model"
-                    );
+            if kind == super::modelhub_compat::CodexMetadataRequestKind::ActivitySummary {
+                if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+                    match effective_activity_summary_mode(provider) {
+                        CodexActivitySummaryMode::Block => {
+                            log::info!(
+                            "[{app_type:?}] [ModelHubCompat] blocked unsupported Codex activity summary before upstream"
+                        );
+                            return Err(ProxyError::InvalidRequest(
+                            "CC Switch blocked an unsupported Codex activity summary locally to protect ModelHub quota"
+                                .to_string(),
+                        ));
+                        }
+                        CodexActivitySummaryMode::Map => {
+                            skip_modelhub_429_retry = true;
+                            let model = modelhub_codex_metadata_model(
+                                app_type, endpoint, provider, is_copilot,
+                            )
+                            .ok_or_else(|| {
+                                ProxyError::ConfigError(
+                                    "ModelHub activity-summary mapping requires codexMetadataModel"
+                                        .to_string(),
+                                )
+                            })?;
+                            if self
+                                .is_duplicate_modelhub_activity_summary(
+                                    provider,
+                                    headers,
+                                    &filtered_body,
+                                )
+                                .await
+                            {
+                                log::info!(
+                                "[{app_type:?}] [ModelHubCompat] suppressed duplicate Codex activity summary within short window"
+                            );
+                                return Err(ProxyError::InvalidRequest(
+                                    "CC Switch suppressed a duplicate Codex activity summary"
+                                        .to_string(),
+                                ));
+                            }
+                            filtered_body["model"] = Value::String(model.to_string());
+                            log::info!(
+                            "[{app_type:?}] [ModelHubCompat] mapped Codex metadata request kind={kind:?} to configured model"
+                        );
+                        }
+                        CodexActivitySummaryMode::Passthrough => {}
+                    }
                 }
+            } else if let Some(model) =
+                modelhub_codex_metadata_model(app_type, endpoint, provider, is_copilot)
+            {
+                filtered_body["model"] = Value::String(model.to_string());
+                log::info!(
+                    "[{app_type:?}] [ModelHubCompat] mapped Codex metadata request kind={kind:?} to configured model"
+                );
             }
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
@@ -2519,7 +2621,11 @@ impl RequestForwarder {
         );
 
         // 发送请求；ModelHub 的 429 重试包裹单个 Provider attempt，不参与故障转移。
-        let retry_429_config = modelhub_retry_429_config(app_type, endpoint, provider, is_copilot);
+        let retry_429_config = if skip_modelhub_429_retry {
+            None
+        } else {
+            modelhub_retry_429_config(app_type, endpoint, provider, is_copilot)
+        };
         let response = super::retry_429::send_with_retry_429(retry_429_config, || {
             let method = method.clone();
             let url = url.clone();
@@ -3967,6 +4073,10 @@ mod tests {
             modelhub_invalid_encrypted_reasoning_sessions: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_activity_summary_dedup: Arc::new(RwLock::new(HashMap::new())),
+            modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -4491,6 +4601,300 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modelhub_activity_summary_map_mode_reaches_sol_once() {
+        let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_models_for_route = received_models.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_models = received_models_for_route.clone();
+                async move {
+                    received_models
+                        .lock()
+                        .expect("received model lock")
+                        .push(body["model"].as_str().unwrap_or_default().to_string());
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides")
+            .codex_activity_summary_mode = Some(crate::provider::CodexActivitySummaryMode::Map);
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nFill the structured summary field."
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-map-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-map-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_ok(), "mapped activity summary should succeed");
+        assert_eq!(
+            *received_models.lock().expect("received model lock"),
+            vec!["gpt-5.6-sol".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_activity_summary_map_mode_suppresses_identical_short_window_duplicates() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides")
+            .codex_activity_summary_mode = Some(crate::provider::CodexActivitySummaryMode::Map);
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: first"
+                }]
+            }]
+        });
+        let mut different_body = body.clone();
+        different_body["input"][0]["content"][0]["text"] = Value::String(
+            "You write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: second"
+                .to_string(),
+        );
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-dedup-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-dedup-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let first = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body.clone(),
+                headers.clone(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await;
+        let duplicate = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers.clone(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await;
+        let different = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                different_body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(first.is_ok());
+        assert!(matches!(
+            duplicate.map_err(|failure| failure.error),
+            Err(ProxyError::InvalidRequest(_))
+        ));
+        assert!(different.is_ok());
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn modelhub_activity_summary_map_mode_does_not_retry_429() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({
+                            "error": {"message": "rate limited"}
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        let overrides = provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides");
+        overrides.codex_activity_summary_mode =
+            Some(crate::provider::CodexActivitySummaryMode::Map);
+        overrides.retry_429 = Some(crate::provider::Retry429Config {
+            max_retries: 2,
+            base_delay_ms: 100,
+            max_delay_ms: 100,
+            honor_retry_after: true,
+        });
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: rate-limit probe"
+                }]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-429-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-429-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_err());
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn modelhub_internal_luna_metadata_is_mapped_to_sol_once() {
         let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
         let received_models_for_route = received_models.clone();
@@ -4667,6 +5071,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_summary_policy_does_not_affect_non_modelhub_provider() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_activity_summary",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let address = listener.local_addr().expect("mock upstream address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock upstream");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("overrides")
+            .codex_session_header_adapter = None;
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: keep upstream behavior"
+                }]
+            }]
+        });
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_ok());
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn modelhub_activity_summary_guard_preserves_ordinary_luna_requests() {
         let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
         let received_models_for_route = received_models.clone();
@@ -4747,6 +5225,94 @@ mod tests {
         assert_eq!(
             *received_models.lock().expect("received model lock"),
             vec!["gpt-5.6-luna".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_unclassified_luna_observation_is_logged_once_per_fingerprint() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_unclassified_luna",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Coordinate delegated thread A"}]
+            }]
+        });
+        let mut different_body = body.clone();
+        different_body["input"][0]["content"][0]["text"] =
+            Value::String("Coordinate delegated thread B".to_string());
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "unclassified-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "unclassified-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        for request_body in [body.clone(), body, different_body] {
+            assert!(forwarder
+                .forward_with_retry(
+                    &AppType::Codex,
+                    http::Method::POST,
+                    "/responses",
+                    request_body,
+                    headers.clone(),
+                    Extensions::new(),
+                    vec![provider.clone()],
+                )
+                .await
+                .is_ok());
+        }
+
+        server.abort();
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            forwarder
+                .modelhub_unclassified_luna_fingerprints
+                .read()
+                .await
+                .len(),
+            2
         );
     }
 

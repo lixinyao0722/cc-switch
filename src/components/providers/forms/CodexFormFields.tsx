@@ -39,6 +39,7 @@ import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesFie
 import { cn } from "@/lib/utils";
 import type {
   ClaudeApiKeyField,
+  CodexActivitySummaryMode,
   CodexSessionHeaderAdapter,
   CodexApiFormat,
   CodexCatalogModel,
@@ -124,6 +125,16 @@ interface CodexFormFieldsProps {
   ) => void;
   retry429?: Retry429Config;
   onRetry429Change?: (value: Retry429Config | undefined) => void;
+  codexMetadataModel?: string;
+  onCodexMetadataModelChange?: (value: string | undefined) => void;
+  codexActivitySummaryMode?: CodexActivitySummaryMode;
+  onCodexActivitySummaryModeChange?: (
+    value: CodexActivitySummaryMode | undefined,
+  ) => void;
+  rememberInvalidEncryptedReasoning?: boolean;
+  onRememberInvalidEncryptedReasoningChange?: (
+    value: boolean | undefined,
+  ) => void;
 }
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
@@ -222,6 +233,12 @@ export function CodexFormFields({
   onCodexSessionHeaderAdapterChange,
   retry429,
   onRetry429Change,
+  codexMetadataModel,
+  onCodexMetadataModelChange,
+  codexActivitySummaryMode,
+  onCodexActivitySummaryModeChange,
+  rememberInvalidEncryptedReasoning,
+  onRememberInvalidEncryptedReasoningChange,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
@@ -261,7 +278,10 @@ export function CodexFormFields({
     localProxyHeadersOverride.trim() ||
       localProxyBodyOverride.trim() ||
       codexSessionHeaderAdapter ||
-      retry429,
+      retry429 ||
+      codexMetadataModel ||
+      codexActivitySummaryMode !== undefined ||
+      rememberInvalidEncryptedReasoning !== undefined,
   );
   const hasAnyAdvancedValue =
     !!customUserAgent ||
@@ -1097,10 +1117,22 @@ export function CodexFormFields({
                   showModelHubControls={appId === "codex"}
                   codexSessionHeaderAdapter={codexSessionHeaderAdapter}
                   retry429={retry429}
+                  codexMetadataModel={codexMetadataModel}
+                  codexActivitySummaryMode={codexActivitySummaryMode}
+                  rememberInvalidEncryptedReasoning={
+                    rememberInvalidEncryptedReasoning
+                  }
                   onCodexSessionHeaderAdapterChange={
                     onCodexSessionHeaderAdapterChange
                   }
                   onRetry429Change={onRetry429Change}
+                  onCodexMetadataModelChange={onCodexMetadataModelChange}
+                  onCodexActivitySummaryModeChange={
+                    onCodexActivitySummaryModeChange
+                  }
+                  onRememberInvalidEncryptedReasoningChange={
+                    onRememberInvalidEncryptedReasoningChange
+                  }
                 />
               </div>
             </div>
