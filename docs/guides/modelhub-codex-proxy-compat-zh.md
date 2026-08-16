@@ -146,12 +146,14 @@ x-client-request-id: <current thread id>
 
 429 policy 位于单个 ModelHub Provider attempt 内，与跨 Provider 故障转移分离：
 
-- 初始请求之外最多重试 3 次。
+- 主用户请求在初始请求之外最多进行 1 次同 Provider 恢复尝试；一次逻辑请求最多访问上游 2 次。
+- 活动摘要、Skill 选择、标题、描述和标题重考虑等明确 metadata/helper 请求不继承 429 重试，只访问上游 1 次。
 - 所有尝试复用相同 method、URL、最终 Header 和序列化 body。
 - 优先解析 `Retry-After` 的秒数或 HTTP-date，并限制在 30 秒以内。
-- 有效 `Retry-After` 原样遵循但限制在 30 秒内；否则按 1、2、4 秒指数退避，并增加 0–25% 随机抖动，避免并发任务同步重试。
+- 有效 `Retry-After` 原样遵循但限制在 30 秒内；否则以 2 秒为基础并增加 0–25% 随机抖动。
+- 首次 429 会建立 Provider 共享冷却；冷却结束时只放行一个 recovery probe。probe 再次收到 429 时延长冷却，其余并发请求继续等待，不各自启动重试链。
 - 中间 429 先排空响应体，不更新 Provider 熔断状态。
-- 重试耗尽后把最终 429 交给原有错误处理。
+- 单次恢复耗尽后把最终 429 交给原有错误处理。
 - 自动故障转移保持关闭，不因 429 切换 Provider。
 
 ## 验证
