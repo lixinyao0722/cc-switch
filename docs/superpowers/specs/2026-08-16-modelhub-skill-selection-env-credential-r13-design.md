@@ -127,4 +127,3 @@ R12 安装器始终要求用户通过 `/dev/tty` 无回显输入 `MODELHUB_AK`�
 - install、reinstall、rollback smoke 通过。
 - 使用已有进程环境变量执行一次真实安装，确认出现复用询问、选择默认复用后不要求重新输入 AK，安装后健康与凭据同步通过。
 - R13 发布为 Latest；PR 保持可审查状态，不自动合并。
-

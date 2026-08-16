@@ -120,4 +120,3 @@
 - [ ] **Step 9: Trigger and inspect a fresh complete Codex turn.** Record the installed-process start time, run a fresh task that creates main/title/activity helper traffic, then prove logs since that time contain `CodexSkillSelection` mappings and zero `unclassified_codex_luna`, zero ModelHub Luna 401, and zero helper 429 retries.
 - [ ] **Step 10: Publish R13 as Latest.** Change the Draft Release to published/non-prerelease/latest, verify the tag targets the PR HEAD, verify exactly four public assets, and fetch `releases/latest/download/install.sh` to confirm its immutable tag is R13.
 - [ ] **Step 11: Backfill PR evidence and final state.** Comment the checksums, CI, local/remote smoke, interactive credential reuse, credential equality hashes, and zero-Luna-401 live result on the PR. Confirm PR remains Ready/unmerged, release is Latest, and the local branch/worktree is clean.
-
