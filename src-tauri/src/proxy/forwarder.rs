@@ -4784,7 +4784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn modelhub_activity_summary_skill_selection_maps_to_sol_without_429_retry() {
+    async fn modelhub_codex_skill_selection_maps_to_sol_without_429_retry() {
         let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
         let received_models_for_route = received_models.clone();
         let app = Router::new().route(
@@ -4832,7 +4832,7 @@ mod tests {
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": "A skill is a set of instructions provided through a `SKILL.md` source.\n### How to use skills\n- Trigger rules:\nSelect relevant skills for this request:\nYou write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: verify R12"
+                        "text": "A skill is a set of instructions provided through a `SKILL.md` source.\n### How to use skills\n- Trigger rules:\nSelect relevant skills for this request:\nImplement the requested repository change."
                     }]
                 }
             ],
@@ -4852,11 +4852,11 @@ mod tests {
         let headers = HeaderMap::from_iter([
             (
                 "session-id".parse().unwrap(),
-                "activity-skill-session".parse().unwrap(),
+                "codex-skill-session".parse().unwrap(),
             ),
             (
                 "thread-id".parse().unwrap(),
-                "activity-skill-thread".parse().unwrap(),
+                "codex-skill-thread".parse().unwrap(),
             ),
         ]);
         let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));

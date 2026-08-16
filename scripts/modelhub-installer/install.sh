@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260816-r12'
+readonly RELEASE_TAG='modelhub-installer-20260816-r13'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -2672,7 +2672,7 @@ validate_modelhub_ak() {
   esac
 }
 
-read_modelhub_ak() {
+prompt_modelhub_ak() {
   local modelhub_ak=''
 
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
@@ -2688,6 +2688,60 @@ read_modelhub_ak() {
   fi
   validate_modelhub_ak "$modelhub_ak" || return 1
   printf '%s' "$modelhub_ak"
+}
+
+read_modelhub_ak() {
+  local inherited_modelhub_ak=''
+  local reuse_choice=''
+  local test_choices=''
+
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    inherited_modelhub_ak="${CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK:-}"
+    test_choices="${CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE:-}"
+  else
+    inherited_modelhub_ak="${MODELHUB_AK:-}"
+  fi
+  if [[ -z "$inherited_modelhub_ak" ]]; then
+    prompt_modelhub_ak
+    return
+  fi
+  validate_modelhub_ak "$inherited_modelhub_ak" || return 1
+
+  while true; do
+    if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+      if [[ "$test_choices" == *$'\n'* ]]; then
+        reuse_choice="${test_choices%%$'\n'*}"
+        test_choices="${test_choices#*$'\n'}"
+      else
+        reuse_choice="$test_choices"
+        test_choices=''
+      fi
+    else
+      printf '%s' '检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n] ' >/dev/tty
+      if ! IFS= read -r reuse_choice </dev/tty; then
+        die '读取 MODELHUB_AK 复用选择失败'
+        return 1
+      fi
+    fi
+    case "$reuse_choice" in
+      ''|Y|y)
+        printf '%s' "$inherited_modelhub_ak"
+        return
+        ;;
+      N|n)
+        prompt_modelhub_ak
+        return
+        ;;
+      *)
+        if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+          printf '%s\n' '请输入 Y 或 n。' >/dev/tty
+        elif [[ -z "$test_choices" ]]; then
+          die '测试模式缺少后续 MODELHUB_AK 复用选择'
+          return 1
+        fi
+        ;;
+    esac
+  done
 }
 
 store_modelhub_api_key_in_provider() {
@@ -3249,7 +3303,7 @@ run_install_transaction() {
   progress 6 8 '安装 CC Switch，并覆盖本机完整配置快照'
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
-  progress 7 8 '请输入 MODELHUB_AK，并写入 Keychain 与 ModelHub Provider'
+  progress 7 8 '确认或输入 MODELHUB_AK，并同步凭据'
   configure_keychain || return 1
   progress 8 8 '启动 CC Switch，检查健康状态和 ModelHub 路由'
   install_launch_agent || return 1
@@ -3304,7 +3358,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R12 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R13 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else

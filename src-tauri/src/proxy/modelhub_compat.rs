@@ -25,7 +25,7 @@ const CODEX_SKILL_USAGE_MARKER: &str = "### How to use skills";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexMetadataRequestKind {
     ActivitySummary,
-    ActivitySummarySkillSelection,
+    CodexSkillSelection,
     ThreadTitle,
     ThreadDescription,
     ThreadTitleReconsideration,
@@ -54,26 +54,26 @@ pub(crate) fn codex_metadata_request_kind(body: &Value) -> Option<CodexMetadataR
         return Some(kind);
     }
 
-    is_activity_summary_skill_selection(body, input)
-        .then_some(CodexMetadataRequestKind::ActivitySummarySkillSelection)
+    is_codex_skill_selection(body, input).then_some(CodexMetadataRequestKind::CodexSkillSelection)
 }
 
-fn is_activity_summary_skill_selection(body: &Value, input: &[Value]) -> bool {
-    if input.len() != 3
-        || (body.pointer("/text/format").is_none() && body.get("response_format").is_none())
-    {
+fn is_codex_skill_selection(body: &Value, input: &[Value]) -> bool {
+    if input.len() != 3 || skill_selection_schema_name(body) != Some("skill_selection") {
         return false;
     }
-
-    let user_messages = input
-        .iter()
-        .filter_map(user_message_texts)
-        .collect::<Vec<_>>();
-    if user_messages.len() != 1 {
-        return false;
+    for (item, role) in input.iter().zip(["developer", "assistant", "user"]) {
+        if item.get("type").and_then(Value::as_str) != Some("message")
+            || item.get("role").and_then(Value::as_str) != Some(role)
+        {
+            return false;
+        }
     }
 
-    user_messages[0].iter().any(|text| {
+    let Some(user_texts) = user_message_texts(&input[2]) else {
+        return false;
+    };
+
+    user_texts.iter().any(|text| {
         let Some((_, after_source)) = text.split_once(CODEX_SKILL_SOURCE_MARKER) else {
             return false;
         };
@@ -84,8 +84,14 @@ fn is_activity_summary_skill_selection(body: &Value, input: &[Value]) -> bool {
         else {
             return false;
         };
-        after_triggers.contains(CODEX_ACTIVITY_SUMMARY_PROMPT)
+        !after_triggers.trim().is_empty()
     })
+}
+
+fn skill_selection_schema_name(body: &Value) -> Option<&str> {
+    body.pointer("/text/format/name")
+        .or_else(|| body.pointer("/response_format/json_schema/name"))
+        .and_then(Value::as_str)
 }
 
 #[cfg(test)]
@@ -444,7 +450,10 @@ mod tests {
     const TITLE_RECONSIDERATION_PROMPT: &str =
         "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
     const VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
+    const SKILL_SOURCE_MARKER: &str =
+        "A skill is a set of instructions provided through a `SKILL.md` source.";
     const SKILL_USAGE_MARKER: &str = "### How to use skills";
+    const SKILL_TRIGGER_RULES_MARKER: &str = "- Trigger rules:";
 
     fn activity_summary_body(model: &str, content: Value) -> Value {
         json!({
@@ -468,7 +477,7 @@ mod tests {
         })
     }
 
-    fn activity_summary_skill_selection_body(user_text: &str) -> Value {
+    fn codex_skill_selection_body(user_text: &str) -> Value {
         json!({
             "model": "gpt-5.6-luna",
             "input": [
@@ -503,6 +512,12 @@ mod tests {
                 }
             }
         })
+    }
+
+    fn codex_skill_selection_text(request_text: &str) -> String {
+        format!(
+            "{SKILL_SOURCE_MARKER}\n{SKILL_USAGE_MARKER}\n{SKILL_TRIGGER_RULES_MARKER}\nSelect only relevant skills for this request:\n{request_text}"
+        )
     }
 
     #[test]
@@ -542,47 +557,62 @@ mod tests {
     }
 
     #[test]
-    fn activity_summary_skill_selection_is_classified_independently() {
-        let body = activity_summary_skill_selection_body(&format!(
-            "A skill is a set of instructions provided through a `SKILL.md` source.\n{SKILL_USAGE_MARKER}\n- Trigger rules:\nSelect only relevant skills for this request:\n{ACTIVITY_SUMMARY_PROMPT}\nLatest message: verify R12"
-        ));
+    fn codex_skill_selection_classifies_main_title_and_activity_helpers() {
+        for request_text in [
+            "Implement the requested repository change.",
+            NEW_THREAD_TITLE_PROMPT,
+            ACTIVITY_SUMMARY_PROMPT,
+        ] {
+            let body = codex_skill_selection_body(&codex_skill_selection_text(request_text));
 
-        assert_eq!(
-            codex_metadata_request_kind(&body),
-            Some(CodexMetadataRequestKind::ActivitySummarySkillSelection)
-        );
+            assert_eq!(
+                codex_metadata_request_kind(&body),
+                Some(CodexMetadataRequestKind::CodexSkillSelection),
+                "request text: {request_text}"
+            );
+        }
     }
 
     #[test]
-    fn activity_summary_skill_selection_requires_exact_structure_and_markers() {
-        let ordinary_structured = activity_summary_skill_selection_body(
-            "Select only relevant skills for an ordinary user task.",
-        );
-        let quoted_prompt = activity_summary_skill_selection_body(&format!(
+    fn codex_skill_selection_requires_exact_structure_schema_and_markers() {
+        let ordinary_structured =
+            codex_skill_selection_body("Select only relevant skills for an ordinary user task.");
+        let quoted_prompt = codex_skill_selection_body(&format!(
             "Please explain this quoted prompt:\n{ACTIVITY_SUMMARY_PROMPT}"
         ));
-        let quoted_weak_markers = activity_summary_skill_selection_body(&format!(
+        let quoted_weak_markers = codex_skill_selection_body(&format!(
             "A user pasted these two phrases for analysis:\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
         ));
-        let missing_skill_source = activity_summary_skill_selection_body(&format!(
+        let missing_skill_source = codex_skill_selection_body(&format!(
             "- Trigger rules:\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
         ));
-        let missing_trigger_rules = activity_summary_skill_selection_body(&format!(
+        let missing_trigger_rules = codex_skill_selection_body(&format!(
             "A skill is a set of instructions provided through a `SKILL.md` source.\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
         ));
-        let reordered_wrapper = activity_summary_skill_selection_body(&format!(
+        let reordered_wrapper = codex_skill_selection_body(&format!(
             "Quoted fragments in reverse order:\n{ACTIVITY_SUMMARY_PROMPT}\n- Trigger rules:\n{SKILL_USAGE_MARKER}\nA skill is a set of instructions provided through a `SKILL.md` source."
         ));
-        let similar_prompt = activity_summary_skill_selection_body(&format!(
+        let similar_prompt = codex_skill_selection_body(&format!(
             "{SKILL_USAGE_MARKER}\nSelect skills for an activity update shown below a task title."
         ));
-        let mut wrong_shape = activity_summary_skill_selection_body(&format!(
-            "{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
-        ));
+        let valid_text = codex_skill_selection_text("Implement the requested repository change.");
+        let mut wrong_shape = codex_skill_selection_body(&valid_text);
         wrong_shape["input"].as_array_mut().unwrap().pop();
-        let mut sol = activity_summary_skill_selection_body(&format!(
-            "{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
-        ));
+        let mut reordered_roles = codex_skill_selection_body(&valid_text);
+        reordered_roles["input"].as_array_mut().unwrap().swap(0, 1);
+        let mut non_message = codex_skill_selection_body(&valid_text);
+        non_message["input"][0]["type"] = Value::String("item_reference".to_string());
+        let mut wrong_schema = codex_skill_selection_body(&valid_text);
+        wrong_schema["text"]["format"]["name"] = Value::String("result".to_string());
+        let mut missing_schema = codex_skill_selection_body(&valid_text);
+        missing_schema.as_object_mut().unwrap().remove("text");
+        let mut two_users = codex_skill_selection_body(&valid_text);
+        two_users["input"][1]["role"] = Value::String("user".to_string());
+        two_users["input"][1]["content"] = json!([{
+            "type": "input_text",
+            "text": "Second user message"
+        }]);
+        let mut sol = codex_skill_selection_body(&valid_text);
         sol["model"] = Value::String("gpt-5.6-sol".to_string());
 
         for body in [
@@ -594,6 +624,11 @@ mod tests {
             reordered_wrapper,
             similar_prompt,
             wrong_shape,
+            reordered_roles,
+            non_message,
+            wrong_schema,
+            missing_schema,
+            two_users,
             sol,
         ] {
             assert_eq!(codex_metadata_request_kind(&body), None);
