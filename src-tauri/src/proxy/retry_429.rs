@@ -15,19 +15,20 @@ use tokio::time::Instant;
 
 const MAX_SAME_PROVIDER_RETRIES: u8 = 10;
 const MIN_BASE_DELAY_MS: u64 = 100;
-const MAX_DELAY_MS: u64 = 60_000;
+const MAX_DELAY_MS: u64 = 30_000;
 const MAX_COOLDOWN_KEYS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CooldownPermit {
     Open,
-    Probe,
+    Probe(u64),
 }
 
 #[derive(Debug)]
 struct ProviderCooldownState {
     until: Instant,
     probe_in_flight: bool,
+    generation: u64,
     notify: Arc<Notify>,
 }
 
@@ -51,6 +52,56 @@ impl Provider429Scope {
     }
 }
 
+struct ProbeCleanup {
+    scope: Option<Provider429Scope>,
+    generation: Option<u64>,
+    armed: bool,
+}
+
+impl ProbeCleanup {
+    fn new(scope: Option<Provider429Scope>, permit: CooldownPermit) -> Self {
+        let generation = match permit {
+            CooldownPermit::Open => None,
+            CooldownPermit::Probe(generation) => Some(generation),
+        };
+        Self {
+            armed: generation.is_some() && scope.is_some(),
+            scope,
+            generation,
+        }
+    }
+
+    async fn finish(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let (Some(scope), Some(generation)) = (self.scope.as_ref(), self.generation) {
+            scope.cooldown.finish_probe(&scope.key, generation).await;
+        }
+        self.armed = false;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (Some(scope), Some(generation)) = (self.scope.clone(), self.generation) else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                scope.cooldown.finish_probe(&scope.key, generation).await;
+            });
+        }
+    }
+}
+
 impl Provider429Cooldown {
     pub(crate) async fn acquire(&self, key: &str) -> CooldownPermit {
         loop {
@@ -70,7 +121,7 @@ impl Provider429Cooldown {
                     Some((None, notified))
                 } else {
                     state.probe_in_flight = true;
-                    return CooldownPermit::Probe;
+                    return CooldownPermit::Probe(state.generation);
                 }
             };
 
@@ -97,12 +148,16 @@ impl Provider429Cooldown {
             let evicted_notify = if states.len() >= MAX_COOLDOWN_KEYS && !states.contains_key(key) {
                 if let Some(oldest_key) = states
                     .iter()
+                    .filter(|(_, state)| !state.probe_in_flight)
                     .min_by_key(|(_, state)| state.until)
                     .map(|(key, _)| key.clone())
                 {
                     states.remove(&oldest_key).map(|state| state.notify)
                 } else {
-                    None
+                    log::warn!(
+                        "[Retry429] cooldown state is full of active probes; skipping a new key"
+                    );
+                    return;
                 }
             } else {
                 None
@@ -112,10 +167,12 @@ impl Provider429Cooldown {
                 .or_insert_with(|| ProviderCooldownState {
                     until,
                     probe_in_flight: false,
+                    generation: 0,
                     notify: Arc::new(Notify::new()),
                 });
             state.until = state.until.max(until);
             state.probe_in_flight = false;
+            state.generation = state.generation.wrapping_add(1).max(1);
             (state.notify.clone(), evicted_notify)
         };
         if let Some(evicted_notify) = evicted_notify {
@@ -124,13 +181,18 @@ impl Provider429Cooldown {
         notify.notify_waiters();
     }
 
-    pub(crate) async fn finish_probe(&self, key: &str) {
-        let notify = self
-            .states
-            .lock()
-            .await
-            .remove(key)
-            .map(|state| state.notify);
+    pub(crate) async fn finish_probe(&self, key: &str, generation: u64) {
+        let notify = {
+            let mut states = self.states.lock().await;
+            if states
+                .get(key)
+                .is_some_and(|state| state.probe_in_flight && state.generation == generation)
+            {
+                states.remove(key).map(|state| state.notify)
+            } else {
+                None
+            }
+        };
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
@@ -206,23 +268,16 @@ where
         } else {
             CooldownPermit::Open
         };
+        let mut probe_cleanup = ProbeCleanup::new(scope.clone(), permit);
         let response = match send().await {
             Ok(response) => response,
             Err(error) => {
-                if permit == CooldownPermit::Probe {
-                    if let Some(scope) = scope.as_ref() {
-                        scope.cooldown.finish_probe(&scope.key).await;
-                    }
-                }
+                probe_cleanup.finish().await;
                 return Err(error);
             }
         };
         if response.status() != http::StatusCode::TOO_MANY_REQUESTS {
-            if permit == CooldownPermit::Probe {
-                if let Some(scope) = scope.as_ref() {
-                    scope.cooldown.finish_probe(&scope.key).await;
-                }
-            }
+            probe_cleanup.finish().await;
             return Ok(response);
         }
 
@@ -233,6 +288,7 @@ where
         if let Some(scope) = scope.as_ref() {
             scope.cooldown.record_429(&scope.key, delay).await;
         }
+        probe_cleanup.disarm();
         if retry_number >= max_retries {
             return Ok(response);
         }
@@ -283,6 +339,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
 
     fn config() -> Retry429Config {
         Retry429Config {
@@ -351,6 +408,21 @@ mod tests {
 
         assert_eq!(
             retry_delay(&config(), 1, Some(&retry_after), now),
+            Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
+    fn retry_429_caps_saved_max_delay_above_30000_ms() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap();
+        let retry_after = http::HeaderValue::from_static("120");
+        let config = Retry429Config {
+            max_delay_ms: 60_000,
+            ..config()
+        };
+
+        assert_eq!(
+            retry_delay(&config, 1, Some(&retry_after), now),
             Duration::from_millis(30_000)
         );
     }
@@ -498,14 +570,18 @@ mod tests {
             .await
             .expect("one recovery probe after cooldown")
             .expect("permit");
-        assert_eq!(first, CooldownPermit::Probe);
+        let CooldownPermit::Probe(first_generation) = first else {
+            panic!("expected recovery probe");
+        };
         assert!(
             tokio::time::timeout(Duration::from_millis(30), receiver.recv())
                 .await
                 .is_err()
         );
 
-        cooldown.finish_probe("codex\0modelhub").await;
+        cooldown
+            .finish_probe("codex\0modelhub", first_generation)
+            .await;
         let second = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
             .await
             .expect("second waiter released")
@@ -536,7 +612,9 @@ mod tests {
             .await
             .expect("first probe ready")
             .unwrap();
-        assert_eq!(first_permit, CooldownPermit::Probe);
+        let CooldownPermit::Probe(_first_generation) = first_permit else {
+            panic!("expected first recovery probe");
+        };
 
         cooldown
             .record_429("codex\0modelhub", Duration::from_millis(100))
@@ -551,8 +629,12 @@ mod tests {
             .await
             .expect("extended cooldown probe ready")
             .unwrap();
-        assert_eq!(second_permit, CooldownPermit::Probe);
-        cooldown.finish_probe("codex\0modelhub").await;
+        let CooldownPermit::Probe(second_generation) = second_permit else {
+            panic!("expected extended cooldown probe");
+        };
+        cooldown
+            .finish_probe("codex\0modelhub", second_generation)
+            .await;
     }
 
     #[tokio::test]
@@ -606,5 +688,67 @@ mod tests {
         }
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_probe_cannot_clear_a_newer_cooldown_generation() {
+        let cooldown = Provider429Cooldown::default();
+        let key = "codex\0modelhub";
+        cooldown.record_429(key, Duration::from_millis(20)).await;
+        let first = tokio::time::timeout(Duration::from_millis(100), cooldown.acquire(key))
+            .await
+            .expect("first probe ready");
+        let CooldownPermit::Probe(first_generation) = first else {
+            panic!("expected first probe");
+        };
+
+        cooldown.record_429(key, Duration::from_millis(100)).await;
+        cooldown.finish_probe(key, first_generation).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), cooldown.acquire(key))
+                .await
+                .is_err()
+        );
+        let second = tokio::time::timeout(Duration::from_millis(120), cooldown.acquire(key))
+            .await
+            .expect("newer cooldown probe ready");
+        let CooldownPermit::Probe(second_generation) = second else {
+            panic!("expected newer probe");
+        };
+        cooldown.finish_probe(key, second_generation).await;
+    }
+
+    #[tokio::test]
+    async fn aborting_shared_recovery_probe_releases_waiters() {
+        let cooldown = Arc::new(Provider429Cooldown::default());
+        let key = "codex\0modelhub";
+        cooldown.record_429(key, Duration::from_millis(20)).await;
+        let scope = Provider429Scope::new(cooldown.clone(), key);
+        let (started_sender, started_receiver) = oneshot::channel();
+        let started_sender = Arc::new(Mutex::new(Some(started_sender)));
+        let task = tokio::spawn(async move {
+            send_with_retry_429(Some(&config()), Some(scope), || {
+                let started_sender = started_sender.clone();
+                async move {
+                    if let Some(sender) = started_sender.lock().unwrap().take() {
+                        let _ = sender.send(());
+                    }
+                    std::future::pending::<Result<ProxyResponse, crate::proxy::ProxyError>>().await
+                }
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), started_receiver)
+            .await
+            .expect("probe request started")
+            .expect("start signal");
+        task.abort();
+        let _ = task.await;
+
+        let permit = tokio::time::timeout(Duration::from_millis(100), cooldown.acquire(key))
+            .await
+            .expect("waiters released after cancellation");
+        assert_eq!(permit, CooldownPermit::Open);
     }
 }

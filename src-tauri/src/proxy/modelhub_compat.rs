@@ -17,6 +17,9 @@ const CODEX_THREAD_DESCRIPTION_PROMPT: &str = "You are in a fork of an existing 
 const CODEX_TITLE_RECONSIDERATION_PROMPT: &str =
     "You are in a fork of an existing Codex thread at a possible durable title checkpoint.";
 const CODEX_VOICE_TITLE_PROMPT: &str = "You are in a fork of a voice chat.";
+const CODEX_SKILL_SOURCE_MARKER: &str =
+    "A skill is a set of instructions provided through a `SKILL.md` source.";
+const CODEX_SKILL_TRIGGER_RULES_MARKER: &str = "- Trigger rules:";
 const CODEX_SKILL_USAGE_MARKER: &str = "### How to use skills";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,9 +74,17 @@ fn is_activity_summary_skill_selection(body: &Value, input: &[Value]) -> bool {
     }
 
     user_messages[0].iter().any(|text| {
-        text.contains(CODEX_SKILL_USAGE_MARKER)
-            && text.contains(CODEX_ACTIVITY_SUMMARY_PROMPT)
-            && !text.starts_with(CODEX_ACTIVITY_SUMMARY_PROMPT)
+        let Some((_, after_source)) = text.split_once(CODEX_SKILL_SOURCE_MARKER) else {
+            return false;
+        };
+        let Some((_, after_usage)) = after_source.split_once(CODEX_SKILL_USAGE_MARKER) else {
+            return false;
+        };
+        let Some((_, after_triggers)) = after_usage.split_once(CODEX_SKILL_TRIGGER_RULES_MARKER)
+        else {
+            return false;
+        };
+        after_triggers.contains(CODEX_ACTIVITY_SUMMARY_PROMPT)
     })
 }
 
@@ -533,7 +544,7 @@ mod tests {
     #[test]
     fn activity_summary_skill_selection_is_classified_independently() {
         let body = activity_summary_skill_selection_body(&format!(
-            "{SKILL_USAGE_MARKER}\nSelect only relevant skills for this request:\n{ACTIVITY_SUMMARY_PROMPT}\nLatest message: verify R12"
+            "A skill is a set of instructions provided through a `SKILL.md` source.\n{SKILL_USAGE_MARKER}\n- Trigger rules:\nSelect only relevant skills for this request:\n{ACTIVITY_SUMMARY_PROMPT}\nLatest message: verify R12"
         ));
 
         assert_eq!(
@@ -550,6 +561,18 @@ mod tests {
         let quoted_prompt = activity_summary_skill_selection_body(&format!(
             "Please explain this quoted prompt:\n{ACTIVITY_SUMMARY_PROMPT}"
         ));
+        let quoted_weak_markers = activity_summary_skill_selection_body(&format!(
+            "A user pasted these two phrases for analysis:\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        let missing_skill_source = activity_summary_skill_selection_body(&format!(
+            "- Trigger rules:\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        let missing_trigger_rules = activity_summary_skill_selection_body(&format!(
+            "A skill is a set of instructions provided through a `SKILL.md` source.\n{SKILL_USAGE_MARKER}\n{ACTIVITY_SUMMARY_PROMPT}"
+        ));
+        let reordered_wrapper = activity_summary_skill_selection_body(&format!(
+            "Quoted fragments in reverse order:\n{ACTIVITY_SUMMARY_PROMPT}\n- Trigger rules:\n{SKILL_USAGE_MARKER}\nA skill is a set of instructions provided through a `SKILL.md` source."
+        ));
         let similar_prompt = activity_summary_skill_selection_body(&format!(
             "{SKILL_USAGE_MARKER}\nSelect skills for an activity update shown below a task title."
         ));
@@ -565,6 +588,10 @@ mod tests {
         for body in [
             ordinary_structured,
             quoted_prompt,
+            quoted_weak_markers,
+            missing_skill_source,
+            missing_trigger_rules,
+            reordered_wrapper,
             similar_prompt,
             wrong_shape,
             sol,

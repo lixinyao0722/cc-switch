@@ -4832,7 +4832,7 @@ mod tests {
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": "### How to use skills\nSelect relevant skills for this request:\nYou write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: verify R12"
+                        "text": "A skill is a set of instructions provided through a `SKILL.md` source.\n### How to use skills\n- Trigger rules:\nSelect relevant skills for this request:\nYou write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: verify R12"
                     }]
                 }
             ],
