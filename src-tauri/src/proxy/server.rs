@@ -52,6 +52,8 @@ pub struct ProxyState {
         Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
     /// Seen privacy-safe fingerprints for unclassified Codex Luna requests.
     pub modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Provider-scoped ModelHub HTTP 429 cooldown and recovery-probe state.
+    pub modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -96,6 +98,7 @@ impl ProxyServer {
             modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_429_cooldown: Arc::new(super::retry_429::Provider429Cooldown::default()),
             app_handle,
             failover_manager,
         };

@@ -274,6 +274,7 @@ impl RequestContext {
             state.modelhub_invalid_encrypted_reasoning_sessions.clone(),
             state.modelhub_activity_summary_dedup.clone(),
             state.modelhub_unclassified_luna_fingerprints.clone(),
+            state.modelhub_429_cooldown.clone(),
             state.failover_manager.clone(),
             state.app_handle.clone(),
             self.current_provider_id.clone(),

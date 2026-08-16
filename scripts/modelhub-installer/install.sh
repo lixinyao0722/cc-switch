@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260816-r11'
+readonly RELEASE_TAG='modelhub-installer-20260816-r12'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -998,12 +998,14 @@ validate_golden_codex_template() {
   if [[ "$placeholder_count" -lt 1 ]] \
     || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
     || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
-    || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file"; then
+    || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
+    || ! grep -Fq -- 'request_max_retries = 2' "$file" \
+    || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
     return 1
   fi
   if LC_ALL=C grep -E -i -q \
-    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token' \
+    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=' \
     "$file"; then
     die 'golden Codex config contains a forbidden path, route, or credential field'
     return 1
@@ -1064,6 +1066,8 @@ validate_golden_database() {
     || { die 'golden CC Switch provider metadata model is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true' AND json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider encrypted reasoning memory is invalid'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=1 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
+    || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -3300,7 +3304,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R11 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R12 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else

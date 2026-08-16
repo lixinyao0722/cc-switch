@@ -163,6 +163,53 @@ render_installer_with_helper_hash() {
   fi
 }
 
+normalize_modelhub_codex_retry_policy() {
+  local file="$1"
+  local output="$file.r12-retry"
+
+  if ! awk '
+    function finish_modelhub() {
+      if (!in_modelhub) return
+      if (!saw_request) print "request_max_retries = 2"
+      if (!saw_stream) print "stream_max_retries = 3"
+    }
+    /^\[[^]]+\][[:space:]]*$/ {
+      finish_modelhub()
+      in_modelhub = ($0 == "[model_providers.modelhub]")
+      if (in_modelhub) {
+        found_modelhub = 1
+        saw_request = 0
+        saw_stream = 0
+      }
+      print
+      next
+    }
+    {
+      if (in_modelhub && $0 ~ /^[[:space:]]*request_max_retries[[:space:]]*=/) {
+        if (!saw_request) print "request_max_retries = 2"
+        saw_request = 1
+        next
+      }
+      if (in_modelhub && $0 ~ /^[[:space:]]*stream_max_retries[[:space:]]*=/) {
+        if (!saw_stream) print "stream_max_retries = 3"
+        saw_stream = 1
+        next
+      }
+      if (in_modelhub && $0 ~ /^[[:space:]]*retry_429[[:space:]]*=/) next
+      print
+    }
+    END {
+      finish_modelhub()
+      if (!found_modelhub) exit 1
+    }
+  ' "$file" >"$output"; then
+    rm -f "$output"
+    die 'failed to normalize ModelHub Codex retry policy'
+    return 1
+  fi
+  mv "$output" "$file"
+}
+
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
@@ -184,9 +231,13 @@ copy_allowlisted_resources() {
       return 1
     fi
     cp "$snapshot_dir/codex-config.toml" "$package_root/golden/codex-config.toml"
+    normalize_modelhub_codex_retry_policy "$package_root/golden/codex-config.toml"
     cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
     cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
     local retry_max
+    local retry_base_delay_ms
+    local retry_max_delay_ms
+    local retry_honor_after
     local activity_summary_mode
     local codex_metadata_model
     local remember_invalid_encrypted_reasoning
@@ -195,6 +246,22 @@ copy_allowlisted_resources() {
     case "$retry_max" in
       ''|null|*[!0-9]*) die 'ModelHub retry429 default is invalid'; return 1 ;;
     esac
+    retry_base_delay_ms="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.baseDelayMs' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    case "$retry_base_delay_ms" in
+      ''|null|*[!0-9]*) die 'ModelHub retry429 base delay default is invalid'; return 1 ;;
+    esac
+    retry_max_delay_ms="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxDelayMs' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    case "$retry_max_delay_ms" in
+      ''|null|*[!0-9]*) die 'ModelHub retry429 max delay default is invalid'; return 1 ;;
+    esac
+    retry_honor_after="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.honorRetryAfter' \
+      "$source_dir/templates/modelhub-provider-meta.json")"
+    if [[ "$retry_honor_after" != 'true' ]]; then
+      die 'ModelHub retry429 Retry-After default must be true'
+      return 1
+    fi
     activity_summary_mode="$(/usr/bin/jq -r \
       '.localProxyRequestOverrides.codexActivitySummaryMode' \
       "$source_dir/templates/modelhub-provider-meta.json")"
@@ -221,6 +288,9 @@ copy_allowlisted_resources() {
           SET meta=json_set(
             json_remove(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries'),
             '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max,
+            '$.localProxyRequestOverrides.retry429.baseDelayMs', $retry_base_delay_ms,
+            '$.localProxyRequestOverrides.retry429.maxDelayMs', $retry_max_delay_ms,
+            '$.localProxyRequestOverrides.retry429.honorRetryAfter', json('true'),
             '$.localProxyRequestOverrides.codexActivitySummaryMode', '$activity_summary_mode',
             '$.localProxyRequestOverrides.codexMetadataModel', '$codex_metadata_model',
             '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning', json('true')
@@ -231,6 +301,9 @@ copy_allowlisted_resources() {
         WHERE id='bytedance-modelhub-official-cli'
           AND app_type='codex'
           AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=$retry_max
+          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=$retry_base_delay_ms
+          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=$retry_max_delay_ms
+          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1
           AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL
           AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text'
           AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='$activity_summary_mode'

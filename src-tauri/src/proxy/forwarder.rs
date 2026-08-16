@@ -96,6 +96,25 @@ fn modelhub_retry_429_config<'a>(
         .and_then(|overrides| overrides.retry_429.as_ref())
 }
 
+fn modelhub_retry_429_scope(
+    app_type: &AppType,
+    endpoint: &str,
+    provider: &Provider,
+    is_copilot: bool,
+    skip_modelhub_429_retry: bool,
+    cooldown: Arc<super::retry_429::Provider429Cooldown>,
+) -> Option<super::retry_429::Provider429Scope> {
+    if skip_modelhub_429_retry
+        || modelhub_retry_429_config(app_type, endpoint, provider, is_copilot).is_none()
+    {
+        return None;
+    }
+    Some(super::retry_429::Provider429Scope::new(
+        cooldown,
+        format!("{app_type:?}\0{}", provider.id),
+    ))
+}
+
 #[cfg(test)]
 fn should_block_modelhub_activity_summary(
     app_type: &AppType,
@@ -226,6 +245,7 @@ pub struct RequestForwarder {
     modelhub_activity_summary_dedup:
         Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
     modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
+    modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -315,6 +335,7 @@ impl RequestForwarder {
             RwLock<std::collections::HashMap<String, std::time::Instant>>,
         >,
         modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
+        modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -339,6 +360,7 @@ impl RequestForwarder {
             modelhub_invalid_encrypted_reasoning_sessions,
             modelhub_activity_summary_dedup,
             modelhub_unclassified_luna_fingerprints,
+            modelhub_429_cooldown,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -669,12 +691,13 @@ impl RequestForwarder {
                     .await
                     .contains(key)
                 {
-                    let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
-                        &mut provider_body,
-                    );
-                    if removed > 0 {
+                    let sanitization =
+                        super::modelhub_compat::sanitize_encrypted_reasoning(&mut provider_body);
+                    if sanitization.changed() {
                         log::info!(
-                            "[{app_type_str}] [ModelHubCompat] pre-cleaned {removed} encrypted reasoning item(s) for a learned incompatible session"
+                            "[{app_type_str}] [ModelHubCompat] pre-cleaned encrypted reasoning for a learned incompatible session (removed_fields={}, removed_empty_items={})",
+                            sanitization.removed_encrypted_fields,
+                            sanitization.removed_empty_items
                         );
                     }
                 }
@@ -771,10 +794,10 @@ impl RequestForwarder {
                     if should_apply_modelhub_header_adapter(app_type, endpoint, provider, false)
                         && super::modelhub_compat::is_invalid_encrypted_content_error(&e)
                     {
-                        let removed = super::modelhub_compat::remove_encrypted_reasoning_items(
+                        let sanitization = super::modelhub_compat::sanitize_encrypted_reasoning(
                             &mut provider_body,
                         );
-                        if removed > 0 {
+                        if sanitization.changed() {
                             if let Some(key) =
                                 modelhub_invalid_encrypted_reasoning_session_key.clone()
                             {
@@ -782,8 +805,10 @@ impl RequestForwarder {
                                     .await;
                             }
                             log::warn!(
-                                "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after removing {removed} encrypted reasoning item(s)",
-                                provider.id
+                                "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after sanitizing reasoning (removed_fields={}, removed_empty_items={})",
+                                provider.id,
+                                sanitization.removed_encrypted_fields,
+                                sanitization.removed_empty_items
                             );
 
                             match self
@@ -1930,8 +1955,13 @@ impl RequestForwarder {
         }
         let mut skip_modelhub_429_retry = false;
         if let Some(kind) = super::modelhub_compat::codex_metadata_request_kind(&filtered_body) {
+            let applies_modelhub_policy =
+                should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot);
+            if applies_modelhub_policy {
+                skip_modelhub_429_retry = true;
+            }
             if kind == super::modelhub_compat::CodexMetadataRequestKind::ActivitySummary {
-                if should_apply_modelhub_header_adapter(app_type, endpoint, provider, is_copilot) {
+                if applies_modelhub_policy {
                     match effective_activity_summary_mode(provider) {
                         CodexActivitySummaryMode::Block => {
                             log::info!(
@@ -1943,7 +1973,6 @@ impl RequestForwarder {
                         ));
                         }
                         CodexActivitySummaryMode::Map => {
-                            skip_modelhub_429_retry = true;
                             let model = modelhub_codex_metadata_model(
                                 app_type, endpoint, provider, is_copilot,
                             )
@@ -2626,7 +2655,18 @@ impl RequestForwarder {
         } else {
             modelhub_retry_429_config(app_type, endpoint, provider, is_copilot)
         };
-        let response = super::retry_429::send_with_retry_429(retry_429_config, || {
+        let retry_429_scope = modelhub_retry_429_scope(
+            app_type,
+            endpoint,
+            provider,
+            is_copilot,
+            skip_modelhub_429_retry,
+            self.modelhub_429_cooldown.clone(),
+        );
+        let response = super::retry_429::send_with_retry_429(
+            retry_429_config,
+            retry_429_scope,
+            || {
             let method = method.clone();
             let url = url.clone();
             let ordered_headers = ordered_headers.clone();
@@ -2694,7 +2734,8 @@ impl RequestForwarder {
                     .await
                 }
             }
-        })
+            },
+        )
         .await?;
 
         // 检查响应状态
@@ -4077,6 +4118,7 @@ mod tests {
             modelhub_unclassified_luna_fingerprints: Arc::new(RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            modelhub_429_cooldown: Arc::new(super::super::retry_429::Provider429Cooldown::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -4183,6 +4225,49 @@ mod tests {
             "/grokbuild/v1/responses",
             &provider,
             false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn shared_429_cooldown_scope_is_limited_to_retryable_modelhub_main_requests() {
+        let provider = provider_with_modelhub_header_adapter();
+        let cooldown = Arc::new(super::super::retry_429::Provider429Cooldown::default());
+
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            false,
+            false,
+            cooldown.clone(),
+        )
+        .is_some());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            false,
+            true,
+            cooldown.clone(),
+        )
+        .is_none());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/models",
+            &provider,
+            false,
+            false,
+            cooldown.clone(),
+        )
+        .is_none());
+        assert!(modelhub_retry_429_scope(
+            &AppType::Codex,
+            "/responses",
+            &provider,
+            true,
+            false,
+            cooldown,
         )
         .is_none());
     }
@@ -4412,19 +4497,27 @@ mod tests {
             6
         );
         let retry_input = bodies[1]["input"].as_array().expect("retry input");
-        assert_eq!(retry_input.len(), 4);
-        assert_eq!(retry_input[0]["content"][0]["text"], "parent answer");
-        assert_eq!(retry_input[1]["call_id"], "call_parent");
-        assert_eq!(retry_input[2]["output"], "file contents");
-        assert_eq!(retry_input[3]["content"][0]["text"], "continue in the fork");
+        assert_eq!(retry_input.len(), 5);
+        assert_eq!(retry_input[0]["id"], "rs_parent_1");
+        assert_eq!(retry_input[0]["summary"][0]["text"], "parent reasoning");
+        assert!(retry_input[0].get("encrypted_content").is_none());
+        assert_eq!(retry_input[1]["content"][0]["text"], "parent answer");
+        assert_eq!(retry_input[2]["call_id"], "call_parent");
+        assert_eq!(retry_input[3]["output"], "file contents");
+        assert_eq!(retry_input[4]["content"][0]["text"], "continue in the fork");
         assert!(retry_input
             .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
-        assert!(bodies[2]["input"]
-            .as_array()
-            .expect("learned request input")
-            .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("reasoning")));
+            .all(|item| item.get("encrypted_content").is_none()));
+        assert_eq!(bodies[2]["input"], bodies[1]["input"]);
+        assert_eq!(
+            bodies[2]["input"]
+                .as_array()
+                .expect("learned request input")
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -4688,6 +4781,199 @@ mod tests {
             *received_models.lock().expect("received model lock"),
             vec!["gpt-5.6-sol".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn modelhub_activity_summary_skill_selection_maps_to_sol_without_429_retry() {
+        let received_models = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_models_for_route = received_models.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_models = received_models_for_route.clone();
+                async move {
+                    received_models
+                        .lock()
+                        .expect("received model lock")
+                        .push(body["model"].as_str().unwrap_or_default().to_string());
+                    let mut headers = HeaderMap::new();
+                    headers.insert("retry-after", "0".parse().unwrap());
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        Json(json!({"error": {"message": "rate limited"}})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": false,
+            "input": [
+                {"type": "message", "role": "developer", "content": "Select capabilities."},
+                {"type": "message", "role": "assistant", "content": "Catalog loaded."},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "A skill is a set of instructions provided through a `SKILL.md` source.\n### How to use skills\n- Trigger rules:\nSelect relevant skills for this request:\nYou write the one-line activity update displayed beneath an existing Codex task title.\nLatest message: verify R12"
+                    }]
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "skill_selection",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"selected": {"type": "array", "items": {"type": "string"}}},
+                        "required": ["selected"],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "activity-skill-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "activity-skill-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+
+        server.abort();
+        assert!(result.is_err());
+        assert_eq!(
+            *received_models.lock().expect("received model lock"),
+            vec!["gpt-5.6-sol".to_string()]
+        );
+        assert!(forwarder
+            .modelhub_unclassified_luna_fingerprints
+            .read()
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn modelhub_explicit_metadata_requests_do_not_retry_429() {
+        let upstream_requests = Arc::new(AtomicUsize::new(0));
+        let upstream_requests_for_route = upstream_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let upstream_requests = upstream_requests_for_route.clone();
+                async move {
+                    upstream_requests.fetch_add(1, Ordering::SeqCst);
+                    let mut headers = HeaderMap::new();
+                    headers.insert("retry-after", "0".parse().unwrap());
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        Json(json!({"error": {"message": "rate limited"}})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        let overrides = provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .expect("ModelHub overrides");
+        overrides.retry_429 = Some(crate::provider::Retry429Config {
+            max_retries: 2,
+            base_delay_ms: 100,
+            max_delay_ms: 100,
+            honor_retry_after: true,
+        });
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let prompts = [
+            "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.",
+            "You are in a fork of an existing Codex thread.",
+            "You are in a fork of an existing Codex thread at a possible durable title checkpoint.",
+        ];
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "metadata-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "metadata-thread".parse().unwrap(),
+            ),
+        ]);
+        let forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+
+        for prompt in prompts {
+            let result = forwarder
+                .forward_with_retry(
+                    &AppType::Codex,
+                    http::Method::POST,
+                    "/responses",
+                    json!({
+                        "model": "gpt-5.6-luna",
+                        "stream": false,
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt}]
+                        }]
+                    }),
+                    headers.clone(),
+                    Extensions::new(),
+                    vec![provider.clone()],
+                )
+                .await;
+            assert!(result.is_err());
+        }
+
+        server.abort();
+        assert_eq!(upstream_requests.load(Ordering::SeqCst), prompts.len());
     }
 
     #[tokio::test]
