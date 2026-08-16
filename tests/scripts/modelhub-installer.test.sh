@@ -238,9 +238,9 @@ test_merge_preserves_unmanaged_sections() {
   assert_contains "$case_dir/output.toml" 'model = "gpt-5.6-sol"'
   assert_contains "$case_dir/output.toml" 'model_reasoning_effort = "high"'
   assert_contains "$case_dir/output.toml" 'model_max_output_tokens = 128_000'
-  assert_contains "$case_dir/output.toml" 'request_max_retries = 10'
-  assert_contains "$case_dir/output.toml" 'stream_max_retries = 10'
-  assert_contains "$case_dir/output.toml" 'retry_429 = true'
+  assert_contains "$case_dir/output.toml" 'request_max_retries = 2'
+  assert_contains "$case_dir/output.toml" 'stream_max_retries = 3'
+  assert_not_contains "$case_dir/output.toml" 'retry_429'
   assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Test User/.codex/models-modelhub-1m.json"'
   assert_contains "$case_dir/output.toml" '# user heading'
   assert_contains "$case_dir/output.toml" '[plugins."browser@openai-bundled"]'
@@ -1343,15 +1343,17 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
-test_preflight_rejects_golden_database_without_r11_resilience_defaults() {
-  local case_dir="$TEST_TMP/preflight-golden-r11-resilience"
+test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r12-resilience"
   local database="$case_dir/cc-switch.db"
   local metadata_path
   mkdir -p "$case_dir"
 
   for metadata_path in \
     '$.localProxyRequestOverrides.codexMetadataModel' \
-    '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning'; do
+    '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning' \
+    '$.localProxyRequestOverrides.retry429.maxRetries' \
+    '$.localProxyRequestOverrides.retry429.baseDelayMs'; do
     /bin/bash "$GOLDEN_DB_BUILDER" \
       --schema "$GOLDEN_DB_SCHEMA" \
       --provider-config "$GOLDEN_CODEX_CONFIG" \
@@ -1412,7 +1414,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260816-r11'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260816-r12'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1425,7 +1427,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260816-r11/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260816-r12/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2758,7 +2760,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260816-r11'"
+    "readonly RELEASE_TAG='modelhub-installer-20260816-r12'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -2991,6 +2993,9 @@ test_package_normalizes_custom_snapshot_retry_policy() {
   create_packager_source "$source_dir"
   mkdir -p "$snapshot_dir"
   cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
+  /usr/bin/perl -0pi -e \
+    's/request_max_retries = 2/request_max_retries = 10/; s/stream_max_retries = 3/stream_max_retries = 10\nretry_429 = true/' \
+    "$snapshot_dir/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
     --schema "$GOLDEN_DB_SCHEMA" \
@@ -3030,9 +3035,18 @@ test_package_normalizes_custom_snapshot_retry_policy() {
   assert_sql "$snapshot_dir/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning') IS NULL FROM providers" \
     '1'
+  assert_contains "$snapshot_dir/codex-config.toml" 'request_max_retries = 10'
+  assert_contains "$snapshot_dir/codex-config.toml" 'stream_max_retries = 10'
+  assert_contains "$snapshot_dir/codex-config.toml" 'retry_429 = true'
+  assert_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'request_max_retries = 2'
+  assert_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'stream_max_retries = 3'
+  assert_not_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'retry_429'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '3'
+    '1'
+  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
+    '2000'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
     '1'
@@ -3112,7 +3126,10 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     '1'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '3'
+    '1'
+  assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
+    '2000'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
     '1'
@@ -3138,6 +3155,12 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     || fail 'golden Codex config omits the portable home placeholder'
   [[ "$config_text" == *'https://aidp.bytedance.net/api/modelhub/online'* ]] \
     || fail 'golden Codex config omits the ModelHub upstream'
+  [[ "$config_text" == *'request_max_retries = 2'* ]] \
+    || fail 'golden Codex config request retry default is invalid'
+  [[ "$config_text" == *'stream_max_retries = 3'* ]] \
+    || fail 'golden Codex config stream retry default is invalid'
+  [[ "$config_text" != *'retry_429'* ]] \
+    || fail 'golden Codex config contains unsupported retry_429'
   [[ "$config_text" != *'/Users/'* ]] || fail 'golden Codex config contains a user path'
   [[ "$config_text" != *'127.0.0.1:15721'* ]] || fail 'golden Codex config contains a live proxy address'
   [[ "$config_text" != *'experimental_bearer_token'* ]] \
@@ -3249,7 +3272,7 @@ run_test "preflight verifies all release checksums" test_preflight_verifies_all_
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
-run_test "preflight rejects golden database without R11 resilience defaults" test_preflight_rejects_golden_database_without_r11_resilience_defaults
+run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
