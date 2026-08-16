@@ -2037,6 +2037,8 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
   export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r6'
+  unset CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK
+  unset CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_SECURITY_LOG="$case_dir/security.log"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
@@ -2271,6 +2273,71 @@ test_transaction_keychain_cancel_rolls_back_all_files() {
   assert_contains "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" 'old-local-installer'
 }
 
+test_modelhub_ak_source_without_environment_uses_hidden_input() {
+  local selected
+
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='manual-modelhub-ak'
+  unset CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK
+  unset CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE
+
+  selected="$(read_modelhub_ak)"
+
+  assert_equals "$selected" 'manual-modelhub-ak'
+}
+
+test_modelhub_ak_source_reuses_environment_for_default_and_yes() {
+  local choice
+  local selected
+
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='manual-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+
+  for choice in '' Y y; do
+    export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE="$choice"
+    selected="$(read_modelhub_ak)"
+    assert_equals "$selected" 'environment-modelhub-ak'
+  done
+}
+
+test_modelhub_ak_source_no_uses_new_hidden_input() {
+  local choice
+  local selected
+
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='replacement-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+
+  for choice in N n; do
+    export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE="$choice"
+    selected="$(read_modelhub_ak)"
+    assert_equals "$selected" 'replacement-modelhub-ak'
+  done
+}
+
+test_modelhub_ak_source_invalid_choice_reprompts() {
+  local selected
+
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='manual-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE=$'invalid\ny'
+
+  selected="$(read_modelhub_ak)"
+
+  assert_equals "$selected" 'environment-modelhub-ak'
+}
+
+test_modelhub_ak_source_invalid_environment_fails() {
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='manual-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK=$'invalid\nenvironment'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE='y'
+
+  assert_command_fails read_modelhub_ak
+}
+
 test_transaction_health_timeout_rolls_back_all_files() {
   local case_dir="$TEST_TMP/transaction-health-timeout"
   local before
@@ -2382,6 +2449,91 @@ test_transaction_synchronizes_modelhub_ak() {
   assert_equals "$provider_ak" 'test-modelhub-ak-r6'
   launchd_ak="$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)"
   assert_equals "$launchd_ak" 'test-modelhub-ak-r6'
+}
+
+test_environment_modelhub_ak_default_reuse_synchronizes_all_targets() {
+  local case_dir="$TEST_TMP/environment-modelhub-ak-default-reuse"
+  local database
+  local provider_ak
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE=''
+
+  perform_install
+
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'environment-modelhub-ak'
+  provider_ak="$(sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")"
+  assert_equals "$provider_ak" 'environment-modelhub-ak'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'environment-modelhub-ak'
+}
+
+test_environment_modelhub_ak_no_synchronizes_replacement() {
+  local case_dir="$TEST_TMP/environment-modelhub-ak-replacement"
+  local database
+  local provider_ak
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE='n'
+  export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='replacement-modelhub-ak'
+
+  perform_install
+
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'replacement-modelhub-ak'
+  provider_ak="$(sqlite3 "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")"
+  assert_equals "$provider_ak" 'replacement-modelhub-ak'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'replacement-modelhub-ak'
+}
+
+test_environment_modelhub_ak_reuse_overwrites_old_credential() {
+  local case_dir="$TEST_TMP/environment-modelhub-ak-overwrite-old"
+  local database
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  database="$case_dir/home/.cc-switch/cc-switch.db"
+  /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
+  printf '%s' 'old-modelhub-ak' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'old-modelhub-ak' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE='y'
+
+  perform_install
+
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'environment-modelhub-ak'
+  assert_sql "$database" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';" \
+    'environment-modelhub-ak'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'environment-modelhub-ak'
+}
+
+test_environment_modelhub_ak_failure_restores_old_credential() {
+  local case_dir="$TEST_TMP/environment-modelhub-ak-rollback-old"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  /bin/mkdir -p "$FAKE_LAUNCHCTL_STATE_DIR"
+  printf '%s' 'old-modelhub-ak' >"$FAKE_KEYCHAIN_STATE"
+  printf '%s' 'old-modelhub-ak' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
+  export CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK='environment-modelhub-ak'
+  export CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE='y'
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  assert_equals "$(/bin/cat "$FAKE_KEYCHAIN_STATE")" 'old-modelhub-ak'
+  assert_equals \
+    "$("$CC_SWITCH_LAUNCHCTL_BIN" getenv MODELHUB_AK)" \
+    'old-modelhub-ak'
 }
 
 test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back() {
@@ -3290,6 +3442,11 @@ run_test "existing nontraversable app requires privilege" test_existing_nontrave
 run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
 run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
+run_test "MODELHUB_AK source without environment uses hidden input" test_modelhub_ak_source_without_environment_uses_hidden_input
+run_test "MODELHUB_AK source default and yes reuse environment" test_modelhub_ak_source_reuses_environment_for_default_and_yes
+run_test "MODELHUB_AK source no uses new hidden input" test_modelhub_ak_source_no_uses_new_hidden_input
+run_test "MODELHUB_AK source invalid choice re-prompts" test_modelhub_ak_source_invalid_choice_reprompts
+run_test "MODELHUB_AK source invalid environment fails" test_modelhub_ak_source_invalid_environment_fails
 run_test "transaction keychain ACL error aborts without write" test_transaction_keychain_acl_error_aborts_without_write
 run_test "transaction health timeout rolls back all files" test_transaction_health_timeout_rolls_back_all_files
 run_test "transaction post-launcher failure restores previous launcher" test_transaction_post_launcher_failure_restores_previous_launcher
@@ -3301,6 +3458,10 @@ run_test "transaction WAL snapshot restores committed sentinel and cleans sideca
 run_test "transaction same-second backup suffixes sort lexically" test_transaction_same_second_backup_suffixes_sort_lexically
 run_test "transaction success and repeat are idempotent" test_transaction_success_and_repeat_are_idempotent
 run_test "transaction synchronizes ModelHub AK" test_transaction_synchronizes_modelhub_ak
+run_test "environment MODELHUB_AK default reuse synchronizes all targets" test_environment_modelhub_ak_default_reuse_synchronizes_all_targets
+run_test "environment MODELHUB_AK no synchronizes replacement" test_environment_modelhub_ak_no_synchronizes_replacement
+run_test "environment MODELHUB_AK reuse overwrites old credential" test_environment_modelhub_ak_reuse_overwrites_old_credential
+run_test "environment MODELHUB_AK failure restores old credential" test_environment_modelhub_ak_failure_restores_old_credential
 run_test "transaction detects startup ModelHub AK drift and rolls back" test_transaction_detects_startup_modelhub_ak_drift_and_rolls_back
 run_test "transaction detects routing-stage ModelHub AK drift and rolls back" test_transaction_detects_routing_stage_modelhub_ak_drift_and_rolls_back
 run_test "transaction restores existing ModelHub credential state after failure" test_transaction_restores_existing_modelhub_credential_state_after_failure
