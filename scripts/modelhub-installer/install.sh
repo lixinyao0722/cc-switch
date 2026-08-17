@@ -3594,6 +3594,14 @@ path_creation_requires_privilege() {
   [[ ! -d "$ancestor" || ! -w "$ancestor" ]]
 }
 
+explain_administrator_password() {
+  printf '%s\n' \
+    '接下来 macOS 会请求管理员权限。' \
+    '请输入当前 Mac 登录用户的管理员密码（不是 MODELHUB_AK）。输入时终端不会显示字符，输完按回车。' \
+    '该权限用于检查或写入 /Applications 和 /etc/codex 等系统位置。' \
+    >&2
+}
+
 prepare_application_permissions() {
   local sudo_bin
 
@@ -3606,6 +3614,7 @@ prepare_application_permissions() {
       && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
     NEEDS_SUDO=1
     sudo_bin="$(sudo_command)"
+    explain_administrator_password
     if ! "$sudo_bin" -v; then
       die "administrator permission is required to install CC Switch"
       return 1

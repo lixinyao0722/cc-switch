@@ -1904,6 +1904,57 @@ test_existing_nontraversable_app_requires_privilege() {
   assert_contains "$FAKE_SUDO_LOG" '-v'
 }
 
+test_administrator_password_guidance_precedes_required_sudo() {
+  local case_dir="$TEST_TMP/administrator-password-guidance"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  local output
+  mkdir -p "$applications_dir" "$case_dir/etc"
+  chmod 0555 "$applications_dir"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    '[[ "${1:-}" == "-v" ]]'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  activate_fake_privilege_runner "$sudo_bin"
+  configure_install_paths
+
+  output="$(prepare_application_permissions 2>&1)"
+  chmod 0755 "$applications_dir"
+
+  [[ "$output" == *'Mac 登录用户的管理员密码'* ]] \
+    || fail "administrator password guidance omitted the Mac login password: $output"
+  [[ "$output" == *'不是 MODELHUB_AK'* ]] \
+    || fail "administrator password guidance omitted the AK distinction: $output"
+  [[ "$output" == *'不会显示字符'* ]] \
+    || fail "administrator password guidance omitted terminal echo behavior: $output"
+  [[ "$output" == *'/Applications'* && "$output" == *'/etc/codex'* ]] \
+    || fail "administrator password guidance omitted privileged locations: $output"
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+}
+
+test_administrator_password_guidance_is_silent_without_sudo() {
+  local case_dir="$TEST_TMP/administrator-password-no-sudo"
+  local applications_dir="$case_dir/Applications"
+  local output
+  mkdir -p "$applications_dir" "$case_dir/etc"
+  chmod 0755 "$applications_dir" "$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  configure_install_paths
+
+  output="$(prepare_application_permissions 2>&1)"
+
+  assert_equals "$NEEDS_SUDO" '0'
+  [[ "$output" != *'Mac 登录用户的管理员密码'* ]] \
+    || fail "no-sudo path emitted administrator password guidance: $output"
+}
+
 test_rejects_root_execution_validation_contract() {
   assert_command_fails validate_non_root 0
   validate_non_root 501
@@ -3722,6 +3773,8 @@ run_test "settings merge rejects invalid JSON without overwrite" test_settings_m
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
 run_test "existing nonwritable app requires privilege" test_existing_nonwritable_app_requires_privilege
 run_test "existing nontraversable app requires privilege" test_existing_nontraversable_app_requires_privilege
+run_test "administrator password guidance precedes required sudo" test_administrator_password_guidance_precedes_required_sudo
+run_test "administrator password guidance is silent without sudo" test_administrator_password_guidance_is_silent_without_sudo
 run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
 run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
