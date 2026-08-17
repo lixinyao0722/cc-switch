@@ -12,7 +12,8 @@ Codex 移动端新建线程会在 `thread/start` 显式传入 `modelProvider = "
 2. 保留 managed config 中与 R14 无关的配置，并提供精确的失败回滚和显式回滚。
 3. 通过不受 Downloads TCC 限制的安全 staging 完成管理员写入。
 4. 将 ModelHub 自动压缩阈值固定为 `500000`，将主请求 429 `maxRetries` 固定为 `2`。
-5. 发布 App 版本 `3.19.2`、安装器 tag `modelhub-installer-20260817-r14`。
+5. 在 Golden Codex 配置中保留 Codex App 自动建分支前缀 `feat/`。
+6. 发布 App 版本 `3.19.2`、安装器 tag `modelhub-installer-20260817-r14`。
 
 ## 非目标
 
@@ -81,6 +82,17 @@ Provider 元数据使用：
 
 `maxRetries = 2` 仅改变普通主请求的同 Provider 恢复次数。标题、描述、活动摘要、Skill 选择等明确 metadata/helper 请求继续跳过 429 重试。
 
+## Codex App Git 分支前缀
+
+Golden Codex 配置加入：
+
+```toml
+[desktop]
+git-branch-prefix = "feat/"
+```
+
+该设置只影响 Codex App 自动创建 Git 分支时的命名，不改变模型、凭据、429 或代理路由。安装器当前会用 Golden Codex 配置覆盖目标文件，因此必须把该偏好纳入 Golden snapshot，避免 R14 安装后丢失。模板合并路径也包含相同设置；若已有 `[desktop]` 表，则合并结果必须只有一个表，并将 `git-branch-prefix` 固定为 `feat/`，同时保留该表内其他键。
+
 ## 安装流程与用户文案
 
 R14 保持现有八步流程。系统 managed config 在完成用户目录 Golden 配置写入的同一事务阶段安装；最终步骤继续启动 CC Switch，并执行已有健康状态、Golden Provider、takeover 数据库状态和凭据同步检查，不新增真实模型请求。
@@ -104,6 +116,7 @@ R14 保持现有八步流程。系统 managed config 在完成用户目录 Golde
 
 - Golden 配置、模板、打包资产和文档均为自动压缩阈值 `500000`。
 - Provider 模板、Golden DB、打包归一化和安装后数据库均为 429 `maxRetries = 2`。
+- Golden 配置、模板与安装后配置包含唯一的 `[desktop]` 表和 `git-branch-prefix = "feat/"`，并保留该表内其他非受管键。
 - Release tag 为 `modelhub-installer-20260817-r14`，App 版本及资产名继续为 `3.19.2`。
 - Release 恰好包含 App ZIP、`install.sh`、资源压缩包和 checksum 四项资产。
 - `pnpm test:installer`、前端检查和 Rust 检查全部通过；Release install/reinstall/rollback smoke 通过。
@@ -113,4 +126,3 @@ R14 保持现有八步流程。系统 managed config 在完成用户目录 Golde
 - 桌面普通新会话正常经过 ModelHub。
 - 移动端新建全新会话虽报告 Provider `openai`，实际请求经过 CC Switch / ModelHub 并成功返回。
 - CC Switch 停止时两类会话均失败，重新启动后恢复，这是强制路由的预期边界。
-
