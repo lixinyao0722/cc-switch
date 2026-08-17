@@ -1380,7 +1380,7 @@ create_expected_resource_tree() {
   local root="$1/modelhub-installer"
   mkdir -p "$root/assets" "$root/golden" "$root/helpers" "$root/templates"
   ensure_test_rename_helper
-  : >"$root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$root/assets/models-modelhub-1m.json"
   cp "$GOLDEN_CODEX_CONFIG" "$root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -1452,6 +1452,36 @@ test_preflight_accepts_exact_resource_archive() {
   validate_resource_archive "$case_dir/resources.tar.gz"
 }
 
+test_model_catalog_validation_rejects_malformed_stale_and_missing_models() {
+  local case_dir="$TEST_TMP/model-catalog-validation"
+  mkdir -p "$case_dir"
+  cp "$MODEL_CATALOG" "$case_dir/valid.json"
+  printf '{invalid json\n' >"$case_dir/malformed.json"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.5") | .context_window) = 272000' \
+    "$MODEL_CATALOG" >"$case_dir/stale-gpt55.json"
+  /usr/bin/jq \
+    '.models |= map(select(.slug != "gpt-5.6-terra"))' \
+    "$MODEL_CATALOG" >"$case_dir/missing-terra.json"
+
+  validate_model_catalog "$case_dir/valid.json"
+  assert_command_fails validate_model_catalog "$case_dir/malformed.json"
+  assert_command_fails validate_model_catalog "$case_dir/stale-gpt55.json"
+  assert_command_fails validate_model_catalog "$case_dir/missing-terra.json"
+}
+
+test_resource_archive_rejects_invalid_model_catalog() {
+  local case_dir="$TEST_TMP/preflight-invalid-model-catalog"
+  mkdir -p "$case_dir/tree"
+  create_expected_resource_tree "$case_dir/tree"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.6-luna") | .effective_context_window_percent) = 100' \
+    "$MODEL_CATALOG" >"$case_dir/tree/modelhub-installer/assets/models-modelhub-1m.json"
+  COPYFILE_DISABLE=1 tar -czf "$case_dir/resources.tar.gz" -C "$case_dir/tree" modelhub-installer
+
+  assert_command_fails validate_resource_archive "$case_dir/resources.tar.gz"
+}
+
 test_preflight_rejects_golden_database_without_activity_summary_mode() {
   local case_dir="$TEST_TMP/preflight-golden-activity-mode"
   local database="$case_dir/cc-switch.db"
@@ -1478,6 +1508,7 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-context-usage.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prevent-sleep.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-computer-use-plugin.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/disabled-computer-use-plugin.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/duplicate-computer-use-mcp.toml"
   /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
     "$case_dir/stale-compact.toml"
@@ -1489,6 +1520,10 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
     "$case_dir/missing-prevent-sleep.toml"
   /usr/bin/perl -0pi -e 's/\n\[plugins\."computer-use\@openai-bundled"\]\nenabled = true\n//' \
     "$case_dir/missing-computer-use-plugin.toml"
+  /usr/bin/perl -0pi -e 's/(\[plugins\."computer-use\@openai-bundled"\]\n)enabled = true/$1enabled = false/' \
+    "$case_dir/disabled-computer-use-plugin.toml"
+  printf '%s\n' '' '[plugins."browser@openai-bundled"]' 'enabled = true' \
+    >>"$case_dir/disabled-computer-use-plugin.toml"
   printf '%s\n' '' '[mcp_servers.computer-use]' 'command = "duplicate"' \
     >>"$case_dir/duplicate-computer-use-mcp.toml"
 
@@ -1497,6 +1532,7 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
   assert_command_fails validate_golden_codex_template "$case_dir/missing-context-usage.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/missing-prevent-sleep.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/missing-computer-use-plugin.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/disabled-computer-use-plugin.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/duplicate-computer-use-mcp.toml"
 }
 
@@ -2135,7 +2171,7 @@ create_transaction_assets() {
   ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
-  printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$resource_root/assets/models-modelhub-1m.json"
   cp "$GOLDEN_CODEX_CONFIG" "$resource_root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$resource_root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -3214,7 +3250,7 @@ create_packager_source() {
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
     "$source_dir/templates/load-modelhub-env.sh"
   cp "$RENAME_HELPER_SOURCE" "$source_dir/helpers/rename-exclusive.c"
-  printf '{"models":{}}\n' >"$source_dir/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$source_dir/assets/models-modelhub-1m.json"
 }
 
 run_packager() {
@@ -3288,6 +3324,22 @@ test_package_builds_exact_allowlisted_release_assets() {
       _ "$output_dir/install.sh"
   )" "$helper_sha"
   assert_equals "$(awk 'NF { count += 1 } END { print count + 0 }' "$output_dir/SHA256SUMS.txt")" '3'
+}
+
+test_package_rejects_invalid_model_catalog() {
+  local case_dir="$TEST_TMP/package-invalid-model-catalog"
+  local source_dir="$case_dir/source"
+  local output_dir="$case_dir/output"
+  mkdir -p "$case_dir"
+  create_packager_source "$source_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.6-sol") | .max_context_window) = 272000' \
+    "$MODEL_CATALOG" >"$source_dir/assets/models-modelhub-1m.json"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'invalid model catalog still produced a resource archive'
 }
 
 test_package_reproducibly_renders_pinned_helper_hash() {
@@ -3762,6 +3814,8 @@ run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_k
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
+run_test "model catalog validation rejects malformed stale and missing models" test_model_catalog_validation_rejects_malformed_stale_and_missing_models
+run_test "resource archive rejects invalid model catalog" test_resource_archive_rejects_invalid_model_catalog
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
 run_test "preflight rejects Golden Codex without R15 defaults" test_preflight_rejects_golden_codex_without_r15_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
@@ -3820,6 +3874,7 @@ run_test "transaction rollback without backup reports clear error" test_transact
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
 run_test "R15 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes

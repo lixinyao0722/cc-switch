@@ -34,15 +34,15 @@
 - Consumes: existing `validate_golden_codex_template`, `validate_merged_codex_config`, and Golden overwrite transaction.
 - Produces: portable R15 Golden config and matching GPT-5.5 release catalogs.
 
-- [ ] **Step 1: Add failing R15 defaults tests.** Rename the R14 defaults test to `test_r15_defaults_include_codex_settings_and_gpt55_window`; assert the Golden config contains each approved setting exactly once, lacks `[mcp_servers.computer-use]`, and use jq assertions for the four model entries in both catalog sources.
-- [ ] **Step 2: Run the focused test and confirm the expected failure.**
+- [x] **Step 1: Add failing R15 defaults tests.** Rename the R14 defaults test to `test_r15_defaults_include_codex_settings_and_gpt55_window`; assert the Golden config contains each approved setting exactly once, lacks `[mcp_servers.computer-use]`, and use jq assertions for the four model entries in both catalog sources.
+- [x] **Step 2: Run the focused test and confirm the expected failure.**
 
 Run: `pnpm test:installer -- "R15 defaults"`
 
 Expected: FAIL because the Golden settings and GPT-5.5 values are not present.
 
-- [ ] **Step 3: Implement the minimal Golden and catalog changes.** Add the two `[desktop]` keys and the enabled bundled plugin table, update only GPT-5.5's three numeric fields, and extend Golden validation to require the settings and reject a duplicate Computer Use MCP table.
-- [ ] **Step 4: Run focused tests and JSON validation.**
+- [x] **Step 3: Implement the minimal Golden and catalog changes.** Add the two `[desktop]` keys and the enabled bundled plugin table, update only GPT-5.5's three numeric fields, and extend Golden validation to require the settings and reject a duplicate Computer Use MCP table.
+- [x] **Step 4: Run focused tests and JSON validation.**
 
 Run: `pnpm test:installer -- "R15 defaults"`
 
@@ -50,7 +50,7 @@ Run: `jq empty scripts/modelhub-installer/assets/models-modelhub-1m.json src-tau
 
 Expected: PASS and valid JSON.
 
-- [ ] **Step 5: Commit the task.**
+- [x] **Step 5: Commit the task.**
 
 ```bash
 git add tests/scripts/modelhub-installer.test.sh scripts/modelhub-installer/golden/codex-config.toml scripts/modelhub-installer/assets/models-modelhub-1m.json src-tauri/src/resources/gpt5_5_template.json scripts/modelhub-installer/install.sh
@@ -67,21 +67,21 @@ git commit -m "feat(installer): 固化 R15 Codex 默认配置"
 - Consumes: `prepare_application_permissions`, `sudo_command`, and test-mode privilege stubs.
 - Produces: `explain_administrator_password` output immediately before the first required `sudo -v`.
 
-- [ ] **Step 1: Add failing privilege-message tests.** Add one test that forces `prepare_application_permissions` down the sudo path, captures stderr, and asserts the explanation contains `Mac 登录用户的管理员密码`, `不是 MODELHUB_AK`, `不会显示字符`, `/Applications`, and `/etc/codex`; add a second test proving the writable no-sudo path emits none of those lines.
-- [ ] **Step 2: Run the focused test and confirm the expected failure.**
+- [x] **Step 1: Add failing privilege-message tests.** Add one test that forces `prepare_application_permissions` down the sudo path, captures stderr, and asserts the explanation contains `Mac 登录用户的管理员密码`, `不是 MODELHUB_AK`, `不会显示字符`, `/Applications`, and `/etc/codex`; add a second test proving the writable no-sudo path emits none of those lines.
+- [x] **Step 2: Run the focused test and confirm the expected failure.**
 
 Run: `pnpm test:installer -- "administrator password guidance"`
 
 Expected: FAIL because only the sudo stub's prompt behavior exists.
 
-- [ ] **Step 3: Implement the centralized explanation.** Add `explain_administrator_password` and call it once immediately before `"$sudo_bin" -v` when `NEEDS_SUDO=1`.
-- [ ] **Step 4: Run the focused tests.**
+- [x] **Step 3: Implement the centralized explanation.** Add `explain_administrator_password` and call it once immediately before `"$sudo_bin" -v` when `NEEDS_SUDO=1`.
+- [x] **Step 4: Run the focused tests.**
 
 Run: `pnpm test:installer -- "administrator password guidance"`
 
 Expected: both sudo and no-sudo cases PASS.
 
-- [ ] **Step 5: Commit the task.**
+- [x] **Step 5: Commit the task.**
 
 ```bash
 git add tests/scripts/modelhub-installer.test.sh scripts/modelhub-installer/install.sh
@@ -101,8 +101,8 @@ git commit -m "fix(installer): 说明管理员密码输入要求"
 - Consumes: immutable release URL checks and exact four-asset packaging tests.
 - Produces: all installer/download/documentation references for `modelhub-installer-20260817-r15`.
 
-- [ ] **Step 1: Convert release-contract assertions to R15.** Rename R14 release tests and labels, require the R15 tag and step-three text, require an R15 changelog entry and guide wording for the new settings and password explanation, and reject remaining active R14 release URLs.
-- [ ] **Step 2: Run the focused release-contract tests and confirm failure.**
+- [x] **Step 1: Convert release-contract assertions to R15.** Rename R14 release tests and labels, require the R15 tag and step-three text, require an R15 changelog entry and guide wording for the new settings and password explanation, and reject remaining active R14 release URLs.
+- [x] **Step 2: Run the focused release-contract tests and confirm failure.**
 
 Run: `pnpm test:installer -- "R15 release contract"`
 
@@ -110,8 +110,8 @@ Run: `pnpm test:installer -- "R15 preflight downloads"`
 
 Expected: FAIL on existing R14 constants and documentation.
 
-- [ ] **Step 3: Update release metadata and user documentation.** Change the installer tag and progress text, rename the packaging normalization temporary suffix from `.r14-retry` to `.r15-retry`, add the R15 changelog entry, and update the guide's current-release section while retaining relevant historical R14 behavior descriptions.
-- [ ] **Step 4: Run release-contract and package tests.**
+- [x] **Step 3: Update release metadata and user documentation.** Change the installer tag and progress text, rename the packaging normalization temporary suffix from `.r14-retry` to `.r15-retry`, add the R15 changelog entry, and update the guide's current-release section while retaining relevant historical R14 behavior descriptions.
+- [x] **Step 4: Run release-contract and package tests.**
 
 Run: `pnpm test:installer -- "R15 release contract"`
 
@@ -121,7 +121,7 @@ Run: `pnpm test:installer -- "R15 package builds"`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the task.**
+- [x] **Step 5: Commit the task.**
 
 ```bash
 git add tests/scripts/modelhub-installer.test.sh scripts/modelhub-installer/install.sh scripts/modelhub-installer/package-release.sh docs/guides/modelhub-codex-proxy-compat-zh.md CHANGELOG.md
@@ -138,17 +138,21 @@ git commit -m "build(installer): 升级 R15 发布契约"
 - Consumes: green branch, verified R14 app ZIP, `package-release.sh`, authenticated `gh`.
 - Produces: pushed feature branch, ready-for-review PR to `main`, annotated R15 tag, and non-draft non-prerelease GitHub Release with exactly four assets.
 
-- [ ] **Step 1: Run complete repository gates.**
+- [x] **Step 1: Run complete repository gates.**
 
 Run: `bash -n scripts/modelhub-installer/install.sh scripts/modelhub-installer/package-release.sh`
 
 Run: `pnpm test:installer`
 
-Run: `pnpm test`
+Run: `pnpm test:unit`
 
-Run: `pnpm lint`
+Run: `pnpm typecheck`
 
-Run: `pnpm build`
+Run: `pnpm format:check`
+
+Run: `pnpm build:renderer`
+
+Run: `tauri build --no-bundle`
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml`
 
@@ -158,8 +162,8 @@ Run: `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warn
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Request independent code review.** Compare the branch against `origin/main`, fix every Critical or Important finding, and rerun affected focused tests plus the complete installer suite.
-- [ ] **Step 3: Commit verification-driven fixes and plan completion.** Mark completed plan checkboxes, run `git diff --check`, and commit only genuine final corrections or documentation state.
+- [x] **Step 2: Request independent code review.** Compare the branch against `origin/main`, fix every Critical or Important finding, and rerun affected focused tests plus the complete installer suite.
+- [x] **Step 3: Commit verification-driven fixes and plan completion.** Mark completed plan checkboxes, run `git diff --check`, and commit only genuine final corrections or documentation state.
 - [ ] **Step 4: Push and open the PR.** Push `feat/r15-modelhub-installer`, create a ready-for-review PR against `main`, and include the design, behavior changes, checks, release tag, and rollback notes.
 - [ ] **Step 5: Reuse and verify the signed R14 app ZIP.** Download `CC-Switch-ModelHub-3.19.2-arm64.app.zip` from the R14 release into a temporary directory, verify its GitHub digest and embedded app signature/version, then pass it to `package-release.sh`.
 - [ ] **Step 6: Build and smoke-test formal assets.** Package into a new empty temporary output directory, verify `SHA256SUMS.txt`, confirm exactly four files, run the packaged release-smoke test, and inspect the resource archive for the R15 catalog and Golden settings.

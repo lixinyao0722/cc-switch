@@ -990,6 +990,65 @@ modelhub-installer/templates/modelhub-provider.toml
 EOF
 }
 
+validate_model_catalog() {
+  local file="$1"
+  local valid
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "ModelHub model catalog is missing or unsafe: $file"
+    return 1
+  fi
+  valid="$(/usr/bin/jq -r '
+    def exact($slug; $context; $maximum; $percent):
+      ([.models[] | select(.slug == $slug)]
+        | length == 1
+          and .[0].context_window == $context
+          and .[0].max_context_window == $maximum
+          and .[0].effective_context_window_percent == $percent);
+    try (
+      (.models | type == "array")
+      and exact("gpt-5.6-sol"; 1050000; 1050000; 100)
+      and exact("gpt-5.6-terra"; 272000; 272000; 95)
+      and exact("gpt-5.6-luna"; 272000; 272000; 95)
+      and exact("gpt-5.5"; 1050000; 1050000; 100)
+    ) catch false
+  ' "$file" 2>/dev/null)" || valid=false
+  if [[ "$valid" != 'true' ]]; then
+    die 'ModelHub model catalog does not match the R15 context-window contract'
+    return 1
+  fi
+}
+
+golden_computer_use_plugin_is_enabled() {
+  local file="$1"
+
+  awk '
+    BEGIN {
+      in_target = 0
+      section_count = 0
+      enabled_count = 0
+      enabled_true_count = 0
+    }
+    /^[[:space:]]*\[/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      in_target = (line == "[plugins.\"computer-use@openai-bundled\"]")
+      if (in_target) section_count += 1
+      next
+    }
+    in_target && /^[[:space:]]*enabled[[:space:]]*=/ {
+      enabled_count += 1
+      if ($0 ~ /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true([[:space:]]*(#.*)?)?$/) {
+        enabled_true_count += 1
+      }
+    }
+    END {
+      exit(section_count == 1 && enabled_count == 1 && enabled_true_count == 1 ? 0 : 1)
+    }
+  ' "$file"
+}
+
 validate_golden_codex_template() {
   local file="$1"
   local placeholder_count
@@ -1007,8 +1066,7 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
     || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
-    || ! grep -Fq -- '[plugins."computer-use@openai-bundled"]' "$file" \
-    || ! grep -Fq -- 'enabled = true' "$file" \
+    || ! golden_computer_use_plugin_is_enabled "$file" \
     || ! grep -Fq -- 'request_max_retries = 2' "$file" \
     || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
@@ -1157,6 +1215,9 @@ validate_resource_archive() {
   fi
   validate_golden_codex_template \
     "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_model_catalog \
+    "$extracted_dir/modelhub-installer/assets/models-modelhub-1m.json" \
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_settings \
     "$extracted_dir/modelhub-installer/golden/settings.json" \
