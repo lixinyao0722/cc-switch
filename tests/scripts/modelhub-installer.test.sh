@@ -1451,6 +1451,20 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
+test_preflight_rejects_golden_codex_without_r14_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r14-defaults"
+  mkdir -p "$case_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-compact.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prefix.toml"
+  /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
+    "$case_dir/stale-compact.toml"
+  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\n//' \
+    "$case_dir/missing-prefix.toml"
+
+  assert_command_fails validate_golden_codex_template "$case_dir/stale-compact.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-prefix.toml"
+}
+
 test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
   local case_dir="$TEST_TMP/preflight-golden-r12-resilience"
   local database="$case_dir/cc-switch.db"
@@ -3657,6 +3671,7 @@ run_test "preflight verifies all release checksums" test_preflight_verifies_all_
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
+run_test "preflight rejects Golden Codex without R14 defaults" test_preflight_rejects_golden_codex_without_r14_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
