@@ -119,4 +119,3 @@
 - [ ] **Step 4: Push branch and open PR.** Push `codex/r14-mobile-modelhub-routing`, open a draft PR to `main`, and include root cause, behavior, security/rollback design, parameter decisions, tests, and manual mobile acceptance note.
 - [ ] **Step 5: Publish R14.** Create annotated tag `modelhub-installer-20260817-r14` at the verified commit, publish a non-draft GitHub Release with exactly the four built assets, mark it latest, then download all assets and byte-compare/checksum them against local outputs.
 - [ ] **Step 6: Report.** Provide PR URL, release URL, tag/commit, checks and counts, asset hashes, and the remaining manual mobile-new-thread acceptance item if it cannot be executed locally.
-
