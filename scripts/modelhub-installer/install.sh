@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260817-r14'
+readonly RELEASE_TAG='modelhub-installer-20260817-r15'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -1071,7 +1071,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 500000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R14 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R15 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -3765,7 +3765,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R14 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R15 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
