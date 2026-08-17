@@ -164,8 +164,8 @@ Expected: all commands exit 0.
 
 - [x] **Step 2: Request independent code review.** Compare the branch against `origin/main`, fix every Critical or Important finding, and rerun affected focused tests plus the complete installer suite.
 - [x] **Step 3: Commit verification-driven fixes and plan completion.** Mark completed plan checkboxes, run `git diff --check`, and commit only genuine final corrections or documentation state.
-- [ ] **Step 4: Push and open the PR.** Push `feat/r15-modelhub-installer`, create a ready-for-review PR against `main`, and include the design, behavior changes, checks, release tag, and rollback notes.
-- [ ] **Step 5: Reuse and verify the signed R14 app ZIP.** Download `CC-Switch-ModelHub-3.19.2-arm64.app.zip` from the R14 release into a temporary directory, verify its GitHub digest and embedded app signature/version, then pass it to `package-release.sh`.
-- [ ] **Step 6: Build and smoke-test formal assets.** Package into a new empty temporary output directory, verify `SHA256SUMS.txt`, confirm exactly four files, run the packaged release-smoke test, and inspect the resource archive for the R15 catalog and Golden settings.
+- [x] **Step 4: Push and open the PR.** Push `feat/r15-modelhub-installer`, create a ready-for-review PR against `main`, and include the design, behavior changes, checks, release tag, and rollback notes.
+- [x] **Step 5: Reuse and verify the signed R14 app ZIP.** Download `CC-Switch-ModelHub-3.19.2-arm64.app.zip` from the R14 release into a temporary directory, verify its GitHub digest and embedded app signature/version, then pass it to `package-release.sh`.
+- [x] **Step 6: Build and smoke-test formal assets.** Package into a new empty temporary output directory, verify `SHA256SUMS.txt`, confirm exactly four files, run the packaged release-smoke test, and inspect the resource archive for the R15 catalog and Golden settings.
 - [ ] **Step 7: Tag and publish R15.** Create and push annotated tag `modelhub-installer-20260817-r15` at the reviewed branch head, publish `ModelHub Installer R15` as a non-draft non-prerelease release, and upload exactly the four verified files.
 - [ ] **Step 8: Verify the public release.** Query GitHub for tag, release state, asset names, sizes, and digests; download the public checksum and verify all three content assets again.
