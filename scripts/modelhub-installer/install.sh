@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260816-r13'
+readonly RELEASE_TAG='modelhub-installer-20260817-r14'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -29,6 +29,9 @@ CC_SWITCH_APP_PATH=''
 CHATGPT_APP_PATH=''
 CHATGPT_CODEX_PATH=''
 CODEX_CONFIG_PATH=''
+CODEX_MANAGED_CONFIG_DIR=''
+CODEX_MANAGED_CONFIG_PATH=''
+MANAGED_CONFIG_STAGING_ROOT=''
 MODEL_CATALOG_PATH=''
 CC_SWITCH_DATABASE_PATH=''
 CC_SWITCH_SETTINGS_PATH=''
@@ -980,6 +983,7 @@ modelhub-installer/helpers/
 modelhub-installer/helpers/rename-exclusive
 modelhub-installer/templates/
 modelhub-installer/templates/com.ccswitch.modelhub-env.plist
+modelhub-installer/templates/codex-managed-config.toml
 modelhub-installer/templates/load-modelhub-env.sh
 modelhub-installer/templates/modelhub-provider-meta.json
 modelhub-installer/templates/modelhub-provider.toml
@@ -999,6 +1003,8 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
     || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
+    || ! grep -Fq -- 'model_auto_compact_token_limit = 500000' "$file" \
+    || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'request_max_retries = 2' "$file" \
     || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
@@ -1060,13 +1066,15 @@ validate_golden_database() {
     || { die 'golden CC Switch provider omits the ModelHub upstream'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 500000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
+    || { die 'golden CC Switch provider omits R14 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
     || { die 'golden CC Switch provider metadata model is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true' AND json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider encrypted reasoning memory is invalid'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=1 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
@@ -1151,6 +1159,9 @@ validate_resource_archive() {
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_database \
     "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_codex_managed_config \
+    "$extracted_dir/modelhub-installer/templates/codex-managed-config.toml" 1 \
     || { rm -rf "$work_dir"; return 1; }
 
   rm -rf "$work_dir"
@@ -1628,11 +1639,19 @@ toml_header_kind() {
       }
       header = compact_unquoted(substr(header, 2, length(header) - 2))
       count = split(header, parts, ".")
-      if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
+      if (count == 1 && unquote(parts[1]) == "desktop") {
+        print "desktop"
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
         if (count == 2) {
           print "modelhub"
         } else {
           print "modelhub-child"
+        }
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "openai") {
+        if (count == 2) {
+          print "openai-provider"
+        } else {
+          print "openai-provider-child"
         }
       } else {
         print "table"
@@ -1654,6 +1673,176 @@ modelhub_section_count() {
     fi
   done <"$file"
   printf '%s' "$count"
+}
+
+desktop_section_count() {
+  local file="$1"
+  local line
+  local kind
+  local count=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
+    if [[ "$kind" == "desktop" ]]; then
+      count=$((count + 1))
+    fi
+  done <"$file"
+  printf '%s' "$count"
+}
+
+managed_root_equivalent_key_count() {
+  local file="$1"
+  local key="$2"
+
+  awk -v key="$key" '
+    BEGIN { in_root = 1; count = 0 }
+    /^[[:space:]]*\[/ { in_root = 0 }
+    in_root {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ ("^" key "[[:space:]]*=") \
+          || line ~ ("^\"" key "\"[[:space:]]*=") \
+          || line ~ ("^\047" key "\047[[:space:]]*=")) {
+        count += 1
+      }
+    }
+    END { print count }
+  ' "$file"
+}
+
+validate_codex_managed_config() {
+  local file="$1"
+  local skip_parser="${2:-0}"
+  local line
+  local kind
+
+  if [[ ! -f "$file" ]]; then
+    die "Codex managed config does not exist: $file"
+    return 1
+  fi
+  if [[ "$(managed_root_equivalent_key_count "$file" model_provider)" != "1" ]] \
+    || [[ "$(managed_root_equivalent_key_count "$file" openai_base_url)" != "1" ]]; then
+    die 'Codex managed config must contain one entry for each managed root key'
+    return 1
+  fi
+  if ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"modelhub"[[:space:]]*$' "$file" \
+    || ! grep -Eq '^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"http://127\.0\.0\.1:15721/v1"[[:space:]]*$' "$file"; then
+    die 'Codex managed config contains an unexpected routing value'
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
+    case "$kind" in
+      openai-provider|openai-provider-child)
+        die 'Codex built-in openai provider must not be overridden'
+        return 1
+        ;;
+    esac
+  done <"$file"
+  if [[ "$skip_parser" != "1" ]]; then
+    validate_codex_managed_config_with_parser "$file"
+  fi
+}
+
+validate_codex_managed_config_with_parser() {
+  local file="$1"
+  local validator="${CC_SWITCH_CODEX_CONFIG_VALIDATOR:-${CHATGPT_CODEX_PATH:-}}"
+  local parser_home
+
+  [[ -n "$validator" ]] || return 0
+  if [[ ! -x "$validator" ]]; then
+    die "Codex config validator is unavailable: $validator"
+    return 1
+  fi
+  parser_home="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cc-switch-managed-parse.XXXXXX")" || return 1
+  if ! /bin/cp "$file" "$parser_home/config.toml"; then
+    /bin/rm -rf "$parser_home" || true
+    return 1
+  fi
+  if [[ "$(modelhub_section_count "$file")" == "0" ]]; then
+    printf '%s\n' \
+      '' \
+      '[model_providers.modelhub]' \
+      'name = "modelhub"' \
+      'base_url = "https://example.invalid/v1"' \
+      'wire_api = "responses"' \
+      >>"$parser_home/config.toml" || return 1
+  fi
+  if ! CODEX_HOME="$parser_home" "$validator" features list >/dev/null 2>&1; then
+    /bin/rm -rf "$parser_home" || true
+    die 'Codex managed config failed parser validation'
+    return 1
+  fi
+  /bin/rm -rf "$parser_home" || return 1
+}
+
+merge_codex_managed_config() {
+  local source_file="$1"
+  local template_file="$2"
+  local output_file="$3"
+  local effective_source="$source_file"
+  local work_dir
+  local filtered_root
+  local tables
+  local merged
+  local line
+  local in_root=1
+
+  if [[ ! -f "$template_file" ]]; then
+    die "Codex managed config template does not exist: $template_file"
+    return 1
+  fi
+  validate_codex_managed_config "$template_file" || return 1
+  if [[ ! -f "$effective_source" ]]; then
+    effective_source=/dev/null
+  fi
+  if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-managed-config-merge.XXXXXX")"; then
+    die 'failed to create the Codex managed config merge directory'
+    return 1
+  fi
+  filtered_root="$work_dir/root.toml"
+  tables="$work_dir/tables.toml"
+  merged="$work_dir/managed_config.toml"
+  : >"$filtered_root" || return 1
+  : >"$tables" || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$in_root" == "1" && "$line" =~ ^[[:space:]]*\[ ]]; then
+      in_root=0
+    fi
+    if [[ "$in_root" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*(model_provider|\"model_provider\"|\'model_provider\')[[:space:]]*= \
+        || "$line" =~ ^[[:space:]]*(openai_base_url|\"openai_base_url\"|\'openai_base_url\')[[:space:]]*= ]]; then
+      continue
+    fi
+    if [[ "$in_root" == "1" ]]; then
+      printf '%s\n' "$line" >>"$filtered_root" || return 1
+    else
+      printf '%s\n' "$line" >>"$tables" || return 1
+    fi
+  done <"$effective_source"
+
+  if ! /bin/cp "$filtered_root" "$merged" \
+    || ! /bin/cat "$template_file" >>"$merged"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to stage the Codex managed config roots'
+    return 1
+  fi
+  if [[ -s "$tables" ]]; then
+    printf '\n' >>"$merged" || return 1
+    /bin/cat "$tables" >>"$merged" || return 1
+  fi
+  validate_codex_managed_config "$merged" || {
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  }
+  /bin/mkdir -p "$(dirname "$output_file")" || return 1
+  if ! /bin/mv "$merged" "$output_file"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to write the merged Codex managed config'
+    return 1
+  fi
+  /bin/rm -rf "$work_dir" || return 1
 }
 
 validate_codex_config_with_parser() {
@@ -1693,6 +1882,7 @@ validate_merged_codex_config() {
   local key
   local count
   local section_count
+  local desktop_count
 
   if [[ ! -f "$file" ]]; then
     die "merged Codex config does not exist: $file"
@@ -1718,6 +1908,15 @@ validate_merged_codex_config() {
   section_count="$(modelhub_section_count "$file")" || return 1
   if [[ "$section_count" != "1" ]]; then
     die "expected one $MODELHUB_SECTION section, found $section_count"
+    return 1
+  fi
+  desktop_count="$(desktop_section_count "$file")" || return 1
+  if [[ "$desktop_count" != "1" ]]; then
+    die "expected one [desktop] section, found $desktop_count"
+    return 1
+  fi
+  if [[ "$(grep -Ec '^[[:space:]]*git-branch-prefix[[:space:]]*=[[:space:]]*"feat/"[[:space:]]*$' "$file")" != "1" ]]; then
+    die 'merged Codex config must contain one feat/ Git branch prefix'
     return 1
   fi
 
@@ -1751,6 +1950,8 @@ merge_codex_config() {
   local header_kind
   local in_root=1
   local skip_modelhub=0
+  local in_desktop=0
+  local saw_desktop=0
 
   if [[ ! -f "$template_file" ]]; then
     die "ModelHub template does not exist: $template_file"
@@ -1786,16 +1987,37 @@ merge_codex_config() {
     }
     case "$header_kind" in
       modelhub|modelhub-child)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
         skip_modelhub=1
         in_root=0
+        in_desktop=0
         continue
         ;;
-      table)
+      desktop)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
         skip_modelhub=0
         in_root=0
+        in_desktop=1
+        saw_desktop=1
+        ;;
+      table|openai-provider|openai-provider-child)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
+        skip_modelhub=0
+        in_root=0
+        in_desktop=0
         ;;
     esac
     if [[ "$skip_modelhub" == "1" ]]; then
+      continue
+    fi
+    if [[ "$in_desktop" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*git-branch-prefix[[:space:]]*= ]]; then
       continue
     fi
     if [[ "$in_root" == "1" ]] \
@@ -1808,8 +2030,14 @@ merge_codex_config() {
       return 1
     fi
   done <"$effective_source"
+  if [[ "$in_desktop" == "1" ]]; then
+    printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+  fi
+  if [[ "$saw_desktop" == "0" ]]; then
+    printf '%s\n' '[desktop]' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+  fi
 
-  if ! awk -v section="$MODELHUB_SECTION" '$0 == section { exit } { print }' "$rendered_template" >"$merged_file"; then
+  if ! awk '/^[[:space:]]*\[/ { exit } { print }' "$rendered_template" >"$merged_file"; then
     /bin/rm -rf "$work_dir" || true
     die "failed to stage managed Codex root fields"
     return 1
@@ -1862,9 +2090,13 @@ configure_install_paths() {
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     INSTALL_USER_HOME="${CC_SWITCH_INSTALLER_TEST_HOME:?test home is required}"
     INSTALL_APPLICATIONS_DIR="${CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR:?test Applications directory is required}"
+    CODEX_MANAGED_CONFIG_DIR="${CC_SWITCH_INSTALLER_TEST_ETC_ROOT:-$INSTALL_APPLICATIONS_DIR/.cc-switch-test-etc}/codex"
+    MANAGED_CONFIG_STAGING_ROOT="${CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP:-${TMPDIR:-/tmp}}"
   else
     INSTALL_USER_HOME="$HOME"
     INSTALL_APPLICATIONS_DIR='/Applications'
+    CODEX_MANAGED_CONFIG_DIR='/etc/codex'
+    MANAGED_CONFIG_STAGING_ROOT='/private/var/tmp'
   fi
 
   if [[ "$INSTALL_USER_HOME" != /* || "$INSTALL_USER_HOME" == "/" ]]; then
@@ -1880,6 +2112,7 @@ configure_install_paths() {
   CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
   CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
+  CODEX_MANAGED_CONFIG_PATH="$CODEX_MANAGED_CONFIG_DIR/managed_config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
   CC_SWITCH_SETTINGS_PATH="$INSTALL_USER_HOME/.cc-switch/settings.json"
@@ -1892,6 +2125,7 @@ configure_install_paths() {
 managed_targets() {
   printf '%s\t%s\n' "$CC_SWITCH_APP_PATH" 'cc-switch-app'
   printf '%s\t%s\n' "$CODEX_CONFIG_PATH" 'codex-config.toml'
+  printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
   printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'models-modelhub-1m.json'
   printf '%s\t%s\n' "$CC_SWITCH_DATABASE_PATH" 'cc-switch.db'
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
@@ -1934,9 +2168,9 @@ validate_privileged_command() {
   local command_path="$1"
 
   case "$command_path" in
-    /bin/chmod|/bin/cp|/bin/rm|/bin/test \
+    /bin/cat|/bin/chmod|/bin/cp|/bin/mkdir|/bin/mv|/bin/rm|/bin/rmdir|/bin/test \
       |/usr/bin/codesign|/usr/bin/ditto|/usr/bin/file|/usr/bin/mktemp \
-      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr)
+      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr|/usr/sbin/chown)
       return 0
       ;;
   esac
@@ -1968,6 +2202,8 @@ remove_managed_target() {
   fi
   if [[ "$target" == "$CC_SWITCH_APP_PATH" ]]; then
     run_with_privilege /bin/rm -rf -- "$target"
+  elif [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+    run_with_privilege /bin/rm -f -- "$target"
   else
     /bin/rm -rf -- "$target"
   fi
@@ -2040,9 +2276,36 @@ create_backup() {
     die "failed to create backup manifest: $manifest"
     return 1
   fi
+  if path_is_symlink "$CODEX_MANAGED_CONFIG_DIR"; then
+    die "Codex managed config directory must not be a symlink: $CODEX_MANAGED_CONFIG_DIR"
+    return 1
+  fi
+  if path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
+    printf '1\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
+  else
+    printf '0\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
+  fi
 
   while IFS=$'\t' read -r target relative; do
-    if [[ -L "$target" ]]; then
+    if [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+      if path_is_symlink "$target"; then
+        die "managed target must not be a symlink: $target"
+        return 1
+      fi
+      if path_is_regular_file "$target"; then
+        if ! run_with_privilege /bin/cp -p "$target" "$backup_dir/files/$relative"; then
+          die "failed to back up managed file: $target"
+          return 1
+        fi
+        printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest" || return 1
+      elif path_exists "$target"; then
+        die "managed target is not a regular file: $target"
+        return 1
+      else
+        printf '%s\t0\t-\n' "$target" >>"$manifest" || return 1
+      fi
+      continue
+    elif [[ -L "$target" ]]; then
       die "managed target must not be a symlink: $target"
       return 1
     fi
@@ -2101,6 +2364,11 @@ validate_backup_manifest() {
   fi
   if ! awk -F '\t' 'NF != 3 { exit 1 }' "$manifest"; then
     die "backup manifest has an invalid row"
+    return 1
+  fi
+  if [[ "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "0" \
+    && "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "1" ]]; then
+    die 'backup manifest has invalid Codex managed config parent state'
     return 1
   fi
 
@@ -2185,6 +2453,8 @@ restore_backup() {
   local relative
   local backup_path
   local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
+  local managed_parent_existed
+  local managed_temp=''
 
   validate_backup_manifest "$backup_dir" || return 1
 
@@ -2206,7 +2476,16 @@ restore_backup() {
     fi
     if [[ "$existed" == "1" ]]; then
       backup_path="$backup_dir/$relative"
-      if [[ -d "$backup_path" ]]; then
+      if [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+        run_with_privilege /bin/mkdir -p "$CODEX_MANAGED_CONFIG_DIR" || return 1
+        managed_temp="$(run_with_privilege /usr/bin/mktemp "$CODEX_MANAGED_CONFIG_DIR/.managed_config.toml.restore.XXXXXX")" || return 1
+        if ! run_with_privilege /bin/cp -p "$backup_path" "$managed_temp" \
+          || ! run_with_privilege /bin/mv -f "$managed_temp" "$target"; then
+          run_with_privilege /bin/rm -f -- "$managed_temp" || true
+          die 'failed to restore Codex managed config'
+          return 1
+        fi
+      elif [[ -d "$backup_path" ]]; then
         if ! /bin/mkdir -p "$(dirname "$target")"; then
           die "failed to create restore parent directory: $target"
           return 1
@@ -2238,6 +2517,11 @@ restore_backup() {
       return 1
     fi
   done <"$manifest"
+
+  managed_parent_existed="$(/bin/cat "$backup_dir/codex-managed-config-parent-existed")" || return 1
+  if [[ "$managed_parent_existed" == "0" ]] && path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
+    run_with_privilege /bin/rmdir "$CODEX_MANAGED_CONFIG_DIR" 2>/dev/null || true
+  fi
 
   reload_restored_launch_agent || return 1
 }
@@ -2326,6 +2610,102 @@ install_golden_codex_config() {
     || ! /bin/rmdir "$work_dir"; then
     /bin/rm -rf "$work_dir" || true
     die 'failed to atomically install the golden Codex config'
+    return 1
+  fi
+}
+
+install_codex_managed_config() {
+  local template_file="$1"
+  local stage_dir=''
+  local existing_file
+  local candidate_file
+  local target_temp=''
+  local candidate_sha
+  local installed_sha
+  local installed_mode
+  local installed_owner
+  local stage_owner_mode
+  local status=0
+
+  if [[ "$MANAGED_CONFIG_STAGING_ROOT" != /* || ! -d "$MANAGED_CONFIG_STAGING_ROOT" \
+    || -L "$MANAGED_CONFIG_STAGING_ROOT" ]]; then
+    die "unsafe Codex managed config staging root: $MANAGED_CONFIG_STAGING_ROOT"
+    return 1
+  fi
+  stage_dir="$(/usr/bin/mktemp -d "$MANAGED_CONFIG_STAGING_ROOT/.cc-switch-managed-config.XXXXXX")" || return 1
+  /bin/chmod 0700 "$stage_dir" || status=1
+  stage_owner_mode="$(/usr/bin/stat -f '%u:%Lp' "$stage_dir" 2>/dev/null || true)"
+  if [[ -L "$stage_dir" || "$stage_owner_mode" != "$(/usr/bin/id -u):700" ]]; then
+    status=1
+  fi
+  existing_file="$stage_dir/existing.toml"
+  candidate_file="$stage_dir/managed_config.toml"
+
+  if [[ "$status" == "0" ]] && path_is_symlink "$CODEX_MANAGED_CONFIG_DIR"; then
+    die "Codex managed config directory must not be a symlink: $CODEX_MANAGED_CONFIG_DIR"
+    status=1
+  fi
+  if [[ "$status" == "0" ]] && path_is_symlink "$CODEX_MANAGED_CONFIG_PATH"; then
+    die "Codex managed config must not be a symlink: $CODEX_MANAGED_CONFIG_PATH"
+    status=1
+  fi
+  if [[ "$status" == "0" ]] && path_is_regular_file "$CODEX_MANAGED_CONFIG_PATH"; then
+    run_with_privilege /bin/cat "$CODEX_MANAGED_CONFIG_PATH" >"$existing_file" || status=1
+  elif [[ "$status" == "0" ]] && path_exists "$CODEX_MANAGED_CONFIG_PATH"; then
+    die "Codex managed config is not a regular file: $CODEX_MANAGED_CONFIG_PATH"
+    status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    merge_codex_managed_config "$existing_file" "$template_file" "$candidate_file" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    candidate_sha="$(file_sha256 "$candidate_file")" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/mkdir -p "$CODEX_MANAGED_CONFIG_DIR" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    target_temp="$(run_with_privilege /usr/bin/mktemp "$CODEX_MANAGED_CONFIG_DIR/.managed_config.toml.install.XXXXXX")" || status=1
+    case "$target_temp" in
+      "$CODEX_MANAGED_CONFIG_DIR"/.managed_config.toml.install.*) ;;
+      *) status=1 ;;
+    esac
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/cp "$candidate_file" "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/chmod 0644 "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" && "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+    run_with_privilege /usr/sbin/chown root:wheel "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    installed_sha="$(run_with_privilege /usr/bin/shasum -a 256 "$target_temp" | awk '{ print $1 }')" || status=1
+    [[ "$installed_sha" == "$candidate_sha" ]] || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/mv -f "$target_temp" "$CODEX_MANAGED_CONFIG_PATH" || status=1
+    target_temp=''
+  fi
+  if [[ "$status" == "0" ]]; then
+    installed_mode="$(run_with_privilege /usr/bin/stat -f '%Lp' "$CODEX_MANAGED_CONFIG_PATH")" || status=1
+    [[ "$installed_mode" == "644" ]] || status=1
+  fi
+  if [[ "$status" == "0" && "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+    installed_owner="$(run_with_privilege /usr/bin/stat -f '%Su:%Sg' "$CODEX_MANAGED_CONFIG_PATH")" || status=1
+    [[ "$installed_owner" == 'root:wheel' ]] || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    validate_codex_managed_config "$CODEX_MANAGED_CONFIG_PATH" || status=1
+  fi
+
+  if [[ -n "$target_temp" ]]; then
+    run_with_privilege /bin/rm -f -- "$target_temp" || status=1
+  fi
+  /bin/rm -rf "$stage_dir" || status=1
+  if [[ "$status" != "0" ]]; then
+    die 'failed to atomically install Codex managed config'
     return 1
   fi
 }
@@ -2458,6 +2838,9 @@ install_runtime_files() {
     "$resources_dir/golden/codex-config.toml" \
     "$CODEX_CONFIG_PATH" \
     "$INSTALL_USER_HOME" \
+    || return 1
+  install_codex_managed_config \
+    "$resources_dir/templates/codex-managed-config.toml" \
     || return 1
   install_golden_database \
     "$resources_dir/golden/cc-switch.db" \
@@ -3197,12 +3580,23 @@ path_tree_requires_privilege() {
   return 0
 }
 
+path_creation_requires_privilege() {
+  local target="$1"
+  local ancestor="$target"
+
+  while [[ ! -e "$ancestor" && "$ancestor" != "/" ]]; do
+    ancestor="$(dirname "$ancestor")"
+  done
+  [[ ! -d "$ancestor" || ! -w "$ancestor" ]]
+}
+
 prepare_application_permissions() {
   local sudo_bin
 
   NEEDS_SUDO=0
   /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR" 2>/dev/null || true
   if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]] \
+    || path_creation_requires_privilege "$CODEX_MANAGED_CONFIG_DIR" \
     || path_tree_requires_privilege "$CC_SWITCH_APP_PATH" \
     || { [[ ! -d "$INSTALL_APPLICATIONS_DIR/ChatGPT.app" ]] \
       && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
@@ -3358,7 +3752,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R13 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R14 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -3460,7 +3854,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
-  printf '\n安装完成：CC Switch 已启动，ModelHub 路由检查通过。\n' >&2
+  printf '\n安装完成：桌面与移动端新会话已强制通过 CC Switch；代理不可用时会话将失败。\n' >&2
 }
 
 rollback_latest() {

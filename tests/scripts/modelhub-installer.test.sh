@@ -7,12 +7,15 @@ INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
 PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
+MANAGED_CONFIG_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/codex-managed-config.toml"
 RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
 GOLDEN_DB_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-golden-db.sh"
 LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local-golden-snapshot.sh"
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
+MODELHUB_GUIDE="$REPO_ROOT/docs/guides/modelhub-codex-proxy-compat-zh.md"
+CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -251,6 +254,110 @@ test_merge_preserves_unmanaged_sections() {
   assert_not_contains "$case_dir/output.toml" 'https://old.invalid'
   assert_not_contains "$case_dir/output.toml" 'old-model'
   assert_not_contains "$case_dir/output.toml" 'old-provider'
+}
+
+test_r14_defaults_use_compact_retry_and_git_prefix() {
+  local case_dir="$TEST_TMP/r14-defaults"
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    'approval_policy = "on-request"' \
+    '[desktop]' \
+    'followUpQueueMode = "queued"' \
+    'git-branch-prefix = "old/"' \
+    >"$case_dir/input.toml"
+
+  merge_codex_config \
+    "$case_dir/input.toml" \
+    "$TEMPLATE" \
+    "$case_dir/output.toml" \
+    '/Users/Test User'
+
+  assert_contains "$TEMPLATE" 'model_auto_compact_token_limit = 500000'
+  assert_contains "$GOLDEN_CODEX_CONFIG" 'model_auto_compact_token_limit = 500000'
+  assert_equals \
+    "$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' "$META_TEMPLATE")" \
+    '2'
+  assert_occurrences "$case_dir/output.toml" '[desktop]' 1
+  assert_occurrences "$case_dir/output.toml" 'git-branch-prefix = "feat/"' 1
+  assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
+  assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
+}
+
+test_managed_config_merge_preserves_unrelated_config() {
+  local case_dir="$TEST_TMP/managed-config-merge-preserve"
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    '# managed heading' \
+    'analytics_enabled = false' \
+    '"model_provider" = "openai" # stale mobile default' \
+    "'openai_base_url' = 'https://api.openai.com/v1'" \
+    '[history]' \
+    'persistence = "save-all"' \
+    'model_provider = "table-local-value"' \
+    >"$case_dir/input.toml"
+
+  merge_codex_managed_config \
+    "$case_dir/input.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/output.toml"
+
+  assert_occurrences "$case_dir/output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
+  assert_contains "$case_dir/output.toml" '# managed heading'
+  assert_contains "$case_dir/output.toml" 'analytics_enabled = false'
+  assert_contains "$case_dir/output.toml" '[history]'
+  assert_contains "$case_dir/output.toml" 'persistence = "save-all"'
+  assert_contains "$case_dir/output.toml" 'model_provider = "table-local-value"'
+  assert_not_contains "$case_dir/output.toml" 'stale mobile default'
+  assert_not_contains "$case_dir/output.toml" 'https://api.openai.com/v1'
+  validate_codex_managed_config "$case_dir/output.toml"
+}
+
+test_managed_config_merge_creates_missing_and_normalizes_duplicates() {
+  local case_dir="$TEST_TMP/managed-config-merge-create"
+  mkdir -p "$case_dir"
+
+  merge_codex_managed_config \
+    "$case_dir/missing.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/missing-output.toml"
+  printf '%s\n' \
+    'model_provider = "first"' \
+    'model_provider = "second"' \
+    'openai_base_url = "https://one.invalid"' \
+    'openai_base_url = "https://two.invalid"' \
+    >"$case_dir/duplicates.toml"
+  merge_codex_managed_config \
+    "$case_dir/duplicates.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/duplicates-output.toml"
+
+  assert_occurrences "$case_dir/missing-output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/duplicates-output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/duplicates-output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
+}
+
+test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml() {
+  local case_dir="$TEST_TMP/managed-config-merge-reject"
+  local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
+  mkdir -p "$case_dir"
+  [[ -x "$codex_bin" ]] || fail "Codex parser is unavailable: $codex_bin"
+  printf '%s\n' \
+    '[model_providers.openai]' \
+    'base_url = "https://forbidden.invalid"' \
+    >"$case_dir/openai.toml"
+  printf '%s\n' \
+    '[ "model_providers" . "openai" . http_headers ]' \
+    'x-test = "forbidden"' \
+    >"$case_dir/quoted-openai.toml"
+  printf '%s\n' 'broken = [unterminated' >"$case_dir/invalid.toml"
+
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/openai.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/openai-output.toml"
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/quoted-openai.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/quoted-output.toml"
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/invalid.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/invalid-output.toml"
 }
 
 test_merge_creates_config_from_empty_file() {
@@ -1265,6 +1372,7 @@ create_expected_resource_tree() {
   cp "$TEST_RENAME_HELPER" "$root/helpers/rename-exclusive"
   : >"$root/templates/modelhub-provider.toml"
   : >"$root/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$root/templates/codex-managed-config.toml"
   : >"$root/templates/com.ccswitch.modelhub-env.plist"
   : >"$root/templates/load-modelhub-env.sh"
 }
@@ -1343,6 +1451,20 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
+test_preflight_rejects_golden_codex_without_r14_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r14-defaults"
+  mkdir -p "$case_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-compact.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prefix.toml"
+  /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
+    "$case_dir/stale-compact.toml"
+  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\n//' \
+    "$case_dir/missing-prefix.toml"
+
+  assert_command_fails validate_golden_codex_template "$case_dir/stale-compact.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-prefix.toml"
+}
+
 test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
   local case_dir="$TEST_TMP/preflight-golden-r12-resilience"
   local database="$case_dir/cc-switch.db"
@@ -1414,7 +1536,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260816-r13'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260817-r14'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1427,7 +1549,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260816-r13/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260817-r14/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1938,6 +2060,7 @@ create_transaction_assets() {
   cp "$TEST_RENAME_HELPER" "$resource_root/helpers/rename-exclusive"
   cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$resource_root/templates/codex-managed-config.toml"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
     "$resource_root/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
@@ -2000,6 +2123,7 @@ managed_state_manifest() {
     "$user_home/.cc-switch/settings.json"
     "$user_home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
     "$user_home/.local/share/cc-switch-modelhub/load-modelhub-env.sh"
+    "$case_dir/etc/codex/managed_config.toml"
   )
 
   for path in "${paths[@]}"; do
@@ -2033,6 +2157,9 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_TEST_MODE=1
   export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP="$case_dir/private-var-tmp"
+  mkdir -p "$CC_SWITCH_INSTALLER_TEST_ETC_ROOT" "$CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP"
   export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
@@ -2059,6 +2186,115 @@ prepare_transaction_case() {
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
   export FAKE_LAUNCHCTL_GETENV_STATUS=''
   export FAKE_PGREP_MODE=stopped
+}
+
+test_managed_config_install_writes_forced_routes() {
+  local case_dir="$TEST_TMP/managed-config-install"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+
+  perform_install
+
+  assert_contains "$managed_config" 'model_provider = "modelhub"'
+  assert_contains "$managed_config" 'openai_base_url = "http://127.0.0.1:15721/v1"'
+  assert_equals "$(/usr/bin/stat -f '%Lp' "$managed_config")" '644'
+  [[ -z "$(find "$case_dir/private-var-tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'managed config staging was not cleaned'
+}
+
+test_managed_config_rollback_restores_existing_file_and_mode() {
+  local case_dir="$TEST_TMP/managed-config-rollback-existing"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  mkdir -p "$(dirname "$managed_config")"
+  printf '%s\n' \
+    '# original managed policy' \
+    'model_provider = "openai"' \
+    'unrelated_policy = true' \
+    >"$managed_config"
+  chmod 0640 "$managed_config"
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  assert_contains "$managed_config" '# original managed policy'
+  assert_contains "$managed_config" 'model_provider = "openai"'
+  assert_contains "$managed_config" 'unrelated_policy = true'
+  assert_not_contains "$managed_config" 'openai_base_url'
+  assert_equals "$(/usr/bin/stat -f '%Lp' "$managed_config")" '640'
+  [[ -d "$case_dir/etc/codex" ]] || fail 'rollback removed a pre-existing codex directory'
+}
+
+test_managed_config_rollback_removes_new_file_and_empty_directory() {
+  local case_dir="$TEST_TMP/managed-config-rollback-new"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+
+  perform_install
+  rollback_latest
+
+  [[ ! -e "$managed_config" ]] || fail 'rollback retained a newly created managed config'
+  [[ ! -d "$case_dir/etc/codex" ]] || fail 'rollback retained the installer-created empty codex directory'
+}
+
+test_managed_config_rollback_keeps_preexisting_empty_directory() {
+  local case_dir="$TEST_TMP/managed-config-rollback-existing-directory"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  mkdir -p "$case_dir/etc/codex"
+
+  perform_install
+  rollback_latest
+
+  [[ ! -e "$case_dir/etc/codex/managed_config.toml" ]] \
+    || fail 'rollback retained a newly created managed config'
+  [[ -d "$case_dir/etc/codex" ]] \
+    || fail 'rollback removed a pre-existing empty codex directory'
+}
+
+test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
+  local case_dir="$TEST_TMP/managed-config-install-privileged-staging"
+  local sudo_bin="$case_dir/fake-sudo"
+  local sudo_log="$case_dir/sudo.log"
+  mkdir -p "$case_dir/home" "$case_dir/Applications" "$case_dir/etc" "$case_dir/private-var-tmp"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP="$case_dir/private-var-tmp"
+  export CC_SWITCH_CODEX_CONFIG_VALIDATOR='/Applications/ChatGPT.app/Contents/Resources/codex'
+  export FAKE_SUDO_LOG="$sudo_log"
+  configure_install_paths
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    'exec "$@"'
+  activate_fake_privilege_runner "$sudo_bin"
+  NEEDS_SUDO=1
+
+  install_codex_managed_config "$MANAGED_CONFIG_TEMPLATE"
+
+  assert_contains "$sudo_log" "/bin/cp $case_dir/private-var-tmp/.cc-switch-managed-config."
+  assert_not_contains "$sudo_log" '/Downloads/'
+  assert_not_contains "$sudo_log" "$REPO_ROOT/scripts/modelhub-installer/templates"
+  assert_contains "$sudo_log" "/bin/mv -f $case_dir/etc/codex/.managed_config.toml.install."
+  [[ -z "$(find "$case_dir/private-var-tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'privileged staging test left a candidate directory'
+}
+
+test_r14_release_contract_and_documentation() {
+  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260817-r14'"
+  assert_contains "$INSTALLER" '下载并校验 R14 安装器、CC Switch 和配置资源'
+  assert_contains "$MODELHUB_GUIDE" '/etc/codex/managed_config.toml'
+  assert_contains "$MODELHUB_GUIDE" 'openai_base_url = "http://127.0.0.1:15721/v1"'
+  assert_contains "$MODELHUB_GUIDE" 'model_auto_compact_token_limit = 500000'
+  assert_contains "$MODELHUB_GUIDE" '"maxRetries": 2'
+  assert_contains "$MODELHUB_GUIDE" 'git-branch-prefix = "feat/"'
+  assert_contains "$MODELHUB_GUIDE" '移动端新建全新会话'
+  assert_contains "$MODELHUB_GUIDE" 'CC Switch 不可用'
+  assert_contains "$CHANGELOG_FILE" 'ModelHub R14 Mobile Session Routing'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -2880,6 +3116,7 @@ create_packager_source() {
   cp "$GOLDEN_SETTINGS" "$source_dir/golden/settings.json"
   cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$source_dir/templates/codex-managed-config.toml"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
     "$source_dir/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
@@ -2912,7 +3149,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260816-r13'"
+    "readonly RELEASE_TAG='modelhub-installer-20260817-r14'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -3195,7 +3432,7 @@ test_package_normalizes_custom_snapshot_retry_policy() {
   assert_not_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'retry_429'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '1'
+    '2'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
     '2000'
@@ -3278,7 +3515,7 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     '1'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '1'
+    '2'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
     '2000'
@@ -3388,6 +3625,16 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
+run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_compact_retry_and_git_prefix
+run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
+run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
+run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
+run_test "managed config install writes forced routes" test_managed_config_install_writes_forced_routes
+run_test "managed config rollback restores existing file and mode" test_managed_config_rollback_restores_existing_file_and_mode
+run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
+run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
+run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
+run_test "R14 release contract and documentation" test_r14_release_contract_and_documentation
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -3424,11 +3671,12 @@ run_test "preflight verifies all release checksums" test_preflight_verifies_all_
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
+run_test "preflight rejects Golden Codex without R14 defaults" test_preflight_rejects_golden_codex_without_r14_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R13 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R14 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -3477,7 +3725,7 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R13 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R14 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes

@@ -3,11 +3,14 @@ review_model = "gpt-5.6-sol"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
 model_reasoning_effort = "high"
-model_auto_compact_token_limit = 829_674
+model_auto_compact_token_limit = 500000
 model_context_window = 921_860
 model_catalog_json = "__USER_HOME__/.codex/models-modelhub-1m.json"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+
+[desktop]
+git-branch-prefix = "feat/"
 
 [model_providers.modelhub]
 name = "modelhub"
