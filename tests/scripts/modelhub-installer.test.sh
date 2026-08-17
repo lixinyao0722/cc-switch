@@ -2107,6 +2107,7 @@ managed_state_manifest() {
     "$user_home/.cc-switch/settings.json"
     "$user_home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
     "$user_home/.local/share/cc-switch-modelhub/load-modelhub-env.sh"
+    "$case_dir/etc/codex/managed_config.toml"
   )
 
   for path in "${paths[@]}"; do
@@ -2140,6 +2141,9 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_TEST_MODE=1
   export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP="$case_dir/private-var-tmp"
+  mkdir -p "$CC_SWITCH_INSTALLER_TEST_ETC_ROOT" "$CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP"
   export CC_SWITCH_INSTALLER_ASSET_DIR="$case_dir/assets"
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120000Z'
   export CC_SWITCH_INSTALLER_HEALTH_TIMEOUT=1
@@ -2166,6 +2170,102 @@ prepare_transaction_case() {
   export FAKE_LAUNCHCTL_SIGNAL_TERM=0
   export FAKE_LAUNCHCTL_GETENV_STATUS=''
   export FAKE_PGREP_MODE=stopped
+}
+
+test_managed_config_install_writes_forced_routes() {
+  local case_dir="$TEST_TMP/managed-config-install"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+
+  perform_install
+
+  assert_contains "$managed_config" 'model_provider = "modelhub"'
+  assert_contains "$managed_config" 'openai_base_url = "http://127.0.0.1:15721/v1"'
+  assert_equals "$(/usr/bin/stat -f '%Lp' "$managed_config")" '644'
+  [[ -z "$(find "$case_dir/private-var-tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'managed config staging was not cleaned'
+}
+
+test_managed_config_rollback_restores_existing_file_and_mode() {
+  local case_dir="$TEST_TMP/managed-config-rollback-existing"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  mkdir -p "$(dirname "$managed_config")"
+  printf '%s\n' \
+    '# original managed policy' \
+    'model_provider = "openai"' \
+    'unrelated_policy = true' \
+    >"$managed_config"
+  chmod 0640 "$managed_config"
+  export FAKE_HEALTH_MODE=timeout
+
+  assert_command_fails perform_install
+
+  assert_contains "$managed_config" '# original managed policy'
+  assert_contains "$managed_config" 'model_provider = "openai"'
+  assert_contains "$managed_config" 'unrelated_policy = true'
+  assert_not_contains "$managed_config" 'openai_base_url'
+  assert_equals "$(/usr/bin/stat -f '%Lp' "$managed_config")" '640'
+  [[ -d "$case_dir/etc/codex" ]] || fail 'rollback removed a pre-existing codex directory'
+}
+
+test_managed_config_rollback_removes_new_file_and_empty_directory() {
+  local case_dir="$TEST_TMP/managed-config-rollback-new"
+  local managed_config="$case_dir/etc/codex/managed_config.toml"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+
+  perform_install
+  rollback_latest
+
+  [[ ! -e "$managed_config" ]] || fail 'rollback retained a newly created managed config'
+  [[ ! -d "$case_dir/etc/codex" ]] || fail 'rollback retained the installer-created empty codex directory'
+}
+
+test_managed_config_rollback_keeps_preexisting_empty_directory() {
+  local case_dir="$TEST_TMP/managed-config-rollback-existing-directory"
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  mkdir -p "$case_dir/etc/codex"
+
+  perform_install
+  rollback_latest
+
+  [[ ! -e "$case_dir/etc/codex/managed_config.toml" ]] \
+    || fail 'rollback retained a newly created managed config'
+  [[ -d "$case_dir/etc/codex" ]] \
+    || fail 'rollback removed a pre-existing empty codex directory'
+}
+
+test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
+  local case_dir="$TEST_TMP/managed-config-install-privileged-staging"
+  local sudo_bin="$case_dir/fake-sudo"
+  local sudo_log="$case_dir/sudo.log"
+  mkdir -p "$case_dir/home" "$case_dir/Applications" "$case_dir/etc" "$case_dir/private-var-tmp"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP="$case_dir/private-var-tmp"
+  export CC_SWITCH_CODEX_CONFIG_VALIDATOR='/Applications/ChatGPT.app/Contents/Resources/codex'
+  export FAKE_SUDO_LOG="$sudo_log"
+  configure_install_paths
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    'exec "$@"'
+  activate_fake_privilege_runner "$sudo_bin"
+  NEEDS_SUDO=1
+
+  install_codex_managed_config "$MANAGED_CONFIG_TEMPLATE"
+
+  assert_contains "$sudo_log" "/bin/cp $case_dir/private-var-tmp/.cc-switch-managed-config."
+  assert_not_contains "$sudo_log" '/Downloads/'
+  assert_not_contains "$sudo_log" "$REPO_ROOT/scripts/modelhub-installer/templates"
+  assert_contains "$sudo_log" "/bin/mv -f $case_dir/etc/codex/.managed_config.toml.install."
+  [[ -z "$(find "$case_dir/private-var-tmp" -mindepth 1 -print -quit)" ]] \
+    || fail 'privileged staging test left a candidate directory'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -3500,6 +3600,11 @@ run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_c
 run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
 run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
 run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
+run_test "managed config install writes forced routes" test_managed_config_install_writes_forced_routes
+run_test "managed config rollback restores existing file and mode" test_managed_config_rollback_restores_existing_file_and_mode
+run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
+run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
+run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing

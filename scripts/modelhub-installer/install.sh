@@ -29,6 +29,9 @@ CC_SWITCH_APP_PATH=''
 CHATGPT_APP_PATH=''
 CHATGPT_CODEX_PATH=''
 CODEX_CONFIG_PATH=''
+CODEX_MANAGED_CONFIG_DIR=''
+CODEX_MANAGED_CONFIG_PATH=''
+MANAGED_CONFIG_STAGING_ROOT=''
 MODEL_CATALOG_PATH=''
 CC_SWITCH_DATABASE_PATH=''
 CC_SWITCH_SETTINGS_PATH=''
@@ -1154,7 +1157,7 @@ validate_resource_archive() {
     "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     || { rm -rf "$work_dir"; return 1; }
   validate_codex_managed_config \
-    "$extracted_dir/modelhub-installer/templates/codex-managed-config.toml" \
+    "$extracted_dir/modelhub-installer/templates/codex-managed-config.toml" 1 \
     || { rm -rf "$work_dir"; return 1; }
 
   rm -rf "$work_dir"
@@ -1705,6 +1708,7 @@ managed_root_equivalent_key_count() {
 
 validate_codex_managed_config() {
   local file="$1"
+  local skip_parser="${2:-0}"
   local line
   local kind
 
@@ -1731,7 +1735,41 @@ validate_codex_managed_config() {
         ;;
     esac
   done <"$file"
-  validate_codex_config_with_parser "$file"
+  if [[ "$skip_parser" != "1" ]]; then
+    validate_codex_managed_config_with_parser "$file"
+  fi
+}
+
+validate_codex_managed_config_with_parser() {
+  local file="$1"
+  local validator="${CC_SWITCH_CODEX_CONFIG_VALIDATOR:-${CHATGPT_CODEX_PATH:-}}"
+  local parser_home
+
+  [[ -n "$validator" ]] || return 0
+  if [[ ! -x "$validator" ]]; then
+    die "Codex config validator is unavailable: $validator"
+    return 1
+  fi
+  parser_home="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cc-switch-managed-parse.XXXXXX")" || return 1
+  if ! /bin/cp "$file" "$parser_home/config.toml"; then
+    /bin/rm -rf "$parser_home" || true
+    return 1
+  fi
+  if [[ "$(modelhub_section_count "$file")" == "0" ]]; then
+    printf '%s\n' \
+      '' \
+      '[model_providers.modelhub]' \
+      'name = "modelhub"' \
+      'base_url = "https://example.invalid/v1"' \
+      'wire_api = "responses"' \
+      >>"$parser_home/config.toml" || return 1
+  fi
+  if ! CODEX_HOME="$parser_home" "$validator" features list >/dev/null 2>&1; then
+    /bin/rm -rf "$parser_home" || true
+    die 'Codex managed config failed parser validation'
+    return 1
+  fi
+  /bin/rm -rf "$parser_home" || return 1
 }
 
 merge_codex_managed_config() {
@@ -2048,9 +2086,13 @@ configure_install_paths() {
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     INSTALL_USER_HOME="${CC_SWITCH_INSTALLER_TEST_HOME:?test home is required}"
     INSTALL_APPLICATIONS_DIR="${CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR:?test Applications directory is required}"
+    CODEX_MANAGED_CONFIG_DIR="${CC_SWITCH_INSTALLER_TEST_ETC_ROOT:-$INSTALL_APPLICATIONS_DIR/.cc-switch-test-etc}/codex"
+    MANAGED_CONFIG_STAGING_ROOT="${CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP:-${TMPDIR:-/tmp}}"
   else
     INSTALL_USER_HOME="$HOME"
     INSTALL_APPLICATIONS_DIR='/Applications'
+    CODEX_MANAGED_CONFIG_DIR='/etc/codex'
+    MANAGED_CONFIG_STAGING_ROOT='/private/var/tmp'
   fi
 
   if [[ "$INSTALL_USER_HOME" != /* || "$INSTALL_USER_HOME" == "/" ]]; then
@@ -2066,6 +2108,7 @@ configure_install_paths() {
   CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
   CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
+  CODEX_MANAGED_CONFIG_PATH="$CODEX_MANAGED_CONFIG_DIR/managed_config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
   CC_SWITCH_SETTINGS_PATH="$INSTALL_USER_HOME/.cc-switch/settings.json"
@@ -2078,6 +2121,7 @@ configure_install_paths() {
 managed_targets() {
   printf '%s\t%s\n' "$CC_SWITCH_APP_PATH" 'cc-switch-app'
   printf '%s\t%s\n' "$CODEX_CONFIG_PATH" 'codex-config.toml'
+  printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
   printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'models-modelhub-1m.json'
   printf '%s\t%s\n' "$CC_SWITCH_DATABASE_PATH" 'cc-switch.db'
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
@@ -2120,9 +2164,9 @@ validate_privileged_command() {
   local command_path="$1"
 
   case "$command_path" in
-    /bin/chmod|/bin/cp|/bin/rm|/bin/test \
+    /bin/cat|/bin/chmod|/bin/cp|/bin/mkdir|/bin/mv|/bin/rm|/bin/rmdir|/bin/test \
       |/usr/bin/codesign|/usr/bin/ditto|/usr/bin/file|/usr/bin/mktemp \
-      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr)
+      |/usr/bin/plutil|/usr/bin/shasum|/usr/bin/stat|/usr/bin/xattr|/usr/sbin/chown)
       return 0
       ;;
   esac
@@ -2154,6 +2198,8 @@ remove_managed_target() {
   fi
   if [[ "$target" == "$CC_SWITCH_APP_PATH" ]]; then
     run_with_privilege /bin/rm -rf -- "$target"
+  elif [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+    run_with_privilege /bin/rm -f -- "$target"
   else
     /bin/rm -rf -- "$target"
   fi
@@ -2226,9 +2272,36 @@ create_backup() {
     die "failed to create backup manifest: $manifest"
     return 1
   fi
+  if path_is_symlink "$CODEX_MANAGED_CONFIG_DIR"; then
+    die "Codex managed config directory must not be a symlink: $CODEX_MANAGED_CONFIG_DIR"
+    return 1
+  fi
+  if path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
+    printf '1\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
+  else
+    printf '0\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
+  fi
 
   while IFS=$'\t' read -r target relative; do
-    if [[ -L "$target" ]]; then
+    if [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+      if path_is_symlink "$target"; then
+        die "managed target must not be a symlink: $target"
+        return 1
+      fi
+      if path_is_regular_file "$target"; then
+        if ! run_with_privilege /bin/cp -p "$target" "$backup_dir/files/$relative"; then
+          die "failed to back up managed file: $target"
+          return 1
+        fi
+        printf '%s\t1\t%s\n' "$target" "files/$relative" >>"$manifest" || return 1
+      elif path_exists "$target"; then
+        die "managed target is not a regular file: $target"
+        return 1
+      else
+        printf '%s\t0\t-\n' "$target" >>"$manifest" || return 1
+      fi
+      continue
+    elif [[ -L "$target" ]]; then
       die "managed target must not be a symlink: $target"
       return 1
     fi
@@ -2287,6 +2360,11 @@ validate_backup_manifest() {
   fi
   if ! awk -F '\t' 'NF != 3 { exit 1 }' "$manifest"; then
     die "backup manifest has an invalid row"
+    return 1
+  fi
+  if [[ "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "0" \
+    && "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "1" ]]; then
+    die 'backup manifest has invalid Codex managed config parent state'
     return 1
   fi
 
@@ -2371,6 +2449,8 @@ restore_backup() {
   local relative
   local backup_path
   local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
+  local managed_parent_existed
+  local managed_temp=''
 
   validate_backup_manifest "$backup_dir" || return 1
 
@@ -2392,7 +2472,16 @@ restore_backup() {
     fi
     if [[ "$existed" == "1" ]]; then
       backup_path="$backup_dir/$relative"
-      if [[ -d "$backup_path" ]]; then
+      if [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
+        run_with_privilege /bin/mkdir -p "$CODEX_MANAGED_CONFIG_DIR" || return 1
+        managed_temp="$(run_with_privilege /usr/bin/mktemp "$CODEX_MANAGED_CONFIG_DIR/.managed_config.toml.restore.XXXXXX")" || return 1
+        if ! run_with_privilege /bin/cp -p "$backup_path" "$managed_temp" \
+          || ! run_with_privilege /bin/mv -f "$managed_temp" "$target"; then
+          run_with_privilege /bin/rm -f -- "$managed_temp" || true
+          die 'failed to restore Codex managed config'
+          return 1
+        fi
+      elif [[ -d "$backup_path" ]]; then
         if ! /bin/mkdir -p "$(dirname "$target")"; then
           die "failed to create restore parent directory: $target"
           return 1
@@ -2424,6 +2513,11 @@ restore_backup() {
       return 1
     fi
   done <"$manifest"
+
+  managed_parent_existed="$(/bin/cat "$backup_dir/codex-managed-config-parent-existed")" || return 1
+  if [[ "$managed_parent_existed" == "0" ]] && path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
+    run_with_privilege /bin/rmdir "$CODEX_MANAGED_CONFIG_DIR" 2>/dev/null || true
+  fi
 
   reload_restored_launch_agent || return 1
 }
@@ -2512,6 +2606,102 @@ install_golden_codex_config() {
     || ! /bin/rmdir "$work_dir"; then
     /bin/rm -rf "$work_dir" || true
     die 'failed to atomically install the golden Codex config'
+    return 1
+  fi
+}
+
+install_codex_managed_config() {
+  local template_file="$1"
+  local stage_dir=''
+  local existing_file
+  local candidate_file
+  local target_temp=''
+  local candidate_sha
+  local installed_sha
+  local installed_mode
+  local installed_owner
+  local stage_owner_mode
+  local status=0
+
+  if [[ "$MANAGED_CONFIG_STAGING_ROOT" != /* || ! -d "$MANAGED_CONFIG_STAGING_ROOT" \
+    || -L "$MANAGED_CONFIG_STAGING_ROOT" ]]; then
+    die "unsafe Codex managed config staging root: $MANAGED_CONFIG_STAGING_ROOT"
+    return 1
+  fi
+  stage_dir="$(/usr/bin/mktemp -d "$MANAGED_CONFIG_STAGING_ROOT/.cc-switch-managed-config.XXXXXX")" || return 1
+  /bin/chmod 0700 "$stage_dir" || status=1
+  stage_owner_mode="$(/usr/bin/stat -f '%u:%Lp' "$stage_dir" 2>/dev/null || true)"
+  if [[ -L "$stage_dir" || "$stage_owner_mode" != "$(/usr/bin/id -u):700" ]]; then
+    status=1
+  fi
+  existing_file="$stage_dir/existing.toml"
+  candidate_file="$stage_dir/managed_config.toml"
+
+  if [[ "$status" == "0" ]] && path_is_symlink "$CODEX_MANAGED_CONFIG_DIR"; then
+    die "Codex managed config directory must not be a symlink: $CODEX_MANAGED_CONFIG_DIR"
+    status=1
+  fi
+  if [[ "$status" == "0" ]] && path_is_symlink "$CODEX_MANAGED_CONFIG_PATH"; then
+    die "Codex managed config must not be a symlink: $CODEX_MANAGED_CONFIG_PATH"
+    status=1
+  fi
+  if [[ "$status" == "0" ]] && path_is_regular_file "$CODEX_MANAGED_CONFIG_PATH"; then
+    run_with_privilege /bin/cat "$CODEX_MANAGED_CONFIG_PATH" >"$existing_file" || status=1
+  elif [[ "$status" == "0" ]] && path_exists "$CODEX_MANAGED_CONFIG_PATH"; then
+    die "Codex managed config is not a regular file: $CODEX_MANAGED_CONFIG_PATH"
+    status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    merge_codex_managed_config "$existing_file" "$template_file" "$candidate_file" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    candidate_sha="$(file_sha256 "$candidate_file")" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/mkdir -p "$CODEX_MANAGED_CONFIG_DIR" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    target_temp="$(run_with_privilege /usr/bin/mktemp "$CODEX_MANAGED_CONFIG_DIR/.managed_config.toml.install.XXXXXX")" || status=1
+    case "$target_temp" in
+      "$CODEX_MANAGED_CONFIG_DIR"/.managed_config.toml.install.*) ;;
+      *) status=1 ;;
+    esac
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/cp "$candidate_file" "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/chmod 0644 "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" && "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+    run_with_privilege /usr/sbin/chown root:wheel "$target_temp" || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    installed_sha="$(run_with_privilege /usr/bin/shasum -a 256 "$target_temp" | awk '{ print $1 }')" || status=1
+    [[ "$installed_sha" == "$candidate_sha" ]] || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    run_with_privilege /bin/mv -f "$target_temp" "$CODEX_MANAGED_CONFIG_PATH" || status=1
+    target_temp=''
+  fi
+  if [[ "$status" == "0" ]]; then
+    installed_mode="$(run_with_privilege /usr/bin/stat -f '%Lp' "$CODEX_MANAGED_CONFIG_PATH")" || status=1
+    [[ "$installed_mode" == "644" ]] || status=1
+  fi
+  if [[ "$status" == "0" && "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+    installed_owner="$(run_with_privilege /usr/bin/stat -f '%Su:%Sg' "$CODEX_MANAGED_CONFIG_PATH")" || status=1
+    [[ "$installed_owner" == 'root:wheel' ]] || status=1
+  fi
+  if [[ "$status" == "0" ]]; then
+    validate_codex_managed_config "$CODEX_MANAGED_CONFIG_PATH" || status=1
+  fi
+
+  if [[ -n "$target_temp" ]]; then
+    run_with_privilege /bin/rm -f -- "$target_temp" || status=1
+  fi
+  /bin/rm -rf "$stage_dir" || status=1
+  if [[ "$status" != "0" ]]; then
+    die 'failed to atomically install Codex managed config'
     return 1
   fi
 }
@@ -2644,6 +2834,9 @@ install_runtime_files() {
     "$resources_dir/golden/codex-config.toml" \
     "$CODEX_CONFIG_PATH" \
     "$INSTALL_USER_HOME" \
+    || return 1
+  install_codex_managed_config \
+    "$resources_dir/templates/codex-managed-config.toml" \
     || return 1
   install_golden_database \
     "$resources_dir/golden/cc-switch.db" \
@@ -3383,12 +3576,23 @@ path_tree_requires_privilege() {
   return 0
 }
 
+path_creation_requires_privilege() {
+  local target="$1"
+  local ancestor="$target"
+
+  while [[ ! -e "$ancestor" && "$ancestor" != "/" ]]; do
+    ancestor="$(dirname "$ancestor")"
+  done
+  [[ ! -d "$ancestor" || ! -w "$ancestor" ]]
+}
+
 prepare_application_permissions() {
   local sudo_bin
 
   NEEDS_SUDO=0
   /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR" 2>/dev/null || true
   if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]] \
+    || path_creation_requires_privilege "$CODEX_MANAGED_CONFIG_DIR" \
     || path_tree_requires_privilege "$CC_SWITCH_APP_PATH" \
     || { [[ ! -d "$INSTALL_APPLICATIONS_DIR/ChatGPT.app" ]] \
       && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
