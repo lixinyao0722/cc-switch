@@ -980,6 +980,7 @@ modelhub-installer/helpers/
 modelhub-installer/helpers/rename-exclusive
 modelhub-installer/templates/
 modelhub-installer/templates/com.ccswitch.modelhub-env.plist
+modelhub-installer/templates/codex-managed-config.toml
 modelhub-installer/templates/load-modelhub-env.sh
 modelhub-installer/templates/modelhub-provider-meta.json
 modelhub-installer/templates/modelhub-provider.toml
@@ -1151,6 +1152,9 @@ validate_resource_archive() {
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_database \
     "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_codex_managed_config \
+    "$extracted_dir/modelhub-installer/templates/codex-managed-config.toml" \
     || { rm -rf "$work_dir"; return 1; }
 
   rm -rf "$work_dir"
@@ -1636,6 +1640,12 @@ toml_header_kind() {
         } else {
           print "modelhub-child"
         }
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "openai") {
+        if (count == 2) {
+          print "openai-provider"
+        } else {
+          print "openai-provider-child"
+        }
       } else {
         print "table"
       }
@@ -1671,6 +1681,126 @@ desktop_section_count() {
     fi
   done <"$file"
   printf '%s' "$count"
+}
+
+managed_root_equivalent_key_count() {
+  local file="$1"
+  local key="$2"
+
+  awk -v key="$key" '
+    BEGIN { in_root = 1; count = 0 }
+    /^[[:space:]]*\[/ { in_root = 0 }
+    in_root {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ ("^" key "[[:space:]]*=") \
+          || line ~ ("^\"" key "\"[[:space:]]*=") \
+          || line ~ ("^\047" key "\047[[:space:]]*=")) {
+        count += 1
+      }
+    }
+    END { print count }
+  ' "$file"
+}
+
+validate_codex_managed_config() {
+  local file="$1"
+  local line
+  local kind
+
+  if [[ ! -f "$file" ]]; then
+    die "Codex managed config does not exist: $file"
+    return 1
+  fi
+  if [[ "$(managed_root_equivalent_key_count "$file" model_provider)" != "1" ]] \
+    || [[ "$(managed_root_equivalent_key_count "$file" openai_base_url)" != "1" ]]; then
+    die 'Codex managed config must contain one entry for each managed root key'
+    return 1
+  fi
+  if ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"modelhub"[[:space:]]*$' "$file" \
+    || ! grep -Eq '^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"http://127\.0\.0\.1:15721/v1"[[:space:]]*$' "$file"; then
+    die 'Codex managed config contains an unexpected routing value'
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
+    case "$kind" in
+      openai-provider|openai-provider-child)
+        die 'Codex built-in openai provider must not be overridden'
+        return 1
+        ;;
+    esac
+  done <"$file"
+  validate_codex_config_with_parser "$file"
+}
+
+merge_codex_managed_config() {
+  local source_file="$1"
+  local template_file="$2"
+  local output_file="$3"
+  local effective_source="$source_file"
+  local work_dir
+  local filtered_root
+  local tables
+  local merged
+  local line
+  local in_root=1
+
+  if [[ ! -f "$template_file" ]]; then
+    die "Codex managed config template does not exist: $template_file"
+    return 1
+  fi
+  validate_codex_managed_config "$template_file" || return 1
+  if [[ ! -f "$effective_source" ]]; then
+    effective_source=/dev/null
+  fi
+  if ! work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-managed-config-merge.XXXXXX")"; then
+    die 'failed to create the Codex managed config merge directory'
+    return 1
+  fi
+  filtered_root="$work_dir/root.toml"
+  tables="$work_dir/tables.toml"
+  merged="$work_dir/managed_config.toml"
+  : >"$filtered_root" || return 1
+  : >"$tables" || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$in_root" == "1" && "$line" =~ ^[[:space:]]*\[ ]]; then
+      in_root=0
+    fi
+    if [[ "$in_root" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*(model_provider|\"model_provider\"|\'model_provider\')[[:space:]]*= \
+        || "$line" =~ ^[[:space:]]*(openai_base_url|\"openai_base_url\"|\'openai_base_url\')[[:space:]]*= ]]; then
+      continue
+    fi
+    if [[ "$in_root" == "1" ]]; then
+      printf '%s\n' "$line" >>"$filtered_root" || return 1
+    else
+      printf '%s\n' "$line" >>"$tables" || return 1
+    fi
+  done <"$effective_source"
+
+  if ! /bin/cp "$filtered_root" "$merged" \
+    || ! /bin/cat "$template_file" >>"$merged"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to stage the Codex managed config roots'
+    return 1
+  fi
+  if [[ -s "$tables" ]]; then
+    printf '\n' >>"$merged" || return 1
+    /bin/cat "$tables" >>"$merged" || return 1
+  fi
+  validate_codex_managed_config "$merged" || {
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  }
+  /bin/mkdir -p "$(dirname "$output_file")" || return 1
+  if ! /bin/mv "$merged" "$output_file"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to write the merged Codex managed config'
+    return 1
+  fi
+  /bin/rm -rf "$work_dir" || return 1
 }
 
 validate_codex_config_with_parser() {
@@ -1832,7 +1962,7 @@ merge_codex_config() {
         in_desktop=1
         saw_desktop=1
         ;;
-      table)
+      table|openai-provider|openai-provider-child)
         if [[ "$in_desktop" == "1" ]]; then
           printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
         fi

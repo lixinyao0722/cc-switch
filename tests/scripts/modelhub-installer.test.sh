@@ -7,6 +7,7 @@ INSTALLER="$REPO_ROOT/scripts/modelhub-installer/install.sh"
 PACKAGER="$REPO_ROOT/scripts/modelhub-installer/package-release.sh"
 TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider.toml"
 META_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/modelhub-provider-meta.json"
+MANAGED_CONFIG_TEMPLATE="$REPO_ROOT/scripts/modelhub-installer/templates/codex-managed-config.toml"
 RENAME_HELPER_SOURCE="$REPO_ROOT/scripts/modelhub-installer/helpers/rename-exclusive.c"
 GOLDEN_DB_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-golden-db.sh"
 LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local-golden-snapshot.sh"
@@ -278,6 +279,83 @@ test_r14_defaults_use_compact_retry_and_git_prefix() {
   assert_occurrences "$case_dir/output.toml" 'git-branch-prefix = "feat/"' 1
   assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
   assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
+}
+
+test_managed_config_merge_preserves_unrelated_config() {
+  local case_dir="$TEST_TMP/managed-config-merge-preserve"
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    '# managed heading' \
+    'analytics_enabled = false' \
+    '"model_provider" = "openai" # stale mobile default' \
+    "'openai_base_url' = 'https://api.openai.com/v1'" \
+    '[history]' \
+    'persistence = "save-all"' \
+    'model_provider = "table-local-value"' \
+    >"$case_dir/input.toml"
+
+  merge_codex_managed_config \
+    "$case_dir/input.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/output.toml"
+
+  assert_occurrences "$case_dir/output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
+  assert_contains "$case_dir/output.toml" '# managed heading'
+  assert_contains "$case_dir/output.toml" 'analytics_enabled = false'
+  assert_contains "$case_dir/output.toml" '[history]'
+  assert_contains "$case_dir/output.toml" 'persistence = "save-all"'
+  assert_contains "$case_dir/output.toml" 'model_provider = "table-local-value"'
+  assert_not_contains "$case_dir/output.toml" 'stale mobile default'
+  assert_not_contains "$case_dir/output.toml" 'https://api.openai.com/v1'
+  validate_codex_managed_config "$case_dir/output.toml"
+}
+
+test_managed_config_merge_creates_missing_and_normalizes_duplicates() {
+  local case_dir="$TEST_TMP/managed-config-merge-create"
+  mkdir -p "$case_dir"
+
+  merge_codex_managed_config \
+    "$case_dir/missing.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/missing-output.toml"
+  printf '%s\n' \
+    'model_provider = "first"' \
+    'model_provider = "second"' \
+    'openai_base_url = "https://one.invalid"' \
+    'openai_base_url = "https://two.invalid"' \
+    >"$case_dir/duplicates.toml"
+  merge_codex_managed_config \
+    "$case_dir/duplicates.toml" \
+    "$MANAGED_CONFIG_TEMPLATE" \
+    "$case_dir/duplicates-output.toml"
+
+  assert_occurrences "$case_dir/missing-output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/duplicates-output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/duplicates-output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
+}
+
+test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml() {
+  local case_dir="$TEST_TMP/managed-config-merge-reject"
+  local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
+  mkdir -p "$case_dir"
+  [[ -x "$codex_bin" ]] || fail "Codex parser is unavailable: $codex_bin"
+  printf '%s\n' \
+    '[model_providers.openai]' \
+    'base_url = "https://forbidden.invalid"' \
+    >"$case_dir/openai.toml"
+  printf '%s\n' \
+    '[ "model_providers" . "openai" . http_headers ]' \
+    'x-test = "forbidden"' \
+    >"$case_dir/quoted-openai.toml"
+  printf '%s\n' 'broken = [unterminated' >"$case_dir/invalid.toml"
+
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/openai.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/openai-output.toml"
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/quoted-openai.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/quoted-output.toml"
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
+    "$case_dir/invalid.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/invalid-output.toml"
 }
 
 test_merge_creates_config_from_empty_file() {
@@ -1292,6 +1370,7 @@ create_expected_resource_tree() {
   cp "$TEST_RENAME_HELPER" "$root/helpers/rename-exclusive"
   : >"$root/templates/modelhub-provider.toml"
   : >"$root/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$root/templates/codex-managed-config.toml"
   : >"$root/templates/com.ccswitch.modelhub-env.plist"
   : >"$root/templates/load-modelhub-env.sh"
 }
@@ -1965,6 +2044,7 @@ create_transaction_assets() {
   cp "$TEST_RENAME_HELPER" "$resource_root/helpers/rename-exclusive"
   cp "$TEMPLATE" "$resource_root/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$resource_root/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$resource_root/templates/codex-managed-config.toml"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
     "$resource_root/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
@@ -2907,6 +2987,7 @@ create_packager_source() {
   cp "$GOLDEN_SETTINGS" "$source_dir/golden/settings.json"
   cp "$TEMPLATE" "$source_dir/templates/modelhub-provider.toml"
   cp "$META_TEMPLATE" "$source_dir/templates/modelhub-provider-meta.json"
+  cp "$MANAGED_CONFIG_TEMPLATE" "$source_dir/templates/codex-managed-config.toml"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/com.ccswitch.modelhub-env.plist" \
     "$source_dir/templates/com.ccswitch.modelhub-env.plist"
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
@@ -3416,6 +3497,9 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
 run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_compact_retry_and_git_prefix
+run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
+run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
+run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing

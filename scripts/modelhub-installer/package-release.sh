@@ -39,6 +39,7 @@ scan_source_tree() {
     'helpers/rename-exclusive.c'
     'templates/modelhub-provider.toml'
     'templates/modelhub-provider-meta.json'
+    'templates/codex-managed-config.toml'
     'templates/com.ccswitch.modelhub-env.plist'
     'templates/load-modelhub-env.sh'
   )
@@ -325,6 +326,7 @@ copy_allowlisted_resources() {
   fi
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
+  cp "$source_dir/templates/codex-managed-config.toml" "$package_root/templates/codex-managed-config.toml"
   cp "$source_dir/templates/com.ccswitch.modelhub-env.plist" "$package_root/templates/com.ccswitch.modelhub-env.plist"
   cp "$source_dir/templates/load-modelhub-env.sh" "$package_root/templates/load-modelhub-env.sh"
   build_rename_helper \
@@ -337,6 +339,7 @@ copy_allowlisted_resources() {
     "$package_root/golden/cc-switch.db" \
     "$package_root/templates/modelhub-provider.toml" \
     "$package_root/templates/modelhub-provider-meta.json" \
+    "$package_root/templates/codex-managed-config.toml" \
     "$package_root/templates/com.ccswitch.modelhub-env.plist"
   chmod 755 "$package_root/templates/load-modelhub-env.sh"
   chmod 755 "$package_root/helpers/rename-exclusive"
