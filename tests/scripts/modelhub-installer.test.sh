@@ -14,6 +14,8 @@ LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
+MODEL_CATALOG="$REPO_ROOT/scripts/modelhub-installer/assets/models-modelhub-1m.json"
+GPT55_TEMPLATE="$REPO_ROOT/src-tauri/src/resources/gpt5_5_template.json"
 MODELHUB_GUIDE="$REPO_ROOT/docs/guides/modelhub-codex-proxy-compat-zh.md"
 CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
 if [[ "${1:-}" == "--" ]]; then
@@ -256,8 +258,8 @@ test_merge_preserves_unmanaged_sections() {
   assert_not_contains "$case_dir/output.toml" 'old-provider'
 }
 
-test_r14_defaults_use_compact_retry_and_git_prefix() {
-  local case_dir="$TEST_TMP/r14-defaults"
+test_r15_defaults_include_codex_settings_and_gpt55_window() {
+  local case_dir="$TEST_TMP/r15-defaults"
   mkdir -p "$case_dir"
   printf '%s\n' \
     'approval_policy = "on-request"' \
@@ -281,6 +283,23 @@ test_r14_defaults_use_compact_retry_and_git_prefix() {
   assert_occurrences "$case_dir/output.toml" 'git-branch-prefix = "feat/"' 1
   assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
   assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'show-context-window-usage = true' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'preventSleepWhileRunning = true' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" '[plugins."computer-use@openai-bundled"]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'enabled = true' 1
+  assert_not_contains "$GOLDEN_CODEX_CONFIG" '[mcp_servers.computer-use]'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.5") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '[.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$GPT55_TEMPLATE")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-sol") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-terra" or .slug == "gpt-5.6-luna") | [.slug, .context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'gpt-5.6-terra\t272000\t272000\t95\ngpt-5.6-luna\t272000\t272000\t95'
 }
 
 test_managed_config_merge_preserves_unrelated_config() {
@@ -1451,18 +1470,34 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
-test_preflight_rejects_golden_codex_without_r14_defaults() {
-  local case_dir="$TEST_TMP/preflight-golden-r14-defaults"
+test_preflight_rejects_golden_codex_without_r15_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r15-defaults"
   mkdir -p "$case_dir"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-compact.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prefix.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-context-usage.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prevent-sleep.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-computer-use-plugin.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/duplicate-computer-use-mcp.toml"
   /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
     "$case_dir/stale-compact.toml"
-  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\n//' \
+  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\nshow-context-window-usage = true\npreventSleepWhileRunning = true\n//' \
     "$case_dir/missing-prefix.toml"
+  /usr/bin/perl -0pi -e 's/\nshow-context-window-usage = true//' \
+    "$case_dir/missing-context-usage.toml"
+  /usr/bin/perl -0pi -e 's/\npreventSleepWhileRunning = true//' \
+    "$case_dir/missing-prevent-sleep.toml"
+  /usr/bin/perl -0pi -e 's/\n\[plugins\."computer-use\@openai-bundled"\]\nenabled = true\n//' \
+    "$case_dir/missing-computer-use-plugin.toml"
+  printf '%s\n' '' '[mcp_servers.computer-use]' 'command = "duplicate"' \
+    >>"$case_dir/duplicate-computer-use-mcp.toml"
 
   assert_command_fails validate_golden_codex_template "$case_dir/stale-compact.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/missing-prefix.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-context-usage.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-prevent-sleep.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-computer-use-plugin.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/duplicate-computer-use-mcp.toml"
 }
 
 test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
@@ -3625,7 +3660,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
-run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_compact_retry_and_git_prefix
+run_test "R15 defaults include Codex settings and GPT-5.5 window" test_r15_defaults_include_codex_settings_and_gpt55_window
 run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
 run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
 run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
@@ -3671,7 +3706,7 @@ run_test "preflight verifies all release checksums" test_preflight_verifies_all_
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
-run_test "preflight rejects Golden Codex without R14 defaults" test_preflight_rejects_golden_codex_without_r14_defaults
+run_test "preflight rejects Golden Codex without R15 defaults" test_preflight_rejects_golden_codex_without_r15_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types

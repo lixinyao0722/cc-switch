@@ -1005,13 +1005,17 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
     || ! grep -Fq -- 'model_auto_compact_token_limit = 500000' "$file" \
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
+    || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
+    || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
+    || ! grep -Fq -- '[plugins."computer-use@openai-bundled"]' "$file" \
+    || ! grep -Fq -- 'enabled = true' "$file" \
     || ! grep -Fq -- 'request_max_retries = 2' "$file" \
     || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
     return 1
   fi
   if LC_ALL=C grep -E -i -q \
-    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=' \
+    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=|^[[:space:]]*\[mcp_servers[.]computer-use\][[:space:]]*$' \
     "$file"; then
     die 'golden Codex config contains a forbidden path, route, or credential field'
     return 1
