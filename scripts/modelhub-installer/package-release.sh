@@ -166,7 +166,7 @@ render_installer_with_helper_hash() {
 
 normalize_modelhub_codex_retry_policy() {
   local file="$1"
-  local output="$file.r14-retry"
+  local output="$file.r15-retry"
 
   if ! awk '
     function finish_modelhub() {
@@ -458,6 +458,15 @@ main() {
     "$package_dir/modelhub-installer/helpers/rename-exclusive" \
     "$staged_output/$OUTPUT_INSTALLER_NAME"
   chmod 755 "$staged_output/$OUTPUT_INSTALLER_NAME"
+  if ! CC_SWITCH_INSTALLER_TEST_MODE=1 /bin/bash -c \
+    'source "$1"; validate_resource_archive "$2"' \
+    _ \
+    "$staged_output/$OUTPUT_INSTALLER_NAME" \
+    "$staged_output/$OUTPUT_RESOURCES_NAME"; then
+    rm -rf "$work_dir"
+    die 'packaged ModelHub resources failed installer preflight validation'
+    return 1
+  fi
   cp "$app_zip" "$staged_output/$OUTPUT_APP_NAME"
 
   (

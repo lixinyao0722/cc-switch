@@ -14,6 +14,8 @@ LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
+MODEL_CATALOG="$REPO_ROOT/scripts/modelhub-installer/assets/models-modelhub-1m.json"
+GPT55_TEMPLATE="$REPO_ROOT/src-tauri/src/resources/gpt5_5_template.json"
 MODELHUB_GUIDE="$REPO_ROOT/docs/guides/modelhub-codex-proxy-compat-zh.md"
 CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
 if [[ "${1:-}" == "--" ]]; then
@@ -256,8 +258,8 @@ test_merge_preserves_unmanaged_sections() {
   assert_not_contains "$case_dir/output.toml" 'old-provider'
 }
 
-test_r14_defaults_use_compact_retry_and_git_prefix() {
-  local case_dir="$TEST_TMP/r14-defaults"
+test_r15_defaults_include_codex_settings_and_gpt55_window() {
+  local case_dir="$TEST_TMP/r15-defaults"
   mkdir -p "$case_dir"
   printf '%s\n' \
     'approval_policy = "on-request"' \
@@ -281,6 +283,23 @@ test_r14_defaults_use_compact_retry_and_git_prefix() {
   assert_occurrences "$case_dir/output.toml" 'git-branch-prefix = "feat/"' 1
   assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
   assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'show-context-window-usage = true' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'preventSleepWhileRunning = true' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" '[plugins."computer-use@openai-bundled"]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'enabled = true' 1
+  assert_not_contains "$GOLDEN_CODEX_CONFIG" '[mcp_servers.computer-use]'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.5") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '[.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$GPT55_TEMPLATE")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-sol") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-terra" or .slug == "gpt-5.6-luna") | [.slug, .context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'gpt-5.6-terra\t272000\t272000\t95\ngpt-5.6-luna\t272000\t272000\t95'
 }
 
 test_managed_config_merge_preserves_unrelated_config() {
@@ -1361,7 +1380,7 @@ create_expected_resource_tree() {
   local root="$1/modelhub-installer"
   mkdir -p "$root/assets" "$root/golden" "$root/helpers" "$root/templates"
   ensure_test_rename_helper
-  : >"$root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$root/assets/models-modelhub-1m.json"
   cp "$GOLDEN_CODEX_CONFIG" "$root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -1433,6 +1452,36 @@ test_preflight_accepts_exact_resource_archive() {
   validate_resource_archive "$case_dir/resources.tar.gz"
 }
 
+test_model_catalog_validation_rejects_malformed_stale_and_missing_models() {
+  local case_dir="$TEST_TMP/model-catalog-validation"
+  mkdir -p "$case_dir"
+  cp "$MODEL_CATALOG" "$case_dir/valid.json"
+  printf '{invalid json\n' >"$case_dir/malformed.json"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.5") | .context_window) = 272000' \
+    "$MODEL_CATALOG" >"$case_dir/stale-gpt55.json"
+  /usr/bin/jq \
+    '.models |= map(select(.slug != "gpt-5.6-terra"))' \
+    "$MODEL_CATALOG" >"$case_dir/missing-terra.json"
+
+  validate_model_catalog "$case_dir/valid.json"
+  assert_command_fails validate_model_catalog "$case_dir/malformed.json"
+  assert_command_fails validate_model_catalog "$case_dir/stale-gpt55.json"
+  assert_command_fails validate_model_catalog "$case_dir/missing-terra.json"
+}
+
+test_resource_archive_rejects_invalid_model_catalog() {
+  local case_dir="$TEST_TMP/preflight-invalid-model-catalog"
+  mkdir -p "$case_dir/tree"
+  create_expected_resource_tree "$case_dir/tree"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.6-luna") | .effective_context_window_percent) = 100' \
+    "$MODEL_CATALOG" >"$case_dir/tree/modelhub-installer/assets/models-modelhub-1m.json"
+  COPYFILE_DISABLE=1 tar -czf "$case_dir/resources.tar.gz" -C "$case_dir/tree" modelhub-installer
+
+  assert_command_fails validate_resource_archive "$case_dir/resources.tar.gz"
+}
+
 test_preflight_rejects_golden_database_without_activity_summary_mode() {
   local case_dir="$TEST_TMP/preflight-golden-activity-mode"
   local database="$case_dir/cc-switch.db"
@@ -1451,18 +1500,40 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
-test_preflight_rejects_golden_codex_without_r14_defaults() {
-  local case_dir="$TEST_TMP/preflight-golden-r14-defaults"
+test_preflight_rejects_golden_codex_without_r15_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r15-defaults"
   mkdir -p "$case_dir"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-compact.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prefix.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-context-usage.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prevent-sleep.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-computer-use-plugin.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/disabled-computer-use-plugin.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/duplicate-computer-use-mcp.toml"
   /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
     "$case_dir/stale-compact.toml"
-  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\n//' \
+  /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\nshow-context-window-usage = true\npreventSleepWhileRunning = true\n//' \
     "$case_dir/missing-prefix.toml"
+  /usr/bin/perl -0pi -e 's/\nshow-context-window-usage = true//' \
+    "$case_dir/missing-context-usage.toml"
+  /usr/bin/perl -0pi -e 's/\npreventSleepWhileRunning = true//' \
+    "$case_dir/missing-prevent-sleep.toml"
+  /usr/bin/perl -0pi -e 's/\n\[plugins\."computer-use\@openai-bundled"\]\nenabled = true\n//' \
+    "$case_dir/missing-computer-use-plugin.toml"
+  /usr/bin/perl -0pi -e 's/(\[plugins\."computer-use\@openai-bundled"\]\n)enabled = true/$1enabled = false/' \
+    "$case_dir/disabled-computer-use-plugin.toml"
+  printf '%s\n' '' '[plugins."browser@openai-bundled"]' 'enabled = true' \
+    >>"$case_dir/disabled-computer-use-plugin.toml"
+  printf '%s\n' '' '[mcp_servers.computer-use]' 'command = "duplicate"' \
+    >>"$case_dir/duplicate-computer-use-mcp.toml"
 
   assert_command_fails validate_golden_codex_template "$case_dir/stale-compact.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/missing-prefix.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-context-usage.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-prevent-sleep.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-computer-use-plugin.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/disabled-computer-use-plugin.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/duplicate-computer-use-mcp.toml"
 }
 
 test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
@@ -1536,7 +1607,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260817-r14'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260817-r15'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1549,7 +1620,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260817-r14/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260817-r15/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1869,6 +1940,57 @@ test_existing_nontraversable_app_requires_privilege() {
   assert_contains "$FAKE_SUDO_LOG" '-v'
 }
 
+test_administrator_password_guidance_precedes_required_sudo() {
+  local case_dir="$TEST_TMP/administrator-password-guidance"
+  local applications_dir="$case_dir/Applications"
+  local sudo_bin="$case_dir/fake-sudo"
+  local output
+  mkdir -p "$applications_dir" "$case_dir/etc"
+  chmod 0555 "$applications_dir"
+  write_executable_stub "$sudo_bin" \
+    'printf "%s\n" "$*" >>"$FAKE_SUDO_LOG"' \
+    '[[ "${1:-}" == "-v" ]]'
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  export FAKE_SUDO_LOG="$case_dir/sudo.log"
+  activate_fake_privilege_runner "$sudo_bin"
+  configure_install_paths
+
+  output="$(prepare_application_permissions 2>&1)"
+  chmod 0755 "$applications_dir"
+
+  [[ "$output" == *'Mac 登录用户的管理员密码'* ]] \
+    || fail "administrator password guidance omitted the Mac login password: $output"
+  [[ "$output" == *'不是 MODELHUB_AK'* ]] \
+    || fail "administrator password guidance omitted the AK distinction: $output"
+  [[ "$output" == *'不会显示字符'* ]] \
+    || fail "administrator password guidance omitted terminal echo behavior: $output"
+  [[ "$output" == *'/Applications'* && "$output" == *'/etc/codex'* ]] \
+    || fail "administrator password guidance omitted privileged locations: $output"
+  assert_contains "$FAKE_SUDO_LOG" '-v'
+}
+
+test_administrator_password_guidance_is_silent_without_sudo() {
+  local case_dir="$TEST_TMP/administrator-password-no-sudo"
+  local applications_dir="$case_dir/Applications"
+  local output
+  mkdir -p "$applications_dir" "$case_dir/etc"
+  chmod 0755 "$applications_dir" "$case_dir/etc"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+  export CC_SWITCH_INSTALLER_TEST_HOME="$case_dir/home"
+  export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$applications_dir"
+  export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
+  configure_install_paths
+
+  output="$(prepare_application_permissions 2>&1)"
+
+  assert_equals "$NEEDS_SUDO" '0'
+  [[ "$output" != *'Mac 登录用户的管理员密码'* ]] \
+    || fail "no-sudo path emitted administrator password guidance: $output"
+}
+
 test_rejects_root_execution_validation_contract() {
   assert_command_fails validate_non_root 0
   validate_non_root 501
@@ -2049,7 +2171,7 @@ create_transaction_assets() {
   ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
-  printf '{"models":{}}\n' >"$resource_root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$resource_root/assets/models-modelhub-1m.json"
   cp "$GOLDEN_CODEX_CONFIG" "$resource_root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$resource_root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -2284,17 +2406,23 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
     || fail 'privileged staging test left a candidate directory'
 }
 
-test_r14_release_contract_and_documentation() {
-  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260817-r14'"
-  assert_contains "$INSTALLER" '下载并校验 R14 安装器、CC Switch 和配置资源'
+test_r15_release_contract_and_documentation() {
+  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260817-r15'"
+  assert_contains "$INSTALLER" '下载并校验 R15 安装器、CC Switch 和配置资源'
   assert_contains "$MODELHUB_GUIDE" '/etc/codex/managed_config.toml'
   assert_contains "$MODELHUB_GUIDE" 'openai_base_url = "http://127.0.0.1:15721/v1"'
   assert_contains "$MODELHUB_GUIDE" 'model_auto_compact_token_limit = 500000'
   assert_contains "$MODELHUB_GUIDE" '"maxRetries": 2'
   assert_contains "$MODELHUB_GUIDE" 'git-branch-prefix = "feat/"'
+  assert_contains "$MODELHUB_GUIDE" 'show-context-window-usage = true'
+  assert_contains "$MODELHUB_GUIDE" 'preventSleepWhileRunning = true'
+  assert_contains "$MODELHUB_GUIDE" '[plugins."computer-use@openai-bundled"]'
+  assert_contains "$MODELHUB_GUIDE" 'Mac 登录用户的管理员密码'
+  assert_contains "$MODELHUB_GUIDE" '不是 `MODELHUB_AK`'
+  assert_contains "$MODELHUB_GUIDE" '1,050,000'
   assert_contains "$MODELHUB_GUIDE" '移动端新建全新会话'
   assert_contains "$MODELHUB_GUIDE" 'CC Switch 不可用'
-  assert_contains "$CHANGELOG_FILE" 'ModelHub R14 Mobile Session Routing'
+  assert_contains "$CHANGELOG_FILE" 'ModelHub R15 Catalog and Codex Setup'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -3122,7 +3250,7 @@ create_packager_source() {
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
     "$source_dir/templates/load-modelhub-env.sh"
   cp "$RENAME_HELPER_SOURCE" "$source_dir/helpers/rename-exclusive.c"
-  printf '{"models":{}}\n' >"$source_dir/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$source_dir/assets/models-modelhub-1m.json"
 }
 
 run_packager() {
@@ -3149,7 +3277,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260817-r14'"
+    "readonly RELEASE_TAG='modelhub-installer-20260817-r15'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -3196,6 +3324,22 @@ test_package_builds_exact_allowlisted_release_assets() {
       _ "$output_dir/install.sh"
   )" "$helper_sha"
   assert_equals "$(awk 'NF { count += 1 } END { print count + 0 }' "$output_dir/SHA256SUMS.txt")" '3'
+}
+
+test_package_rejects_invalid_model_catalog() {
+  local case_dir="$TEST_TMP/package-invalid-model-catalog"
+  local source_dir="$case_dir/source"
+  local output_dir="$case_dir/output"
+  mkdir -p "$case_dir"
+  create_packager_source "$source_dir"
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-5.6-sol") | .max_context_window) = 272000' \
+    "$MODEL_CATALOG" >"$source_dir/assets/models-modelhub-1m.json"
+
+  assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'invalid model catalog still produced a resource archive'
 }
 
 test_package_reproducibly_renders_pinned_helper_hash() {
@@ -3625,7 +3769,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
-run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_compact_retry_and_git_prefix
+run_test "R15 defaults include Codex settings and GPT-5.5 window" test_r15_defaults_include_codex_settings_and_gpt55_window
 run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
 run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
 run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
@@ -3634,7 +3778,7 @@ run_test "managed config rollback restores existing file and mode" test_managed_
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
 run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
 run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
-run_test "R14 release contract and documentation" test_r14_release_contract_and_documentation
+run_test "R15 release contract and documentation" test_r15_release_contract_and_documentation
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -3670,13 +3814,15 @@ run_test "keeps bootstrapped ChatGPT after failure and explicit rollback" test_k
 run_test "preflight verifies all release checksums" test_preflight_verifies_all_release_checksums
 run_test "preflight rejects unexpected checksum entries" test_preflight_rejects_unexpected_checksum_entries
 run_test "preflight accepts exact resource archive" test_preflight_accepts_exact_resource_archive
+run_test "model catalog validation rejects malformed stale and missing models" test_model_catalog_validation_rejects_malformed_stale_and_missing_models
+run_test "resource archive rejects invalid model catalog" test_resource_archive_rejects_invalid_model_catalog
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
-run_test "preflight rejects Golden Codex without R14 defaults" test_preflight_rejects_golden_codex_without_r14_defaults
+run_test "preflight rejects Golden Codex without R15 defaults" test_preflight_rejects_golden_codex_without_r15_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R14 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R15 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -3687,6 +3833,8 @@ run_test "settings merge rejects invalid JSON without overwrite" test_settings_m
 run_test "settings merge creates missing file" test_settings_merge_creates_missing_file
 run_test "existing nonwritable app requires privilege" test_existing_nonwritable_app_requires_privilege
 run_test "existing nontraversable app requires privilege" test_existing_nontraversable_app_requires_privilege
+run_test "administrator password guidance precedes required sudo" test_administrator_password_guidance_precedes_required_sudo
+run_test "administrator password guidance is silent without sudo" test_administrator_password_guidance_is_silent_without_sudo
 run_test "rejects root execution validation contract" test_rejects_root_execution_validation_contract
 run_test "rejects root execution before install work" test_rejects_root_execution_before_install_work
 run_test "transaction keychain cancel rolls back all files" test_transaction_keychain_cancel_rolls_back_all_files
@@ -3725,7 +3873,8 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R14 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R15 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
 run_test "package rejects generic credential key shapes" test_package_rejects_generic_credential_key_shapes

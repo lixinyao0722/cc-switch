@@ -11,6 +11,11 @@ sandbox_mode = "danger-full-access"
 
 [desktop]
 git-branch-prefix = "feat/"
+show-context-window-usage = true
+preventSleepWhileRunning = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
 
 [model_providers.modelhub]
 name = "modelhub"

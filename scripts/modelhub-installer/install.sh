@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260817-r14'
+readonly RELEASE_TAG='modelhub-installer-20260817-r15'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -990,6 +990,65 @@ modelhub-installer/templates/modelhub-provider.toml
 EOF
 }
 
+validate_model_catalog() {
+  local file="$1"
+  local valid
+
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    die "ModelHub model catalog is missing or unsafe: $file"
+    return 1
+  fi
+  valid="$(/usr/bin/jq -r '
+    def exact($slug; $context; $maximum; $percent):
+      ([.models[] | select(.slug == $slug)]
+        | length == 1
+          and .[0].context_window == $context
+          and .[0].max_context_window == $maximum
+          and .[0].effective_context_window_percent == $percent);
+    try (
+      (.models | type == "array")
+      and exact("gpt-5.6-sol"; 1050000; 1050000; 100)
+      and exact("gpt-5.6-terra"; 272000; 272000; 95)
+      and exact("gpt-5.6-luna"; 272000; 272000; 95)
+      and exact("gpt-5.5"; 1050000; 1050000; 100)
+    ) catch false
+  ' "$file" 2>/dev/null)" || valid=false
+  if [[ "$valid" != 'true' ]]; then
+    die 'ModelHub model catalog does not match the R15 context-window contract'
+    return 1
+  fi
+}
+
+golden_computer_use_plugin_is_enabled() {
+  local file="$1"
+
+  awk '
+    BEGIN {
+      in_target = 0
+      section_count = 0
+      enabled_count = 0
+      enabled_true_count = 0
+    }
+    /^[[:space:]]*\[/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      in_target = (line == "[plugins.\"computer-use@openai-bundled\"]")
+      if (in_target) section_count += 1
+      next
+    }
+    in_target && /^[[:space:]]*enabled[[:space:]]*=/ {
+      enabled_count += 1
+      if ($0 ~ /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true([[:space:]]*(#.*)?)?$/) {
+        enabled_true_count += 1
+      }
+    }
+    END {
+      exit(section_count == 1 && enabled_count == 1 && enabled_true_count == 1 ? 0 : 1)
+    }
+  ' "$file"
+}
+
 validate_golden_codex_template() {
   local file="$1"
   local placeholder_count
@@ -1005,13 +1064,16 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
     || ! grep -Fq -- 'model_auto_compact_token_limit = 500000' "$file" \
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
+    || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
+    || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
+    || ! golden_computer_use_plugin_is_enabled "$file" \
     || ! grep -Fq -- 'request_max_retries = 2' "$file" \
     || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
     return 1
   fi
   if LC_ALL=C grep -E -i -q \
-    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=' \
+    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=|^[[:space:]]*\[mcp_servers[.]computer-use\][[:space:]]*$' \
     "$file"; then
     die 'golden Codex config contains a forbidden path, route, or credential field'
     return 1
@@ -1067,7 +1129,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 500000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R14 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R15 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1153,6 +1215,9 @@ validate_resource_archive() {
   fi
   validate_golden_codex_template \
     "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
+    || { rm -rf "$work_dir"; return 1; }
+  validate_model_catalog \
+    "$extracted_dir/modelhub-installer/assets/models-modelhub-1m.json" \
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_settings \
     "$extracted_dir/modelhub-installer/golden/settings.json" \
@@ -3590,6 +3655,14 @@ path_creation_requires_privilege() {
   [[ ! -d "$ancestor" || ! -w "$ancestor" ]]
 }
 
+explain_administrator_password() {
+  printf '%s\n' \
+    '接下来 macOS 会请求管理员权限。' \
+    '请输入当前 Mac 登录用户的管理员密码（不是 MODELHUB_AK）。输入时终端不会显示字符，输完按回车。' \
+    '该权限用于检查或写入 /Applications 和 /etc/codex 等系统位置。' \
+    >&2
+}
+
 prepare_application_permissions() {
   local sudo_bin
 
@@ -3602,6 +3675,7 @@ prepare_application_permissions() {
       && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
     NEEDS_SUDO=1
     sudo_bin="$(sudo_command)"
+    explain_administrator_password
     if ! "$sudo_bin" -v; then
       die "administrator permission is required to install CC Switch"
       return 1
@@ -3752,7 +3826,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R14 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R15 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
