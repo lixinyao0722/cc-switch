@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260816-r13'
+readonly RELEASE_TAG='modelhub-installer-20260817-r14'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -3748,7 +3748,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R13 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R14 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -3850,7 +3850,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
-  printf '\n安装完成：CC Switch 已启动，ModelHub 路由检查通过。\n' >&2
+  printf '\n安装完成：桌面与移动端新会话已强制通过 CC Switch；代理不可用时会话将失败。\n' >&2
 }
 
 rollback_latest() {
