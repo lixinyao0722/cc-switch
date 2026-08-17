@@ -1066,7 +1066,7 @@ validate_golden_database() {
     || { die 'golden CC Switch provider metadata model is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true' AND json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider encrypted reasoning memory is invalid'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=1 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
@@ -1628,7 +1628,9 @@ toml_header_kind() {
       }
       header = compact_unquoted(substr(header, 2, length(header) - 2))
       count = split(header, parts, ".")
-      if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
+      if (count == 1 && unquote(parts[1]) == "desktop") {
+        print "desktop"
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
         if (count == 2) {
           print "modelhub"
         } else {
@@ -1650,6 +1652,21 @@ modelhub_section_count() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
     if [[ "$kind" == "modelhub" ]]; then
+      count=$((count + 1))
+    fi
+  done <"$file"
+  printf '%s' "$count"
+}
+
+desktop_section_count() {
+  local file="$1"
+  local line
+  local kind
+  local count=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    kind="$(printf '%s\n' "$line" | toml_header_kind)" || return 1
+    if [[ "$kind" == "desktop" ]]; then
       count=$((count + 1))
     fi
   done <"$file"
@@ -1693,6 +1710,7 @@ validate_merged_codex_config() {
   local key
   local count
   local section_count
+  local desktop_count
 
   if [[ ! -f "$file" ]]; then
     die "merged Codex config does not exist: $file"
@@ -1718,6 +1736,15 @@ validate_merged_codex_config() {
   section_count="$(modelhub_section_count "$file")" || return 1
   if [[ "$section_count" != "1" ]]; then
     die "expected one $MODELHUB_SECTION section, found $section_count"
+    return 1
+  fi
+  desktop_count="$(desktop_section_count "$file")" || return 1
+  if [[ "$desktop_count" != "1" ]]; then
+    die "expected one [desktop] section, found $desktop_count"
+    return 1
+  fi
+  if [[ "$(grep -Ec '^[[:space:]]*git-branch-prefix[[:space:]]*=[[:space:]]*"feat/"[[:space:]]*$' "$file")" != "1" ]]; then
+    die 'merged Codex config must contain one feat/ Git branch prefix'
     return 1
   fi
 
@@ -1751,6 +1778,8 @@ merge_codex_config() {
   local header_kind
   local in_root=1
   local skip_modelhub=0
+  local in_desktop=0
+  local saw_desktop=0
 
   if [[ ! -f "$template_file" ]]; then
     die "ModelHub template does not exist: $template_file"
@@ -1786,16 +1815,37 @@ merge_codex_config() {
     }
     case "$header_kind" in
       modelhub|modelhub-child)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
         skip_modelhub=1
         in_root=0
+        in_desktop=0
         continue
         ;;
-      table)
+      desktop)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
         skip_modelhub=0
         in_root=0
+        in_desktop=1
+        saw_desktop=1
+        ;;
+      table)
+        if [[ "$in_desktop" == "1" ]]; then
+          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+        fi
+        skip_modelhub=0
+        in_root=0
+        in_desktop=0
         ;;
     esac
     if [[ "$skip_modelhub" == "1" ]]; then
+      continue
+    fi
+    if [[ "$in_desktop" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*git-branch-prefix[[:space:]]*= ]]; then
       continue
     fi
     if [[ "$in_root" == "1" ]] \
@@ -1808,8 +1858,14 @@ merge_codex_config() {
       return 1
     fi
   done <"$effective_source"
+  if [[ "$in_desktop" == "1" ]]; then
+    printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+  fi
+  if [[ "$saw_desktop" == "0" ]]; then
+    printf '%s\n' '[desktop]' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+  fi
 
-  if ! awk -v section="$MODELHUB_SECTION" '$0 == section { exit } { print }' "$rendered_template" >"$merged_file"; then
+  if ! awk '/^[[:space:]]*\[/ { exit } { print }' "$rendered_template" >"$merged_file"; then
     /bin/rm -rf "$work_dir" || true
     die "failed to stage managed Codex root fields"
     return 1

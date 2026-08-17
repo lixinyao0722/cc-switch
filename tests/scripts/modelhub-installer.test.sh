@@ -253,6 +253,33 @@ test_merge_preserves_unmanaged_sections() {
   assert_not_contains "$case_dir/output.toml" 'old-provider'
 }
 
+test_r14_defaults_use_compact_retry_and_git_prefix() {
+  local case_dir="$TEST_TMP/r14-defaults"
+  mkdir -p "$case_dir"
+  printf '%s\n' \
+    'approval_policy = "on-request"' \
+    '[desktop]' \
+    'followUpQueueMode = "queued"' \
+    'git-branch-prefix = "old/"' \
+    >"$case_dir/input.toml"
+
+  merge_codex_config \
+    "$case_dir/input.toml" \
+    "$TEMPLATE" \
+    "$case_dir/output.toml" \
+    '/Users/Test User'
+
+  assert_contains "$TEMPLATE" 'model_auto_compact_token_limit = 500000'
+  assert_contains "$GOLDEN_CODEX_CONFIG" 'model_auto_compact_token_limit = 500000'
+  assert_equals \
+    "$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' "$META_TEMPLATE")" \
+    '2'
+  assert_occurrences "$case_dir/output.toml" '[desktop]' 1
+  assert_occurrences "$case_dir/output.toml" 'git-branch-prefix = "feat/"' 1
+  assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
+  assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
+}
+
 test_merge_creates_config_from_empty_file() {
   local case_dir="$TEST_TMP/merge-empty"
   mkdir -p "$case_dir"
@@ -3195,7 +3222,7 @@ test_package_normalizes_custom_snapshot_retry_policy() {
   assert_not_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'retry_429'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '1'
+    '2'
   assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
     '2000'
@@ -3278,7 +3305,7 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     '1'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '1'
+    '2'
   assert_sql "$first_db" \
     "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
     '2000'
@@ -3388,6 +3415,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
+run_test "R14 defaults use compact retry and git prefix" test_r14_defaults_use_compact_retry_and_git_prefix
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
