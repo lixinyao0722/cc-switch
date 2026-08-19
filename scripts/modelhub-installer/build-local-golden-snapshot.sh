@@ -34,6 +34,7 @@ main() {
   local output_dir=''
   local work_dir
   local portable_config
+  local portable_provider_config
   local portable_settings
   local portable_database
   local escaped_home
@@ -72,21 +73,33 @@ main() {
   work_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cc-switch-local-golden.XXXXXX")"
   trap '/bin/rm -rf -- "$work_dir"' EXIT INT TERM
   portable_config="$work_dir/codex-config.toml"
+  portable_provider_config="$work_dir/provider-config.toml"
   portable_settings="$work_dir/settings.json"
   portable_database="$work_dir/cc-switch.db"
   escaped_home="$(escape_sed_pattern "$source_home")"
 
   /usr/bin/sed \
     -e "s#$escaped_home#__USER_HOME__#g" \
-    -e "s#base_url = \"http://127.0.0.1:15721/v1\"#base_url = \"$MODELHUB_UPSTREAM\"#g" \
     -e '/^[[:space:]]*experimental_bearer_token[[:space:]]*=/d' \
     "$codex_config" >"$portable_config"
-  if ! /usr/bin/grep -Fq -- "$MODELHUB_UPSTREAM" "$portable_config" \
+  if [[ "$(/usr/bin/grep -Fxc -- 'base_url = "http://127.0.0.1:15721/v1"' "$portable_config")" != '1' ]] \
     || /usr/bin/grep -Fq -- "$source_home" "$portable_config" \
     || LC_ALL=C /usr/bin/grep -E -i -q \
       'access_token[[:space:]]*=|refresh_token[[:space:]]*=|OPENAI_API_KEY[[:space:]]*=|experimental_bearer_token[[:space:]]*=' \
       "$portable_config"; then
     die 'portable Codex snapshot failed path or credential validation'
+    return 1
+  fi
+  if ! /usr/bin/awk -v upstream="$MODELHUB_UPSTREAM" '
+    $0 == "base_url = \"http://127.0.0.1:15721/v1\"" {
+      print "base_url = \"" upstream "\""
+      replacements += 1
+      next
+    }
+    { print }
+    END { if (replacements != 1) exit 1 }
+  ' "$portable_config" >"$portable_provider_config"; then
+    die 'portable provider config normalization failed'
     return 1
   fi
 
@@ -108,7 +121,7 @@ main() {
   source_home_sql="$(sql_quote "$source_home")"
   stable_id_sql="$(sql_quote "$STABLE_MODELHUB_PROVIDER_ID")"
   current_id_sql="$(sql_quote "$current_id")"
-  portable_config_sql="$(sql_quote "$portable_config")"
+  portable_config_sql="$(sql_quote "$portable_provider_config")"
 
   /usr/bin/sqlite3 "$portable_database" <<SQL
 PRAGMA foreign_keys = OFF;
@@ -200,6 +213,8 @@ SQL
     die 'portable database still contains credential material'
     return 1
   fi
+
+  /bin/rm -f "$portable_provider_config"
 
   /bin/mkdir -p "$(dirname "$output_dir")"
   /bin/mv "$work_dir" "$output_dir"

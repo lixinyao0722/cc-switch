@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260817-r15'
+readonly RELEASE_TAG='modelhub-installer-20260819-r16'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -64,6 +64,7 @@ CHATGPT_BOOTSTRAP_STAGE_DIR=''
 CHATGPT_TRUSTED_HELPER_DIR=''
 CHATGPT_TRUSTED_HELPER_PATH=''
 CHATGPT_INSTALLED_BY_RUN=0
+CODEX_CONFIG_INSTALL_MODE='overwrite'
 
 die() {
   echo "error: $*" >&2
@@ -1010,11 +1011,11 @@ validate_model_catalog() {
       and exact("gpt-5.6-sol"; 1050000; 1050000; 100)
       and exact("gpt-5.6-terra"; 272000; 272000; 95)
       and exact("gpt-5.6-luna"; 272000; 272000; 95)
-      and exact("gpt-5.5"; 1050000; 1050000; 100)
+      and exact("gpt-5.5-2026-04-24"; 1050000; 1050000; 100)
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R15 context-window contract'
+    die 'ModelHub model catalog does not match the R16 context-window contract'
     return 1
   fi
 }
@@ -1049,6 +1050,43 @@ golden_computer_use_plugin_is_enabled() {
   ' "$file"
 }
 
+golden_computer_use_mcp_is_enabled() {
+  local file="$1"
+
+  awk '
+    BEGIN {
+      in_target = 0
+      section_count = 0
+      enabled_count = 0
+      enabled_true_count = 0
+    }
+    /^[[:space:]]*\[/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      in_target = (line == "[mcp_servers.computer-use]")
+      if (in_target) section_count += 1
+      next
+    }
+    in_target && /^[[:space:]]*enabled[[:space:]]*=/ {
+      enabled_count += 1
+      if ($0 ~ /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true([[:space:]]*(#.*)?)?$/) {
+        enabled_true_count += 1
+      }
+    }
+    END {
+      exit(section_count == 1 && enabled_count == 1 && enabled_true_count == 1 ? 0 : 1)
+    }
+  ' "$file"
+}
+
+golden_config_exact_line_count() {
+  local file="$1"
+  local expected="$2"
+
+  awk -v expected="$expected" '$0 == expected { count += 1 } END { print count + 0 }' "$file"
+}
+
 validate_golden_codex_template() {
   local file="$1"
   local placeholder_count
@@ -1060,20 +1098,32 @@ validate_golden_codex_template() {
   placeholder_count="$(awk '{ count += gsub(/__USER_HOME__/, "") } END { print count + 0 }' "$file")"
   if [[ "$placeholder_count" -lt 1 ]] \
     || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
-    || ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file" \
+    || [[ "$(golden_config_exact_line_count "$file" 'review_model = "gpt-5.5-2026-04-24"')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'base_url = "http://127.0.0.1:15721/v1"')" != '1' ]] \
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
     || ! grep -Fq -- 'model_auto_compact_token_limit = 500000' "$file" \
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
     || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
+    || [[ "$(golden_config_exact_line_count "$file" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]')" != '1' ]] \
     || ! golden_computer_use_plugin_is_enabled "$file" \
+    || ! golden_computer_use_mcp_is_enabled "$file" \
+    || [[ "$(golden_config_exact_line_count "$file" '[mcp_servers.computer-use]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'args = ["mcp"]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'cwd = "."')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" '[mcp_servers.node_repl]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" '[mcp_servers.node_repl.env]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"')" != '1' ]] \
     || ! grep -Fq -- 'request_max_retries = 2' "$file" \
     || ! grep -Fq -- 'stream_max_retries = 3' "$file"; then
     die 'golden Codex config does not match the portable ModelHub contract'
     return 1
   fi
   if LC_ALL=C grep -E -i -q \
-    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=|^[[:space:]]*\[mcp_servers[.]computer-use\][[:space:]]*$' \
+    '/Users/|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token|^[[:space:]]*retry_429[[:space:]]*=' \
     "$file"; then
     die 'golden Codex config contains a forbidden path, route, or credential field'
     return 1
@@ -1129,7 +1179,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 500000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R15 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R16 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1706,6 +1756,12 @@ toml_header_kind() {
       count = split(header, parts, ".")
       if (count == 1 && unquote(parts[1]) == "desktop") {
         print "desktop"
+      } else if (count >= 2 && unquote(parts[1]) == "plugins" && unquote(parts[2]) == "computer-use@openai-bundled") {
+        print "computer-use-plugin"
+      } else if (count >= 2 && unquote(parts[1]) == "mcp_servers" && unquote(parts[2]) == "computer-use") {
+        print "computer-use-mcp"
+      } else if (count >= 2 && unquote(parts[1]) == "mcp_servers" && unquote(parts[2]) == "node_repl") {
+        print "node-repl-mcp"
       } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
         if (count == 2) {
           print "modelhub"
@@ -1993,11 +2049,52 @@ validate_merged_codex_config() {
     die "merged Codex config does not reference the target user's model catalog"
     return 1
   fi
-  if ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file"; then
-    die "merged Codex config does not contain the ModelHub endpoint"
+  if ! grep -Fq -- 'base_url = "http://127.0.0.1:15721/v1"' "$file" \
+    && ! grep -Fq -- 'base_url = "https://aidp.bytedance.net/api/modelhub/online"' "$file"; then
+    die "merged Codex config does not contain an allowed ModelHub endpoint"
     return 1
   fi
   validate_codex_config_with_parser "$file"
+}
+
+codex_config_requires_explicit_overwrite() {
+  local file="$1"
+  local status
+
+  if [[ ! -f "$file" ]]; then
+    return 1
+  fi
+  if [[ ! -r "$file" ]]; then
+    die "existing Codex config is not readable: $file"
+    return 2
+  fi
+  if awk '
+    /^[[:space:]]*#/ { next }
+    /"""/ || /\047\047\047/ { found = 1; exit }
+    {
+      equals = index($0, "=")
+      if (equals == 0) next
+      key = substr($0, 1, equals - 1)
+      value = substr($0, equals + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      sub(/^[[:space:]]+/, "", value)
+      if (key ~ /^"/ || key ~ /^\047/ || key ~ /\./ \
+          || (value ~ /^\[/ && value !~ /\][[:space:]]*(#.*)?$/)) {
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "$status" -eq 1 ]]; then
+    return 1
+  fi
+  die "failed to inspect existing Codex config syntax: $file"
+  return 2
 }
 
 merge_codex_config() {
@@ -2005,18 +2102,22 @@ merge_codex_config() {
   local template_file="$2"
   local output_file="$3"
   local user_home="$4"
+  local full_golden_merge="${5:-0}"
   local escaped_home
   local effective_source
   local work_dir
   local rendered_template
   local filtered_source
   local merged_file
+  local managed_desktop
   local line
   local header_kind
   local in_root=1
   local skip_modelhub=0
   local in_desktop=0
   local saw_desktop=0
+  local skip_managed_section=0
+  local syntax_status
 
   if [[ ! -f "$template_file" ]]; then
     die "ModelHub template does not exist: $template_file"
@@ -2029,16 +2130,36 @@ merge_codex_config() {
   rendered_template="$work_dir/rendered-template.toml"
   filtered_source="$work_dir/filtered-source.toml"
   merged_file="$work_dir/merged.toml"
+  managed_desktop="$work_dir/managed-desktop.toml"
   escaped_home="$(toml_escape_basic_string "$user_home")"
   effective_source="$source_file"
   if [[ ! -f "$effective_source" ]]; then
     effective_source=/dev/null
+  elif codex_config_requires_explicit_overwrite "$effective_source"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'existing Codex config uses complex TOML syntax; select full overwrite explicitly'
+    return 1
+  else
+    syntax_status=$?
+    if [[ "$syntax_status" -ne 1 ]]; then
+      /bin/rm -rf "$work_dir" || true
+      return 1
+    fi
   fi
 
   render_template "$template_file" "$rendered_template" '__USER_HOME__' "$escaped_home" || {
     /bin/rm -rf "$work_dir" || true
     return 1
   }
+  if ! awk '
+    $0 == "[desktop]" { emit = 1; next }
+    emit && /^[[:space:]]*\[/ { exit }
+    emit { print }
+  ' "$rendered_template" >"$managed_desktop"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to extract managed Codex desktop fields"
+    return 1
+  fi
 
   if ! : >"$filtered_source"; then
     /bin/rm -rf "$work_dir" || true
@@ -2053,40 +2174,57 @@ merge_codex_config() {
     case "$header_kind" in
       modelhub|modelhub-child)
         if [[ "$in_desktop" == "1" ]]; then
-          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+          cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
         skip_modelhub=1
+        skip_managed_section=1
+        in_root=0
+        in_desktop=0
+        continue
+        ;;
+      computer-use-plugin|computer-use-mcp|node-repl-mcp)
+        if [[ "$in_desktop" == "1" ]]; then
+          cat "$managed_desktop" >>"$filtered_source" || return 1
+        fi
+        skip_modelhub=0
+        skip_managed_section=1
         in_root=0
         in_desktop=0
         continue
         ;;
       desktop)
         if [[ "$in_desktop" == "1" ]]; then
-          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+          cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
         skip_modelhub=0
+        skip_managed_section=0
         in_root=0
         in_desktop=1
         saw_desktop=1
         ;;
       table|openai-provider|openai-provider-child)
         if [[ "$in_desktop" == "1" ]]; then
-          printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+          cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
         skip_modelhub=0
+        skip_managed_section=0
         in_root=0
         in_desktop=0
         ;;
     esac
-    if [[ "$skip_modelhub" == "1" ]]; then
+    if [[ "$skip_modelhub" == "1" || "$skip_managed_section" == "1" ]]; then
       continue
     fi
     if [[ "$in_desktop" == "1" ]] \
-      && [[ "$line" =~ ^[[:space:]]*git-branch-prefix[[:space:]]*= ]]; then
+      && [[ "$line" =~ ^[[:space:]]*(git-branch-prefix|show-context-window-usage|preventSleepWhileRunning|enabled-reasoning-efforts)[[:space:]]*= ]]; then
       continue
     fi
     if [[ "$in_root" == "1" ]] \
       && [[ "$line" =~ ^[[:space:]]*(model|review_model|model_provider|model_reasoning_effort|model_auto_compact_token_limit|model_context_window|model_catalog_json)[[:space:]]*= ]]; then
+      continue
+    fi
+    if [[ "$full_golden_merge" == "1" && "$in_root" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*(model_max_output_tokens|approval_policy|sandbox_mode)[[:space:]]*= ]]; then
       continue
     fi
     if ! printf '%s\n' "$line" >>"$filtered_source"; then
@@ -2096,10 +2234,11 @@ merge_codex_config() {
     fi
   done <"$effective_source"
   if [[ "$in_desktop" == "1" ]]; then
-    printf '%s\n' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+    cat "$managed_desktop" >>"$filtered_source" || return 1
   fi
   if [[ "$saw_desktop" == "0" ]]; then
-    printf '%s\n' '[desktop]' 'git-branch-prefix = "feat/"' >>"$filtered_source" || return 1
+    printf '%s\n' '[desktop]' >>"$filtered_source" || return 1
+    cat "$managed_desktop" >>"$filtered_source" || return 1
   fi
 
   if ! awk '/^[[:space:]]*\[/ { exit } { print }' "$rendered_template" >"$merged_file"; then
@@ -2115,7 +2254,13 @@ merge_codex_config() {
     fi
   fi
   if ! printf '\n' >>"$merged_file" \
-    || ! awk -v section="$MODELHUB_SECTION" '$0 == section { emit = 1 } emit { print }' "$rendered_template" >>"$merged_file"; then
+    || ! awk '
+      $0 == "[plugins.\"computer-use@openai-bundled\"]" \
+        || $0 == "[mcp_servers.computer-use]" \
+        || $0 == "[mcp_servers.node_repl]" \
+        || $0 == "[model_providers.modelhub]" { emit = 1 }
+      emit { print }
+    ' "$rendered_template" >>"$merged_file"; then
     /bin/rm -rf "$work_dir" || true
     die "failed to append the managed ModelHub table"
     return 1
@@ -2679,6 +2824,105 @@ install_golden_codex_config() {
   fi
 }
 
+install_merged_golden_codex_config() {
+  local golden_file="$1"
+  local target_file="$2"
+  local user_home="$3"
+  local work_dir
+  local merged_file
+
+  validate_golden_codex_template "$golden_file" || return 1
+  if ! work_dir="$(mktemp -d "$(dirname "$target_file")/.merged-codex.XXXXXX")"; then
+    die 'failed to create the merged Codex staging directory'
+    return 1
+  fi
+  merged_file="$work_dir/config.toml"
+  if ! merge_codex_config \
+    "$target_file" \
+    "$golden_file" \
+    "$merged_file" \
+    "$user_home" \
+    1 \
+    || ! /bin/chmod 0600 "$merged_file"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/mv "$merged_file" "$target_file" \
+    || ! /bin/rmdir "$work_dir"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'failed to atomically install the merged Codex config'
+    return 1
+  fi
+}
+
+choose_codex_config_install_mode() {
+  local target_file="$1"
+  local overwrite_choice=''
+  local test_choices=''
+  local requires_explicit_overwrite=0
+  local syntax_status
+
+  if [[ ! -e "$target_file" && ! -L "$target_file" ]]; then
+    printf '%s' 'overwrite'
+    return 0
+  fi
+  if codex_config_requires_explicit_overwrite "$target_file"; then
+    requires_explicit_overwrite=1
+  else
+    syntax_status=$?
+    if [[ "$syntax_status" -ne 1 ]]; then
+      return 1
+    fi
+  fi
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    test_choices="${CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE:-}"
+  fi
+
+  while true; do
+    if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+      if [[ "$test_choices" == *$'\n'* ]]; then
+        overwrite_choice="${test_choices%%$'\n'*}"
+        test_choices="${test_choices#*$'\n'}"
+      else
+        overwrite_choice="$test_choices"
+        test_choices=''
+      fi
+    else
+      if [[ "$requires_explicit_overwrite" == "1" ]]; then
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+      else
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+      fi
+      if ! IFS= read -r overwrite_choice </dev/tty; then
+        die '读取 Codex 个性化配置覆盖选择失败'
+        return 1
+      fi
+    fi
+    case "$overwrite_choice" in
+      ''|N|n)
+        if [[ "$requires_explicit_overwrite" == "1" ]]; then
+          die 'existing Codex config uses complex TOML syntax; select full overwrite explicitly'
+          return 1
+        fi
+        printf '%s' 'merge'
+        return 0
+        ;;
+      Y|y)
+        printf '%s' 'overwrite'
+        return 0
+        ;;
+      *)
+        if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" != "1" ]]; then
+          printf '%s\n' '请输入 y 或 N。' >/dev/tty
+        elif [[ -z "$test_choices" ]]; then
+          die '测试模式缺少后续 Codex 配置覆盖选择'
+          return 1
+        fi
+        ;;
+    esac
+  done
+}
+
 install_codex_managed_config() {
   local template_file="$1"
   local stage_dir=''
@@ -2899,11 +3143,26 @@ install_runtime_files() {
     return 1
   fi
 
-  install_golden_codex_config \
-    "$resources_dir/golden/codex-config.toml" \
-    "$CODEX_CONFIG_PATH" \
-    "$INSTALL_USER_HOME" \
-    || return 1
+  case "$CODEX_CONFIG_INSTALL_MODE" in
+    merge)
+      install_merged_golden_codex_config \
+        "$resources_dir/golden/codex-config.toml" \
+        "$CODEX_CONFIG_PATH" \
+        "$INSTALL_USER_HOME" \
+        || return 1
+      ;;
+    overwrite)
+      install_golden_codex_config \
+        "$resources_dir/golden/codex-config.toml" \
+        "$CODEX_CONFIG_PATH" \
+        "$INSTALL_USER_HOME" \
+        || return 1
+      ;;
+    *)
+      die "invalid Codex config install mode: $CODEX_CONFIG_INSTALL_MODE"
+      return 1
+      ;;
+  esac
   install_codex_managed_config \
     "$resources_dir/templates/codex-managed-config.toml" \
     || return 1
@@ -3768,7 +4027,7 @@ run_install_transaction() {
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
   local routing_timeout="${CC_SWITCH_INSTALLER_ROUTING_TIMEOUT:-30}"
 
-  progress 6 8 '安装 CC Switch，并覆盖本机完整配置快照'
+  progress 6 8 '安装 CC Switch，并写入已确认的配置策略'
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
   progress 7 8 '确认或输入 MODELHUB_AK，并同步凭据'
@@ -3826,7 +4085,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R15 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R16 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -3869,6 +4128,11 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
+
+  if ! CODEX_CONFIG_INSTALL_MODE="$(choose_codex_config_install_mode "$CODEX_CONFIG_PATH")"; then
+    cleanup_transaction_stage || true
+    return 1
+  fi
 
   progress 5 8 '退出应用并备份现有 Codex、CC Switch 配置'
   quit_apps || {

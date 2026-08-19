@@ -1,5 +1,5 @@
 model = "gpt-5.6-sol"
-review_model = "gpt-5.6-sol"
+review_model = "gpt-5.5-2026-04-24"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
 model_reasoning_effort = "high"
@@ -13,15 +13,29 @@ sandbox_mode = "danger-full-access"
 git-branch-prefix = "feat/"
 show-context-window-usage = true
 preventSleepWhileRunning = true
+enabled-reasoning-efforts = ["high", "xhigh", "max"]
 
 [plugins."computer-use@openai-bundled"]
 enabled = true
+
+[mcp_servers.computer-use]
+args = ["mcp"]
+command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+cwd = "."
+enabled = true
+
+[mcp_servers.node_repl]
+command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+
+[mcp_servers.node_repl.env]
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
 
 [model_providers.modelhub]
 name = "modelhub"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "https://aidp.bytedance.net/api/modelhub/online"
+base_url = "http://127.0.0.1:15721/v1"
 env_key = "MODELHUB_AK"
 stream_idle_timeout_ms = 600_000
 request_max_retries = 2
