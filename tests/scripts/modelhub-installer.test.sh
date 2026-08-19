@@ -258,8 +258,8 @@ test_merge_preserves_unmanaged_sections() {
   assert_not_contains "$case_dir/output.toml" 'old-provider'
 }
 
-test_r15_defaults_include_codex_settings_and_gpt55_window() {
-  local case_dir="$TEST_TMP/r15-defaults"
+test_r16_defaults_include_codex_settings_and_gpt55_window() {
+  local case_dir="$TEST_TMP/r16-defaults"
   mkdir -p "$case_dir"
   printf '%s\n' \
     'approval_policy = "on-request"' \
@@ -285,11 +285,25 @@ test_r15_defaults_include_codex_settings_and_gpt55_window() {
   assert_not_contains "$case_dir/output.toml" 'git-branch-prefix = "old/"'
   assert_occurrences "$GOLDEN_CODEX_CONFIG" 'show-context-window-usage = true' 1
   assert_occurrences "$GOLDEN_CODEX_CONFIG" 'preventSleepWhileRunning = true' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'review_model = "gpt-5.5-2026-04-24"' 1
+  assert_occurrences \
+    "$GOLDEN_CODEX_CONFIG" \
+    'enabled-reasoning-efforts = ["high", "xhigh", "max"]' \
+    1
   assert_occurrences "$GOLDEN_CODEX_CONFIG" '[plugins."computer-use@openai-bundled"]' 1
-  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'enabled = true' 1
-  assert_not_contains "$GOLDEN_CODEX_CONFIG" '[mcp_servers.computer-use]'
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'enabled = true' 2
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" '[mcp_servers.computer-use]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'args = ["mcp"]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'cwd = "."' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" '[mcp_servers.node_repl]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" '[mcp_servers.node_repl.env]' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"' 1
+  assert_occurrences "$GOLDEN_CODEX_CONFIG" 'base_url = "http://127.0.0.1:15721/v1"' 1
   assert_equals \
-    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.5") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.5-2026-04-24") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
     $'1050000\t1050000\t100'
   assert_equals \
     "$(/usr/bin/jq -r '[.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$GPT55_TEMPLATE")" \
@@ -377,6 +391,28 @@ test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml() {
     "$case_dir/quoted-openai.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/quoted-output.toml"
   CC_SWITCH_CODEX_CONFIG_VALIDATOR="$codex_bin" assert_command_fails merge_codex_managed_config \
     "$case_dir/invalid.toml" "$MANAGED_CONFIG_TEMPLATE" "$case_dir/invalid-output.toml"
+}
+
+test_codex_config_install_choice_defaults_to_merge_and_reprompts() {
+  local case_dir="$TEST_TMP/codex-config-install-choice"
+  local existing_config="$case_dir/config.toml"
+  local missing_config="$case_dir/missing.toml"
+  mkdir -p "$case_dir"
+  printf 'model = "existing"\n' >"$existing_config"
+  export CC_SWITCH_INSTALLER_TEST_MODE=1
+
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE=''
+  assert_equals "$(choose_codex_config_install_mode "$existing_config")" 'merge'
+
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='y'
+  assert_equals "$(choose_codex_config_install_mode "$existing_config")" 'overwrite'
+
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE=$'invalid\nn'
+  assert_equals "$(choose_codex_config_install_mode "$existing_config")" 'merge'
+
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='invalid'
+  assert_command_fails choose_codex_config_install_mode "$existing_config"
+  assert_equals "$(choose_codex_config_install_mode "$missing_config")" 'overwrite'
 }
 
 test_merge_creates_config_from_empty_file() {
@@ -1458,7 +1494,7 @@ test_model_catalog_validation_rejects_malformed_stale_and_missing_models() {
   cp "$MODEL_CATALOG" "$case_dir/valid.json"
   printf '{invalid json\n' >"$case_dir/malformed.json"
   /usr/bin/jq \
-    '(.models[] | select(.slug == "gpt-5.5") | .context_window) = 272000' \
+    '(.models[] | select(.slug == "gpt-5.5-2026-04-24") | .context_window) = 272000' \
     "$MODEL_CATALOG" >"$case_dir/stale-gpt55.json"
   /usr/bin/jq \
     '.models |= map(select(.slug != "gpt-5.6-terra"))' \
@@ -1500,8 +1536,8 @@ test_preflight_rejects_golden_database_without_activity_summary_mode() {
   assert_command_fails validate_golden_database "$database"
 }
 
-test_preflight_rejects_golden_codex_without_r15_defaults() {
-  local case_dir="$TEST_TMP/preflight-golden-r15-defaults"
+test_preflight_rejects_golden_codex_without_r16_defaults() {
+  local case_dir="$TEST_TMP/preflight-golden-r16-defaults"
   mkdir -p "$case_dir"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-compact.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-prefix.toml"
@@ -1510,6 +1546,10 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-computer-use-plugin.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/disabled-computer-use-plugin.toml"
   cp "$GOLDEN_CODEX_CONFIG" "$case_dir/duplicate-computer-use-mcp.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/stale-review-model.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/upstream-live-route.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/wide-reasoning-menu.toml"
+  cp "$GOLDEN_CODEX_CONFIG" "$case_dir/missing-node-repl.toml"
   /usr/bin/perl -0pi -e 's/model_auto_compact_token_limit = 500000/model_auto_compact_token_limit = 829_674/' \
     "$case_dir/stale-compact.toml"
   /usr/bin/perl -0pi -e 's/\n\[desktop\]\ngit-branch-prefix = "feat\/"\nshow-context-window-usage = true\npreventSleepWhileRunning = true\n//' \
@@ -1526,6 +1566,14 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
     >>"$case_dir/disabled-computer-use-plugin.toml"
   printf '%s\n' '' '[mcp_servers.computer-use]' 'command = "duplicate"' \
     >>"$case_dir/duplicate-computer-use-mcp.toml"
+  /usr/bin/perl -0pi -e 's/review_model = "gpt-5.5-2026-04-24"/review_model = "gpt-5.6-sol"/' \
+    "$case_dir/stale-review-model.toml"
+  /usr/bin/perl -0pi -e 's#base_url = "http://127.0.0.1:15721/v1"#base_url = "https://aidp.bytedance.net/api/modelhub/online"#' \
+    "$case_dir/upstream-live-route.toml"
+  /usr/bin/perl -0pi -e 's/enabled-reasoning-efforts = \["high", "xhigh", "max"\]/enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]/' \
+    "$case_dir/wide-reasoning-menu.toml"
+  /usr/bin/perl -0pi -e 's/\n\[mcp_servers\.node_repl\][\s\S]*?\n\[model_providers\.modelhub\]/\n[model_providers.modelhub]/' \
+    "$case_dir/missing-node-repl.toml"
 
   assert_command_fails validate_golden_codex_template "$case_dir/stale-compact.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/missing-prefix.toml"
@@ -1534,6 +1582,10 @@ test_preflight_rejects_golden_codex_without_r15_defaults() {
   assert_command_fails validate_golden_codex_template "$case_dir/missing-computer-use-plugin.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/disabled-computer-use-plugin.toml"
   assert_command_fails validate_golden_codex_template "$case_dir/duplicate-computer-use-mcp.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/stale-review-model.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/upstream-live-route.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/wide-reasoning-menu.toml"
+  assert_command_fails validate_golden_codex_template "$case_dir/missing-node-repl.toml"
 }
 
 test_preflight_rejects_golden_database_without_r12_resilience_defaults() {
@@ -1607,7 +1659,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.2-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260817-r15'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260819-r16'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1620,7 +1672,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260817-r15/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260819-r16/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2123,6 +2175,10 @@ create_transaction_stubs() {
     'exit 0'
   write_executable_stub "$stub_dir/curl" \
     'if [[ "${FAKE_HEALTH_MODE:-healthy}" == "healthy" ]]; then' \
+    '  if [[ -n "${FAKE_ROUTING_REWRITE_AK:-}" && ! -e "$FAKE_ROUTING_REWRITE_STATE" ]]; then' \
+    '    /usr/bin/sed '''s#http://127.0.0.1:15721/v1#https://aidp.bytedance.net/api/modelhub/online#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
+    '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
+    '  fi' \
     '  if [[ -z "${FAKE_ROUTING_REWRITE_AK:-}" && -n "${FAKE_LIVE_CONFIG_PATH:-}" && -f "$FAKE_LIVE_CONFIG_PATH" ]]; then' \
     '    /usr/bin/sed '''s#https://aidp.bytedance.net/api/modelhub/online#http://127.0.0.1:15721/v1#g''' "$FAKE_LIVE_CONFIG_PATH" >"$FAKE_LIVE_CONFIG_PATH.next"' \
     '    /bin/mv "$FAKE_LIVE_CONFIG_PATH.next" "$FAKE_LIVE_CONFIG_PATH"' \
@@ -2288,6 +2344,7 @@ prepare_transaction_case() {
   export CC_SWITCH_INSTALLER_TEST_MODELHUB_AK='test-modelhub-ak-r6'
   unset CC_SWITCH_INSTALLER_TEST_INHERITED_MODELHUB_AK
   unset CC_SWITCH_INSTALLER_TEST_REUSE_MODELHUB_AK_CHOICE
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='y'
   export FAKE_KEYCHAIN_STATE="$case_dir/keychain-state"
   export FAKE_SECURITY_LOG="$case_dir/security.log"
   export FAKE_LAUNCHCTL_STATE_DIR="$case_dir/launchctl-state"
@@ -2406,9 +2463,9 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
     || fail 'privileged staging test left a candidate directory'
 }
 
-test_r15_release_contract_and_documentation() {
-  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260817-r15'"
-  assert_contains "$INSTALLER" '下载并校验 R15 安装器、CC Switch 和配置资源'
+test_r16_release_contract_and_documentation() {
+  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260819-r16'"
+  assert_contains "$INSTALLER" '下载并校验 R16 安装器、CC Switch 和配置资源'
   assert_contains "$MODELHUB_GUIDE" '/etc/codex/managed_config.toml'
   assert_contains "$MODELHUB_GUIDE" 'openai_base_url = "http://127.0.0.1:15721/v1"'
   assert_contains "$MODELHUB_GUIDE" 'model_auto_compact_token_limit = 500000'
@@ -2417,12 +2474,18 @@ test_r15_release_contract_and_documentation() {
   assert_contains "$MODELHUB_GUIDE" 'show-context-window-usage = true'
   assert_contains "$MODELHUB_GUIDE" 'preventSleepWhileRunning = true'
   assert_contains "$MODELHUB_GUIDE" '[plugins."computer-use@openai-bundled"]'
+  assert_contains "$MODELHUB_GUIDE" '[mcp_servers.computer-use]'
+  assert_contains "$MODELHUB_GUIDE" '[mcp_servers.node_repl]'
+  assert_contains "$MODELHUB_GUIDE" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
+  assert_contains "$MODELHUB_GUIDE" 'review_model = "gpt-5.5-2026-04-24"'
+  assert_contains "$MODELHUB_GUIDE" 'base_url = "http://127.0.0.1:15721/v1"'
+  assert_contains "$MODELHUB_GUIDE" '是否使用 R16 标准配置完整覆盖？[y/N]'
   assert_contains "$MODELHUB_GUIDE" 'Mac 登录用户的管理员密码'
   assert_contains "$MODELHUB_GUIDE" '不是 `MODELHUB_AK`'
   assert_contains "$MODELHUB_GUIDE" '1,050,000'
   assert_contains "$MODELHUB_GUIDE" '移动端新建全新会话'
   assert_contains "$MODELHUB_GUIDE" 'CC Switch 不可用'
-  assert_contains "$CHANGELOG_FILE" 'ModelHub R15 Catalog and Codex Setup'
+  assert_contains "$CHANGELOG_FILE" 'ModelHub R16 Codex Runtime Baseline'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -3125,6 +3188,25 @@ test_transaction_overwrites_golden_configuration_and_rolls_back() {
   assert_equals "$after_rollback" "$before"
 }
 
+test_transaction_default_merge_preserves_personalized_codex_config() {
+  local case_dir="$TEST_TMP/transaction-personalized-config-merge"
+  local config_path
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  config_path="$case_dir/home/.codex/config.toml"
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE=''
+
+  perform_install
+
+  assert_contains "$config_path" '[plugins."browser@openai-bundled"]'
+  assert_contains "$config_path" 'review_model = "gpt-5.5-2026-04-24"'
+  assert_contains "$config_path" 'approval_policy = "never"'
+  assert_contains "$config_path" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
+  assert_contains "$config_path" '[mcp_servers.computer-use]'
+  assert_contains "$config_path" '[mcp_servers.node_repl]'
+  assert_contains "$config_path" 'base_url = "http://127.0.0.1:15721/v1"'
+}
+
 test_golden_routing_verification_rejects_reversed_routes() {
   local case_dir="$TEST_TMP/golden-routing-verification"
   local live_config="$case_dir/config.toml"
@@ -3277,7 +3359,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260817-r15'"
+    "readonly RELEASE_TAG='modelhub-installer-20260819-r16'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.2-arm64.app.zip' \
@@ -3516,6 +3598,40 @@ test_package_rejects_unsafe_golden_snapshot_source() {
     || fail 'unsafe golden source left a publishable resource archive'
 }
 
+test_local_golden_snapshot_keeps_live_proxy_and_database_upstream() {
+  local case_dir="$TEST_TMP/local-golden-routing-split"
+  local source_home="$case_dir/home"
+  local source_config="$case_dir/config.toml"
+  local source_database="$case_dir/source.db"
+  local output_dir="$case_dir/output"
+  mkdir -p "$source_home"
+  /usr/bin/sed "s#__USER_HOME__#$source_home#g" \
+    "$GOLDEN_CODEX_CONFIG" >"$source_config"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$source_database" >/dev/null
+
+  /bin/bash "$LOCAL_GOLDEN_SNAPSHOT_BUILDER" \
+    --source-home "$source_home" \
+    --codex-config "$source_config" \
+    --settings "$GOLDEN_SETTINGS" \
+    --database "$source_database" \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_contains \
+    "$output_dir/codex-config.toml" \
+    'base_url = "http://127.0.0.1:15721/v1"'
+  assert_not_contains "$output_dir/codex-config.toml" 'experimental_bearer_token'
+  assert_sql "$output_dir/cc-switch.db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';" \
+    '1'
+  assert_sql "$output_dir/cc-switch.db" \
+    "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';" \
+    '0'
+}
+
 test_package_normalizes_custom_snapshot_retry_policy() {
   local case_dir="$TEST_TMP/package-custom-snapshot-retry"
   local source_dir="$case_dir/source"
@@ -3686,8 +3802,8 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   config_text="$(/bin/cat "$GOLDEN_CODEX_CONFIG")"
   [[ "$config_text" == *'__USER_HOME__/.codex/models-modelhub-1m.json'* ]] \
     || fail 'golden Codex config omits the portable home placeholder'
-  [[ "$config_text" == *'https://aidp.bytedance.net/api/modelhub/online'* ]] \
-    || fail 'golden Codex config omits the ModelHub upstream'
+  [[ "$config_text" == *'base_url = "http://127.0.0.1:15721/v1"'* ]] \
+    || fail 'golden Codex config omits the ModelHub local proxy route'
   [[ "$config_text" == *'request_max_retries = 2'* ]] \
     || fail 'golden Codex config request retry default is invalid'
   [[ "$config_text" == *'stream_max_retries = 3'* ]] \
@@ -3695,7 +3811,6 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   [[ "$config_text" != *'retry_429'* ]] \
     || fail 'golden Codex config contains unsupported retry_429'
   [[ "$config_text" != *'/Users/'* ]] || fail 'golden Codex config contains a user path'
-  [[ "$config_text" != *'127.0.0.1:15721'* ]] || fail 'golden Codex config contains a live proxy address'
   [[ "$config_text" != *'experimental_bearer_token'* ]] \
     || fail 'golden Codex config contains a bearer token field'
   jq -e \
@@ -3769,16 +3884,17 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 run_test "merge preserves unmanaged sections" test_merge_preserves_unmanaged_sections
-run_test "R15 defaults include Codex settings and GPT-5.5 window" test_r15_defaults_include_codex_settings_and_gpt55_window
+run_test "R16 defaults include Codex settings and GPT-5.5 window" test_r16_defaults_include_codex_settings_and_gpt55_window
 run_test "managed config merge preserves unrelated config" test_managed_config_merge_preserves_unrelated_config
 run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
 run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
+run_test "Codex config install choice defaults to merge and re-prompts" test_codex_config_install_choice_defaults_to_merge_and_reprompts
 run_test "managed config install writes forced routes" test_managed_config_install_writes_forced_routes
 run_test "managed config rollback restores existing file and mode" test_managed_config_rollback_restores_existing_file_and_mode
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
 run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
 run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
-run_test "R15 release contract and documentation" test_r15_release_contract_and_documentation
+run_test "R16 release contract and documentation" test_r16_release_contract_and_documentation
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -3817,12 +3933,12 @@ run_test "preflight accepts exact resource archive" test_preflight_accepts_exact
 run_test "model catalog validation rejects malformed stale and missing models" test_model_catalog_validation_rejects_malformed_stale_and_missing_models
 run_test "resource archive rejects invalid model catalog" test_resource_archive_rejects_invalid_model_catalog
 run_test "preflight rejects golden database without activity summary mode" test_preflight_rejects_golden_database_without_activity_summary_mode
-run_test "preflight rejects Golden Codex without R15 defaults" test_preflight_rejects_golden_codex_without_r15_defaults
+run_test "preflight rejects Golden Codex without R16 defaults" test_preflight_rejects_golden_codex_without_r16_defaults
 run_test "preflight rejects golden database without R12 resilience defaults" test_preflight_rejects_golden_database_without_r12_resilience_defaults
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R15 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R16 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -3868,12 +3984,13 @@ run_test "transaction removes new keychain after write-then-fail" test_transacti
 run_test "transaction restores custom CODEX_CLI_PATH after failure" test_transaction_restores_custom_codex_cli_path_after_failure
 run_test "security stub requires explicit password value" test_security_stub_requires_explicit_password_value
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
+run_test "transaction default merge preserves personalized Codex config" test_transaction_default_merge_preserves_personalized_codex_config
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R15 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R16 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
 run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
@@ -3883,6 +4000,7 @@ run_test "package rejects output inside source tree" test_package_rejects_output
 run_test "package rejects nonempty output directory" test_package_rejects_nonempty_output_directory
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
+run_test "local golden snapshot keeps live proxy and database upstream" test_local_golden_snapshot_keeps_live_proxy_and_database_upstream
 run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
 run_test "package rejects custom snapshot with unusable ModelHub metadata" test_package_rejects_custom_snapshot_with_unusable_modelhub_meta
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot

@@ -17,33 +17,54 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R15 基于 CC Switch 3.19.2，继承 R14 的移动端强制路由：系统 managed config 同时固定默认 ModelHub Provider 和内置 OpenAI base URL。桌面普通会话默认使用 ModelHub；移动端新建全新会话即使显式携带 `modelProvider = "openai"`，实际 Responses 请求仍会进入 CC Switch 本地代理。R15 还把打包的 `gpt-5.5` catalog 与模板同步为 `1,050,000` 上下文和 `100%` 有效窗口，并记录 Codex 的防休眠、上下文使用量显示和 Computer Use 插件状态。R13 的 Skill 选择映射与凭据复用、R12 的 encrypted reasoning 明文保留和 Provider 共享 429 冷却继续保持不变。一键安装入口保持不变：
+R16 基于 CC Switch 3.19.2，继承 R15 的 `1,050,000` GPT-5.5 模型窗口和 R14 的移动端强制路由。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库 Provider 快照仍保存真实 ModelHub 上游，避免代理回环；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`，并合并维护 `/etc/codex/managed_config.toml`。R15 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex 偏好，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`，并合并维护 `/etc/codex/managed_config.toml`。R16 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
 
-Golden Codex 配置固定以下安装后状态；Computer Use 由 ChatGPT 内置插件自己的 MCP 清单注册，安装器不会重复写入 `[mcp_servers.computer-use]`：
+检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R16 管理的模型、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；输入 `Y` 才会完整覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
+
+Golden Codex 配置固定以下安装后状态：
 
 ```toml
+review_model = "gpt-5.5-2026-04-24"
+
 [desktop]
 git-branch-prefix = "feat/"
 show-context-window-usage = true
 preventSleepWhileRunning = true
+enabled-reasoning-efforts = ["high", "xhigh", "max"]
 
 [plugins."computer-use@openai-bundled"]
 enabled = true
+
+[mcp_servers.computer-use]
+args = ["mcp"]
+command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+cwd = "."
+enabled = true
+
+[mcp_servers.node_repl]
+command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+
+[mcp_servers.node_repl.env]
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+
+[model_providers.modelhub]
+base_url = "http://127.0.0.1:15721/v1"
 ```
 
 Codex 已经运行时可能不会热更新这些设置或新的 catalog。安装完成后若界面状态未刷新，请重启 Codex 并新建任务。
 
-如果安装器进程已继承非空 `MODELHUB_AK`，R15 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
+如果安装器进程已继承非空 `MODELHUB_AK`，R16 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
 
 写入 `/Applications` 和 `/etc/codex` 等系统位置前，安装器会说明接下来需要输入当前 Mac 登录用户的管理员密码，而不是 `MODELHUB_AK`。密码输入时终端不会显示字符，输入完成后按回车；这和后续单独输入或复用的 ModelHub AK 是两类不同凭据。
 
-R15 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
+R16 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
 
 ```toml
 model_provider = "modelhub"
@@ -70,7 +91,7 @@ ChatGPT bootstrap 独立于 CC Switch 配置事务。无论后续安装失败还
 
 ```toml
 model = "gpt-5.6-sol"
-review_model = "gpt-5.6-sol"
+review_model = "gpt-5.5-2026-04-24"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
 model_reasoning_effort = "high"
@@ -80,12 +101,13 @@ model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
 
 [desktop]
 git-branch-prefix = "feat/"
+enabled-reasoning-efforts = ["high", "xhigh", "max"]
 
 [model_providers.modelhub]
 name = "modelhub"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "https://aidp.bytedance.net/api/modelhub/online"
+base_url = "http://127.0.0.1:15721/v1"
 env_key = "MODELHUB_AK"
 stream_idle_timeout_ms = 600_000
 request_max_retries = 2

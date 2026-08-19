@@ -45,6 +45,7 @@ main() {
   local output=''
   local work_dir
   local staged_db
+  local provider_config_for_db
   local output_parent
   local output_name
   local output_temp=''
@@ -94,12 +95,12 @@ main() {
   /usr/bin/jq empty "$provider_meta" || { die 'golden provider metadata is invalid'; return 1; }
 
   if ! /usr/bin/grep -Fq -- '__USER_HOME__/.codex/models-modelhub-1m.json' "$provider_config" \
-    || ! /usr/bin/grep -Fq -- 'https://aidp.bytedance.net/api/modelhub/online' "$provider_config"; then
+    || [[ "$(/usr/bin/grep -Fxc -- 'base_url = "http://127.0.0.1:15721/v1"' "$provider_config")" != '1' ]]; then
     die 'golden provider config is missing required portable ModelHub fields'
     return 1
   fi
   if LC_ALL=C /usr/bin/grep -E -i -q \
-    '/Users/|127[.]0[.]0[.]1:15721|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token' \
+    '/Users/|localhost:15721|experimental_bearer_token|OPENAI_API_KEY|access_token|refresh_token|id_token' \
     "$provider_config"; then
     die 'golden provider config contains a forbidden path, route, or credential field'
     return 1
@@ -121,10 +122,24 @@ main() {
 
   work_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cc-switch-golden-db.XXXXXX")"
   staged_db="$work_dir/cc-switch.db"
+  provider_config_for_db="$work_dir/provider-config.toml"
   trap '/bin/rm -rf -- "$work_dir"; if [[ -n "$output_temp" ]]; then /bin/rm -f -- "$output_temp"; fi' EXIT INT TERM
 
+  if ! /usr/bin/awk '
+    $0 == "base_url = \"http://127.0.0.1:15721/v1\"" {
+      print "base_url = \"https://aidp.bytedance.net/api/modelhub/online\""
+      replacements += 1
+      next
+    }
+    { print }
+    END { if (replacements != 1) exit 1 }
+  ' "$provider_config" >"$provider_config_for_db"; then
+    die 'failed to normalize the golden provider upstream'
+    return 1
+  fi
+
   /usr/bin/sqlite3 "$staged_db" <"$schema"
-  config_sql="$(sql_quote "$provider_config")"
+  config_sql="$(sql_quote "$provider_config_for_db")"
   meta_sql="$(sql_quote "$provider_meta")"
 
   /usr/bin/sqlite3 "$staged_db" <<SQL

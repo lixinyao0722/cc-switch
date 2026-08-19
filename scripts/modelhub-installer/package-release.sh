@@ -166,7 +166,7 @@ render_installer_with_helper_hash() {
 
 normalize_modelhub_codex_retry_policy() {
   local file="$1"
-  local output="$file.r15-retry"
+  local output="$file.r16-retry"
 
   if ! awk '
     function finish_modelhub() {
