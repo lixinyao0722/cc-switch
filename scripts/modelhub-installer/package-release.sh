@@ -164,57 +164,9 @@ render_installer_with_helper_hash() {
   fi
 }
 
-normalize_modelhub_codex_retry_policy() {
-  local file="$1"
-  local output="$file.r16-retry"
-
-  if ! awk '
-    function finish_modelhub() {
-      if (!in_modelhub) return
-      if (!saw_request) print "request_max_retries = 2"
-      if (!saw_stream) print "stream_max_retries = 3"
-    }
-    /^\[[^]]+\][[:space:]]*$/ {
-      finish_modelhub()
-      in_modelhub = ($0 == "[model_providers.modelhub]")
-      if (in_modelhub) {
-        found_modelhub = 1
-        saw_request = 0
-        saw_stream = 0
-      }
-      print
-      next
-    }
-    {
-      if (in_modelhub && $0 ~ /^[[:space:]]*request_max_retries[[:space:]]*=/) {
-        if (!saw_request) print "request_max_retries = 2"
-        saw_request = 1
-        next
-      }
-      if (in_modelhub && $0 ~ /^[[:space:]]*stream_max_retries[[:space:]]*=/) {
-        if (!saw_stream) print "stream_max_retries = 3"
-        saw_stream = 1
-        next
-      }
-      if (in_modelhub && $0 ~ /^[[:space:]]*retry_429[[:space:]]*=/) next
-      print
-    }
-    END {
-      finish_modelhub()
-      if (!found_modelhub) exit 1
-    }
-  ' "$file" >"$output"; then
-    rm -f "$output"
-    die 'failed to normalize ModelHub Codex retry policy'
-    return 1
-  fi
-  mv "$output" "$file"
-}
-
 copy_allowlisted_resources() {
   local source_dir="$1"
   local package_root="$2/modelhub-installer"
-  local snapshot_dir="${CC_SWITCH_GOLDEN_SNAPSHOT_DIR:-}"
 
   mkdir -p \
     "$package_root/assets" \
@@ -222,108 +174,13 @@ copy_allowlisted_resources() {
     "$package_root/helpers" \
     "$package_root/templates"
   cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
-  if [[ -n "$snapshot_dir" ]]; then
-    case "$snapshot_dir" in
-      /*) ;;
-      *) snapshot_dir="$(pwd -P)/$snapshot_dir" ;;
-    esac
-    if [[ ! -d "$snapshot_dir" || -L "$snapshot_dir" ]]; then
-      die "portable golden snapshot directory is missing or unsafe: $snapshot_dir"
-      return 1
-    fi
-    cp "$snapshot_dir/codex-config.toml" "$package_root/golden/codex-config.toml"
-    normalize_modelhub_codex_retry_policy "$package_root/golden/codex-config.toml"
-    cp "$snapshot_dir/settings.json" "$package_root/golden/settings.json"
-    cp "$snapshot_dir/cc-switch.db" "$package_root/golden/cc-switch.db"
-    local retry_max
-    local retry_base_delay_ms
-    local retry_max_delay_ms
-    local retry_honor_after
-    local activity_summary_mode
-    local codex_metadata_model
-    local remember_invalid_encrypted_reasoning
-    retry_max="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxRetries' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    case "$retry_max" in
-      ''|null|*[!0-9]*) die 'ModelHub retry429 default is invalid'; return 1 ;;
-    esac
-    retry_base_delay_ms="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.baseDelayMs' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    case "$retry_base_delay_ms" in
-      ''|null|*[!0-9]*) die 'ModelHub retry429 base delay default is invalid'; return 1 ;;
-    esac
-    retry_max_delay_ms="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.maxDelayMs' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    case "$retry_max_delay_ms" in
-      ''|null|*[!0-9]*) die 'ModelHub retry429 max delay default is invalid'; return 1 ;;
-    esac
-    retry_honor_after="$(/usr/bin/jq -r '.localProxyRequestOverrides.retry429.honorRetryAfter' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    if [[ "$retry_honor_after" != 'true' ]]; then
-      die 'ModelHub retry429 Retry-After default must be true'
-      return 1
-    fi
-    activity_summary_mode="$(/usr/bin/jq -r \
-      '.localProxyRequestOverrides.codexActivitySummaryMode' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    if [[ "$activity_summary_mode" != 'map' ]]; then
-      die 'ModelHub activity summary mode default must be map'
-      return 1
-    fi
-    codex_metadata_model="$(/usr/bin/jq -r \
-      '.localProxyRequestOverrides.codexMetadataModel' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    if [[ "$codex_metadata_model" != 'gpt-5.6-sol' ]]; then
-      die 'ModelHub Codex metadata model default must be gpt-5.6-sol'
-      return 1
-    fi
-    remember_invalid_encrypted_reasoning="$(/usr/bin/jq -r \
-      '.localProxyRequestOverrides.rememberInvalidEncryptedReasoning' \
-      "$source_dir/templates/modelhub-provider-meta.json")"
-    if [[ "$remember_invalid_encrypted_reasoning" != 'true' ]]; then
-      die 'ModelHub encrypted reasoning memory default must be true'
-      return 1
-    fi
-    /usr/bin/sqlite3 "$package_root/golden/cc-switch.db" \
-      "UPDATE providers
-          SET meta=json_set(
-            json_remove(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries'),
-            '$.localProxyRequestOverrides.retry429.maxRetries', $retry_max,
-            '$.localProxyRequestOverrides.retry429.baseDelayMs', $retry_base_delay_ms,
-            '$.localProxyRequestOverrides.retry429.maxDelayMs', $retry_max_delay_ms,
-            '$.localProxyRequestOverrides.retry429.honorRetryAfter', json('true'),
-            '$.localProxyRequestOverrides.codexActivitySummaryMode', '$activity_summary_mode',
-            '$.localProxyRequestOverrides.codexMetadataModel', '$codex_metadata_model',
-            '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning', json('true')
-          )
-        WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
-    if [[ "$(/usr/bin/sqlite3 -readonly "$package_root/golden/cc-switch.db" \
-      "SELECT count(*) FROM providers
-        WHERE id='bytedance-modelhub-official-cli'
-          AND app_type='codex'
-          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=$retry_max
-          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=$retry_base_delay_ms
-          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=$retry_max_delay_ms
-          AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1
-          AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL
-          AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text'
-          AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='$activity_summary_mode'
-          AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text'
-          AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='$codex_metadata_model'
-          AND json_type(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')='true'
-          AND json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning')=1;")" != '1' ]]; then
-      die 'failed to normalize ModelHub release metadata'
-      return 1
-    fi
-  else
-    cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
-    cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
-    /bin/bash "$source_dir/build-golden-db.sh" \
-      --schema "$source_dir/golden/cc-switch-schema.sql" \
-      --provider-config "$source_dir/golden/codex-config.toml" \
-      --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
-      --output "$package_root/golden/cc-switch.db"
-  fi
+  cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
+  cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
+  /bin/bash "$source_dir/build-golden-db.sh" \
+    --schema "$source_dir/golden/cc-switch-schema.sql" \
+    --provider-config "$source_dir/golden/codex-config.toml" \
+    --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
+    --output "$package_root/golden/cc-switch.db"
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
   cp "$source_dir/templates/codex-managed-config.toml" "$package_root/templates/codex-managed-config.toml"
@@ -392,6 +249,10 @@ main() {
 
   if [[ -z "$app_zip" || -z "$output_dir" ]]; then
     die 'both --app-zip and --output-dir are required'
+    return 1
+  fi
+  if [[ -n "${CC_SWITCH_GOLDEN_SNAPSHOT_DIR:-}" ]]; then
+    die 'CC_SWITCH_GOLDEN_SNAPSHOT_DIR is not supported for public release packaging'
     return 1
   fi
   if [[ ! -f "$app_zip" || -L "$app_zip" ]]; then

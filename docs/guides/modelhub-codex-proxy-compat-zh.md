@@ -23,9 +23,9 @@ R16 基于 CC Switch 3.19.2，继承 R15 的 `1,050,000` GPT-5.5 模型窗口和
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、覆盖、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份并整体覆盖 `~/.codex/config.toml`、`~/.cc-switch/cc-switch.db` 和 `settings.json`，并合并维护 `/etc/codex/managed_config.toml`。R16 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R16 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R16 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R16 管理的模型、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；输入 `Y` 才会完整覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R16 管理的模型、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
 
 Golden Codex 配置固定以下安装后状态：
 

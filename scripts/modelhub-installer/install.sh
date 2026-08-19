@@ -1015,7 +1015,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R15 context-window contract'
+    die 'ModelHub model catalog does not match the R16 context-window contract'
     return 1
   fi
 }
@@ -2057,6 +2057,46 @@ validate_merged_codex_config() {
   validate_codex_config_with_parser "$file"
 }
 
+codex_config_requires_explicit_overwrite() {
+  local file="$1"
+  local status
+
+  if [[ ! -f "$file" ]]; then
+    return 1
+  fi
+  if [[ ! -r "$file" ]]; then
+    die "existing Codex config is not readable: $file"
+    return 2
+  fi
+  if awk '
+    /^[[:space:]]*#/ { next }
+    /"""/ || /\047\047\047/ { found = 1; exit }
+    {
+      equals = index($0, "=")
+      if (equals == 0) next
+      key = substr($0, 1, equals - 1)
+      value = substr($0, equals + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      sub(/^[[:space:]]+/, "", value)
+      if (key ~ /^"/ || key ~ /^\047/ || key ~ /\./ \
+          || (value ~ /^\[/ && value !~ /\][[:space:]]*(#.*)?$/)) {
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "$status" -eq 1 ]]; then
+    return 1
+  fi
+  die "failed to inspect existing Codex config syntax: $file"
+  return 2
+}
+
 merge_codex_config() {
   local source_file="$1"
   local template_file="$2"
@@ -2077,6 +2117,7 @@ merge_codex_config() {
   local in_desktop=0
   local saw_desktop=0
   local skip_managed_section=0
+  local syntax_status
 
   if [[ ! -f "$template_file" ]]; then
     die "ModelHub template does not exist: $template_file"
@@ -2094,6 +2135,16 @@ merge_codex_config() {
   effective_source="$source_file"
   if [[ ! -f "$effective_source" ]]; then
     effective_source=/dev/null
+  elif codex_config_requires_explicit_overwrite "$effective_source"; then
+    /bin/rm -rf "$work_dir" || true
+    die 'existing Codex config uses complex TOML syntax; select full overwrite explicitly'
+    return 1
+  else
+    syntax_status=$?
+    if [[ "$syntax_status" -ne 1 ]]; then
+      /bin/rm -rf "$work_dir" || true
+      return 1
+    fi
   fi
 
   render_template "$template_file" "$rendered_template" '__USER_HOME__' "$escaped_home" || {
@@ -2808,10 +2859,20 @@ choose_codex_config_install_mode() {
   local target_file="$1"
   local overwrite_choice=''
   local test_choices=''
+  local requires_explicit_overwrite=0
+  local syntax_status
 
   if [[ ! -e "$target_file" && ! -L "$target_file" ]]; then
     printf '%s' 'overwrite'
     return 0
+  fi
+  if codex_config_requires_explicit_overwrite "$target_file"; then
+    requires_explicit_overwrite=1
+  else
+    syntax_status=$?
+    if [[ "$syntax_status" -ne 1 ]]; then
+      return 1
+    fi
   fi
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     test_choices="${CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE:-}"
@@ -2827,7 +2888,11 @@ choose_codex_config_install_mode() {
         test_choices=''
       fi
     else
-      printf '%s' '检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+      if [[ "$requires_explicit_overwrite" == "1" ]]; then
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+      else
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+      fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
         return 1
@@ -2835,6 +2900,10 @@ choose_codex_config_install_mode() {
     fi
     case "$overwrite_choice" in
       ''|N|n)
+        if [[ "$requires_explicit_overwrite" == "1" ]]; then
+          die 'existing Codex config uses complex TOML syntax; select full overwrite explicitly'
+          return 1
+        fi
         printf '%s' 'merge'
         return 0
         ;;

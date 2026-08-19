@@ -415,6 +415,53 @@ test_codex_config_install_choice_defaults_to_merge_and_reprompts() {
   assert_equals "$(choose_codex_config_install_mode "$missing_config")" 'overwrite'
 }
 
+test_complex_toml_requires_explicit_codex_config_overwrite() {
+  local case_dir="$TEST_TMP/complex-toml-overwrite"
+  local error_file="$case_dir/error.log"
+  local input_file
+  local name
+  mkdir -p "$case_dir"
+
+  printf '%s\n' \
+    '"model" = "personalized"' \
+    >"$case_dir/quoted-key.toml"
+  printf '%s\n' \
+    'model_providers.modelhub.base_url = "https://personalized.invalid"' \
+    >"$case_dir/dotted-key.toml"
+  printf '%s\n' \
+    'developer_instructions = """' \
+    '[model_providers.modelhub]' \
+    'keep this personalized text' \
+    '"""' \
+    >"$case_dir/multiline-value.toml"
+  printf '%s\n' \
+    '[desktop]' \
+    'enabled-reasoning-efforts = [' \
+    '  "high",' \
+    '  "xhigh",' \
+    ']' \
+    >"$case_dir/multiline-array.toml"
+
+  for name in quoted-key dotted-key multiline-value multiline-array; do
+    input_file="$case_dir/$name.toml"
+    if merge_codex_config \
+      "$input_file" \
+      "$TEMPLATE" \
+      "$case_dir/$name-output.toml" \
+      '/Users/Test User' \
+      2>"$error_file"; then
+      fail "$name config merged without an explicit overwrite choice"
+    fi
+    assert_contains "$error_file" 'select full overwrite explicitly'
+
+    export CC_SWITCH_INSTALLER_TEST_MODE=1
+    export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='n'
+    assert_command_fails choose_codex_config_install_mode "$input_file"
+    export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='y'
+    assert_equals "$(choose_codex_config_install_mode "$input_file")" 'overwrite'
+  done
+}
+
 test_merge_creates_config_from_empty_file() {
   local case_dir="$TEST_TMP/merge-empty"
   mkdir -p "$case_dir"
@@ -3207,6 +3254,39 @@ test_transaction_default_merge_preserves_personalized_codex_config() {
   assert_contains "$config_path" 'base_url = "http://127.0.0.1:15721/v1"'
 }
 
+test_transaction_complex_toml_stops_before_write_without_overwrite() {
+  local case_dir="$TEST_TMP/transaction-complex-toml-no-overwrite"
+  local config_path
+  local before
+  local after
+  local output
+  local status
+  mkdir -p "$case_dir"
+  prepare_transaction_case "$case_dir"
+  config_path="$case_dir/home/.codex/config.toml"
+  printf '%s\n' \
+    'approval_policy = "on-request"' \
+    '[desktop]' \
+    'enabled-reasoning-efforts = [' \
+    '  "high",' \
+    '  "xhigh",' \
+    ']' \
+    >"$config_path"
+  before="$(managed_state_digest "$case_dir")"
+  export CC_SWITCH_INSTALLER_TEST_OVERWRITE_CODEX_CONFIG_CHOICE='n'
+
+  set +e
+  output="$(perform_install 2>&1)"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail 'complex TOML installation proceeded without explicit overwrite'
+  [[ "$output" == *'select full overwrite explicitly'* ]] \
+    || fail "complex TOML installation reported the wrong error: $output"
+  after="$(managed_state_digest "$case_dir")"
+  assert_equals "$after" "$before"
+}
+
 test_golden_routing_verification_rejects_reversed_routes() {
   local case_dir="$TEST_TMP/golden-routing-verification"
   local live_config="$case_dir/config.toml"
@@ -3598,6 +3678,28 @@ test_package_rejects_unsafe_golden_snapshot_source() {
     || fail 'unsafe golden source left a publishable resource archive'
 }
 
+test_package_rejects_custom_golden_snapshot_input() {
+  local case_dir="$TEST_TMP/package-custom-golden-rejected"
+  local source_dir="$case_dir/source"
+  local snapshot_dir="$case_dir/snapshot"
+  local output_dir="$case_dir/output"
+  mkdir -p "$case_dir" "$snapshot_dir"
+  create_packager_source "$source_dir"
+  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
+  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
+  /bin/bash "$GOLDEN_DB_BUILDER" \
+    --schema "$GOLDEN_DB_SCHEMA" \
+    --provider-config "$GOLDEN_CODEX_CONFIG" \
+    --provider-meta "$META_TEMPLATE" \
+    --output "$snapshot_dir/cc-switch.db" >/dev/null
+  printf 'verified-app-zip\n' >"$case_dir/app.zip"
+
+  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
+    assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
+  [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
+    || fail 'custom local snapshot still produced a publishable resource archive'
+}
+
 test_local_golden_snapshot_keeps_live_proxy_and_database_upstream() {
   local case_dir="$TEST_TMP/local-golden-routing-split"
   local source_home="$case_dir/home"
@@ -3630,109 +3732,6 @@ test_local_golden_snapshot_keeps_live_proxy_and_database_upstream() {
   assert_sql "$output_dir/cc-switch.db" \
     "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';" \
     '0'
-}
-
-test_package_normalizes_custom_snapshot_retry_policy() {
-  local case_dir="$TEST_TMP/package-custom-snapshot-retry"
-  local source_dir="$case_dir/source"
-  local snapshot_dir="$case_dir/snapshot"
-  local output_dir="$case_dir/output"
-  local extracted_dir="$case_dir/extracted"
-  mkdir -p "$case_dir"
-  create_packager_source "$source_dir"
-  mkdir -p "$snapshot_dir"
-  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
-  /usr/bin/perl -0pi -e \
-    's/request_max_retries = 2/request_max_retries = 10/; s/stream_max_retries = 3/stream_max_retries = 10\nretry_429 = true/' \
-    "$snapshot_dir/codex-config.toml"
-  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
-  /bin/bash "$GOLDEN_DB_BUILDER" \
-    --schema "$GOLDEN_DB_SCHEMA" \
-    --provider-config "$GOLDEN_CODEX_CONFIG" \
-    --provider-meta "$META_TEMPLATE" \
-    --output "$snapshot_dir/cc-switch.db" >/dev/null
-  sqlite3 "$snapshot_dir/cc-switch.db" \
-    "UPDATE providers
-        SET meta=json_set(
-          json_remove(
-            json_set(meta, '$.localProxyRequestOverrides.retry429.maxRetries', 10),
-            '$.localProxyRequestOverrides.codexActivitySummaryMode',
-            '$.localProxyRequestOverrides.codexMetadataModel',
-            '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning'
-          ),
-          '$.localProxyRequestOverrides.blockCodexActivitySummaries', json('true')
-        );"
-  printf 'verified-app-zip\n' >"$case_dir/app.zip"
-
-  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
-    run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
-  mkdir -p "$extracted_dir"
-  tar -xzf "$output_dir/modelhub-installer-resources.tar.gz" -C "$extracted_dir"
-
-  assert_sql "$snapshot_dir/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '10'
-  assert_sql "$snapshot_dir/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
-    '0'
-  assert_sql "$snapshot_dir/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') IS NULL FROM providers" \
-    '1'
-  assert_sql "$snapshot_dir/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') IS NULL FROM providers" \
-    '1'
-  assert_sql "$snapshot_dir/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning') IS NULL FROM providers" \
-    '1'
-  assert_contains "$snapshot_dir/codex-config.toml" 'request_max_retries = 10'
-  assert_contains "$snapshot_dir/codex-config.toml" 'stream_max_retries = 10'
-  assert_contains "$snapshot_dir/codex-config.toml" 'retry_429 = true'
-  assert_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'request_max_retries = 2'
-  assert_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'stream_max_retries = 3'
-  assert_not_contains "$extracted_dir/modelhub-installer/golden/codex-config.toml" 'retry_429'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries') FROM providers" \
-    '2'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs') FROM providers" \
-    '2000'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL FROM providers" \
-    '1'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode') FROM providers" \
-    'map'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel') FROM providers" \
-    'gpt-5.6-sol'
-  assert_sql "$extracted_dir/modelhub-installer/golden/cc-switch.db" \
-    "SELECT json_extract(meta, '$.localProxyRequestOverrides.rememberInvalidEncryptedReasoning') FROM providers" \
-    '1'
-}
-
-test_package_rejects_custom_snapshot_with_unusable_modelhub_meta() {
-  local case_dir="$TEST_TMP/package-custom-snapshot-invalid-meta"
-  local source_dir="$case_dir/source"
-  local snapshot_dir="$case_dir/snapshot"
-  local output_dir="$case_dir/output"
-  mkdir -p "$case_dir" "$snapshot_dir"
-  create_packager_source "$source_dir"
-  cp "$GOLDEN_CODEX_CONFIG" "$snapshot_dir/codex-config.toml"
-  cp "$GOLDEN_SETTINGS" "$snapshot_dir/settings.json"
-  /bin/bash "$GOLDEN_DB_BUILDER" \
-    --schema "$GOLDEN_DB_SCHEMA" \
-    --provider-config "$GOLDEN_CODEX_CONFIG" \
-    --provider-meta "$META_TEMPLATE" \
-    --output "$snapshot_dir/cc-switch.db" >/dev/null
-  sqlite3 "$snapshot_dir/cc-switch.db" \
-    "UPDATE providers SET meta='null'
-      WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';"
-  printf 'verified-app-zip\n' >"$case_dir/app.zip"
-
-  CC_SWITCH_GOLDEN_SNAPSHOT_DIR="$snapshot_dir" \
-    assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
-  [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
-    || fail 'invalid ModelHub metadata still produced a resource archive'
 }
 
 test_golden_db_builder_creates_minimal_public_snapshot() {
@@ -3889,6 +3888,7 @@ run_test "managed config merge preserves unrelated config" test_managed_config_m
 run_test "managed config merge creates missing and normalizes duplicates" test_managed_config_merge_creates_missing_and_normalizes_duplicates
 run_test "managed config merge rejects built-in openai provider and invalid TOML" test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml
 run_test "Codex config install choice defaults to merge and re-prompts" test_codex_config_install_choice_defaults_to_merge_and_reprompts
+run_test "complex TOML requires explicit Codex config overwrite" test_complex_toml_requires_explicit_codex_config_overwrite
 run_test "managed config install writes forced routes" test_managed_config_install_writes_forced_routes
 run_test "managed config rollback restores existing file and mode" test_managed_config_rollback_restores_existing_file_and_mode
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
@@ -3985,6 +3985,7 @@ run_test "transaction restores custom CODEX_CLI_PATH after failure" test_transac
 run_test "security stub requires explicit password value" test_security_stub_requires_explicit_password_value
 run_test "transaction overwrites golden configuration" test_transaction_overwrites_golden_configuration_and_rolls_back
 run_test "transaction default merge preserves personalized Codex config" test_transaction_default_merge_preserves_personalized_codex_config
+run_test "transaction complex TOML stops before write without overwrite" test_transaction_complex_toml_stops_before_write_without_overwrite
 run_test "golden routing verification rejects reversed routes" test_golden_routing_verification_rejects_reversed_routes
 run_test "transaction rollback latest restores and removes files" test_transaction_rollback_latest_restores_and_removes_files
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
@@ -4000,9 +4001,8 @@ run_test "package rejects output inside source tree" test_package_rejects_output
 run_test "package rejects nonempty output directory" test_package_rejects_nonempty_output_directory
 run_test "package rejects source symlinks" test_package_rejects_source_symlinks
 run_test "package rejects unsafe golden snapshot" test_package_rejects_unsafe_golden_snapshot_source
+run_test "package rejects custom golden snapshot input" test_package_rejects_custom_golden_snapshot_input
 run_test "local golden snapshot keeps live proxy and database upstream" test_local_golden_snapshot_keeps_live_proxy_and_database_upstream
-run_test "package normalizes custom snapshot retry policy" test_package_normalizes_custom_snapshot_retry_policy
-run_test "package rejects custom snapshot with unusable ModelHub metadata" test_package_rejects_custom_snapshot_with_unusable_modelhub_meta
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
 
