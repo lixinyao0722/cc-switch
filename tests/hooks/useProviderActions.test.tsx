@@ -55,6 +55,7 @@ vi.mock("@/lib/query", () => ({
 
 const providersApiUpdateMock = vi.fn();
 const providersApiUpdateTrayMenuMock = vi.fn();
+const providersApiRestartCodexMock = vi.fn();
 const settingsApiGetMock = vi.fn();
 const settingsApiApplyMock = vi.fn();
 const openclawApiGetModelCatalogMock = vi.fn();
@@ -66,6 +67,8 @@ vi.mock("@/lib/api", () => ({
     update: (...args: unknown[]) => providersApiUpdateMock(...args),
     updateTrayMenu: (...args: unknown[]) =>
       providersApiUpdateTrayMenuMock(...args),
+    restartCodexDesktop: (...args: unknown[]) =>
+      providersApiRestartCodexMock(...args),
   },
   settingsApi: {
     get: (...args: unknown[]) => settingsApiGetMock(...args),
@@ -113,6 +116,7 @@ beforeEach(() => {
   switchProviderMutateAsync.mockReset();
   providersApiUpdateMock.mockReset();
   providersApiUpdateTrayMenuMock.mockReset();
+  providersApiRestartCodexMock.mockReset();
   settingsApiGetMock.mockReset();
   settingsApiApplyMock.mockReset();
   openclawApiGetModelCatalogMock.mockReset();
@@ -135,6 +139,35 @@ beforeEach(() => {
 });
 
 describe("useProviderActions", () => {
+  it("offers an immediate Codex restart after a managed route switch", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({
+      warnings: [],
+      codexRestartRequired: true,
+    });
+    providersApiRestartCodexMock.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      id: "bytedance-modelhub-official-cli",
+      category: "third_party",
+    });
+    const { result } = renderHook(() => useProviderActions("codex", true, true), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    const options = toastSuccessMock.mock.calls[0]?.[1] as {
+      action?: { onClick?: () => void };
+    };
+    await act(async () => {
+      options.action?.onClick?.();
+    });
+    expect(providersApiRestartCodexMock).toHaveBeenCalledTimes(1);
+    expect(toastWarningMock).not.toHaveBeenCalled();
+  });
+
   it("should trigger mutation when calling addProvider", async () => {
     addProviderMutateAsync.mockResolvedValueOnce(undefined);
     const { wrapper } = createWrapper();

@@ -194,7 +194,14 @@ export function useProviderActions(
 
       // Determine why this provider requires the proxy.
       let proxyRequiredReason: string | null = null;
-      if (!routingReady && providerNeedsRouting(activeApp, provider)) {
+      const managedModelHubSwitch =
+        activeApp === "codex" &&
+        provider.id === "bytedance-modelhub-official-cli";
+      if (
+        !routingReady &&
+        !managedModelHubSwitch &&
+        providerNeedsRouting(activeApp, provider)
+      ) {
         if (isCopilotProvider) {
           proxyRequiredReason = t("notifications.proxyReasonCopilot", {
             defaultValue: "使用 GitHub Copilot 作为 Claude 供应商",
@@ -306,8 +313,12 @@ export function useProviderActions(
           let messageKey = "notifications.switchSuccess";
           let defaultMessage = "切换成功！";
           if (activeApp === "codex") {
-            messageKey = "notifications.codexRestartRequired";
-            defaultMessage = "切换成功，请重启客户端以生效";
+            messageKey = result?.codexRestartRequired
+              ? "notifications.codexManagedRouteRestartRequired"
+              : "notifications.codexRestartRequired";
+            defaultMessage = result?.codexRestartRequired
+              ? "系统路由已切换。请重启 Codex 并新建任务后使用"
+              : "切换成功，请重启客户端以生效";
           } else if (activeApp === "grokbuild") {
             messageKey = "notifications.grokBuildRestartRequired";
             defaultMessage = "切换成功，请重启 Grok Build 以生效";
@@ -326,6 +337,24 @@ export function useProviderActions(
           }
           toast.success(t(messageKey, { defaultValue: defaultMessage }), {
             closeButton: true,
+            duration: result?.codexRestartRequired ? 12000 : undefined,
+            action: result?.codexRestartRequired
+              ? {
+                  label: t("notifications.restartCodexNow", {
+                    defaultValue: "立即重启",
+                  }),
+                  onClick: () => {
+                    providersApi.restartCodexDesktop().catch((error) => {
+                      toast.error(
+                        t("notifications.restartCodexFailed", {
+                          defaultValue: "Codex 重启失败：{{error}}",
+                          error: extractErrorMessage(error),
+                        }),
+                      );
+                    });
+                  },
+                }
+              : undefined,
           });
         }
       } catch {

@@ -12,6 +12,8 @@ export interface LocalProxyPolicyOptions {
   codexActivitySummaryMode?: CodexActivitySummaryMode;
   codexMetadataModel?: string;
   rememberInvalidEncryptedReasoning?: boolean;
+  contextOptimization?: LocalProxyRequestOverrides["contextOptimization"];
+  admissionControl?: LocalProxyRequestOverrides["admissionControl"];
 }
 
 export interface RequestOverrideJsonResult {
@@ -224,6 +226,12 @@ export function buildLocalProxyRequestOverrides(
       if (options.rememberInvalidEncryptedReasoning !== undefined) {
         overrides.rememberInvalidEncryptedReasoning =
           options.rememberInvalidEncryptedReasoning;
+      }
+      if (options.contextOptimization) {
+        overrides.contextOptimization = { ...options.contextOptimization };
+      }
+      if (options.admissionControl) {
+        overrides.admissionControl = { ...options.admissionControl };
       }
     }
   }

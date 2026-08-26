@@ -178,6 +178,15 @@ export interface LocalProxyRequestOverrides {
   body?: Record<string, unknown>;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
+  contextOptimization?: {
+    enabled: boolean;
+    checkpointTtlSeconds: number;
+  };
+  admissionControl?: {
+    enabled: boolean;
+    largeRequestTokens: number;
+    concurrency: number;
+  };
   codexActivitySummaryMode?: CodexActivitySummaryMode;
   blockCodexActivitySummaries?: boolean;
   codexMetadataModel?: string;

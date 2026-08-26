@@ -108,11 +108,68 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 /// Provider business logic service
 pub struct ProviderService;
 
+#[cfg(test)]
+static FAIL_NEXT_CODEX_SWITCH_LIVE_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_CODEX_SWITCH_DB_COMMIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone)]
+struct CodexLiveSnapshot {
+    auth: Option<Vec<u8>>,
+    config: Option<Vec<u8>>,
+}
+
+impl CodexLiveSnapshot {
+    fn capture() -> Result<Self, AppError> {
+        fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, AppError> {
+            match std::fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(AppError::io(path, error)),
+            }
+        }
+        Ok(Self {
+            auth: read_optional(&crate::codex_config::get_codex_auth_path())?,
+            config: read_optional(&crate::codex_config::get_codex_config_path())?,
+        })
+    }
+
+    fn restore(&self) -> Result<(), AppError> {
+        fn restore_one(path: &std::path::Path, contents: Option<&[u8]>) -> Result<(), AppError> {
+            match contents {
+                Some(contents) => crate::config::atomic_write(path, contents),
+                None => match crate::config::delete_file(path) {
+                    Ok(()) => Ok(()),
+                    Err(AppError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+            }
+        }
+
+        restore_one(
+            &crate::codex_config::get_codex_auth_path(),
+            self.auth.as_deref(),
+        )?;
+        restore_one(
+            &crate::codex_config::get_codex_config_path(),
+            self.config.as_deref(),
+        )
+    }
+}
+
 /// Result of a provider switch operation, including any non-fatal warnings
 #[derive(Debug, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SwitchResult {
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub codex_restart_required: bool,
 }
 
 #[cfg(test)]
@@ -2429,9 +2486,554 @@ requires_openai_auth = true
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn codex_switch_live_failure_restores_both_current_sources_and_live_files() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload settings");
+            let provider_a = Provider::with_id(
+                "a".into(),
+                "A".into(),
+                codex_settings("https://a.example/v1", "key-a"),
+                None,
+            );
+            let provider_b = Provider::with_id(
+                "b".into(),
+                "B".into(),
+                codex_settings("https://b.example/v1", "key-b"),
+                None,
+            );
+            state.db.save_provider("codex", &provider_a).unwrap();
+            state.db.save_provider("codex", &provider_b).unwrap();
+            state.db.set_current_provider("codex", "a").unwrap();
+            crate::settings::set_current_provider(&AppType::Codex, Some("a")).unwrap();
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &provider_a).unwrap();
+            let before = CodexLiveSnapshot::capture().unwrap();
+
+            FAIL_NEXT_CODEX_SWITCH_LIVE_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+            ProviderService::switch(state, AppType::Codex, "b")
+                .expect_err("injected live write must fail");
+
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+                Some("a")
+            );
+            assert_eq!(
+                state.db.get_current_provider("codex").unwrap().as_deref(),
+                Some("a")
+            );
+            assert_eq!(CodexLiveSnapshot::capture().unwrap().auth, before.auth);
+            assert_eq!(CodexLiveSnapshot::capture().unwrap().config, before.config);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn codex_switch_db_failure_restores_local_current_and_live_files() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload settings");
+            let provider_a = Provider::with_id(
+                "a".into(),
+                "A".into(),
+                codex_settings("https://a.example/v1", "key-a"),
+                None,
+            );
+            let provider_b = Provider::with_id(
+                "b".into(),
+                "B".into(),
+                codex_settings("https://b.example/v1", "key-b"),
+                None,
+            );
+            state.db.save_provider("codex", &provider_a).unwrap();
+            state.db.save_provider("codex", &provider_b).unwrap();
+            state.db.set_current_provider("codex", "a").unwrap();
+            crate::settings::set_current_provider(&AppType::Codex, Some("a")).unwrap();
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &provider_a).unwrap();
+            let before = CodexLiveSnapshot::capture().unwrap();
+
+            FAIL_NEXT_CODEX_SWITCH_DB_COMMIT.store(true, std::sync::atomic::Ordering::SeqCst);
+            ProviderService::switch(state, AppType::Codex, "b")
+                .expect_err("injected database commit must fail");
+
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+                Some("a")
+            );
+            assert_eq!(
+                state.db.get_current_provider("codex").unwrap().as_deref(),
+                Some("a")
+            );
+            assert_eq!(CodexLiveSnapshot::capture().unwrap().auth, before.auth);
+            assert_eq!(CodexLiveSnapshot::capture().unwrap().config, before.config);
+        });
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn concurrent_modelhub_and_official_switches_leave_one_coherent_route() {
+        let _guard = test_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_home = std::env::var_os("HOME");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_managed = std::env::var_os("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH");
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let managed_path = temp.path().join("etc/codex/managed_config.toml");
+        std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", &managed_path);
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db.clone());
+        let mut proxy_config = db.get_proxy_config().await.expect("get proxy config");
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("use ephemeral proxy port");
+
+        let mut modelhub = Provider::with_id(
+            "modelhub".into(),
+            "ModelHub".into(),
+            codex_settings("https://modelhub.example/v1", "modelhub-key"),
+            None,
+        );
+        modelhub.meta = Some(ProviderMeta {
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.into(),
+            "OpenAI Official".into(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        db.save_provider("codex", &modelhub).unwrap();
+        db.save_provider("codex", &official).unwrap();
+        db.set_current_provider("codex", &official.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id)).unwrap();
+        crate::codex_config::write_codex_live_atomic(
+            &json!({"auth_mode": "chatgpt"}),
+            Some("model = \"gpt-5.4\"\n"),
+        )
+        .unwrap();
+
+        let (to_modelhub, to_official) = tokio::join!(
+            ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id),
+            ProviderService::switch_routed(&state, AppType::Codex, &official.id),
+        );
+        to_modelhub.expect("ModelHub switch");
+        to_official.expect("Official switch");
+
+        let current = crate::settings::get_effective_current_provider(&db, &AppType::Codex)
+            .unwrap()
+            .expect("current provider");
+        let takeover = db.get_proxy_config_for_app("codex").await.unwrap().enabled;
+        let managed = std::fs::read_to_string(&managed_path).unwrap_or_default();
+        if current == modelhub.id {
+            assert!(takeover);
+            assert!(managed.contains("model_provider = \"modelhub\""));
+            assert!(managed.contains("openai_base_url = \"http://127.0.0.1:15721/v1\""));
+            assert!(db.get_live_backup("codex").await.unwrap().is_some());
+        } else {
+            assert_eq!(current, official.id);
+            assert!(!takeover);
+            assert!(!managed.contains("model_provider"));
+            assert!(!managed.contains("openai_base_url"));
+            assert!(db.get_live_backup("codex").await.unwrap().is_none());
+        }
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_managed {
+            Some(value) => std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", value),
+            None => std::env::remove_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn routed_switch_rolls_back_partial_takeover_enable_state() {
+        let _guard = test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_managed = std::env::var_os("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH");
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var(
+            "CC_SWITCH_CODEX_MANAGED_CONFIG_PATH",
+            temp.path().join("etc/codex/managed_config.toml"),
+        );
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut proxy_config = db.get_proxy_config().await.unwrap();
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config).await.unwrap();
+        let mut modelhub = Provider::with_id(
+            "modelhub".into(),
+            "ModelHub".into(),
+            codex_settings("https://modelhub.example/v1", "modelhub-key"),
+            None,
+        );
+        modelhub.meta = Some(ProviderMeta {
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.into(),
+            "OpenAI Official".into(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        db.save_provider("codex", &modelhub).unwrap();
+        db.save_provider("codex", &official).unwrap();
+        db.set_current_provider("codex", &official.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id)).unwrap();
+        let oauth = json!({"auth_mode": "chatgpt"});
+        crate::codex_config::write_codex_live_atomic(&oauth, Some("model = \"gpt-5.4\"\n"))
+            .unwrap();
+
+        crate::services::proxy::FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+            .await
+            .expect_err("injected enable state write must fail");
+
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some(official.id.as_str())
+        );
+        assert!(!db.get_proxy_config_for_app("codex").await.unwrap().enabled);
+        assert!(db.get_live_backup("codex").await.unwrap().is_none());
+        let live = read_live_settings(AppType::Codex).unwrap();
+        assert_eq!(live["auth"], oauth);
+        assert!(!live["config"].as_str().unwrap().contains("PROXY_MANAGED"));
+
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_test_home {
+            Some(v) => std::env::set_var("CC_SWITCH_TEST_HOME", v),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_managed {
+            Some(v) => std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", v),
+            None => std::env::remove_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn routed_switch_rolls_back_partial_takeover_disable_state() {
+        let _guard = test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_managed = std::env::var_os("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH");
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let managed_path = temp.path().join("etc/codex/managed_config.toml");
+        std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", &managed_path);
+        crate::settings::reload_settings().unwrap();
+
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut global = db.get_proxy_config().await.unwrap();
+        global.listen_port = 0;
+        db.update_proxy_config(global).await.unwrap();
+        let mut modelhub = Provider::with_id(
+            "modelhub".into(),
+            "ModelHub".into(),
+            codex_settings("https://modelhub.example/v1", "modelhub-key"),
+            None,
+        );
+        modelhub.meta = Some(ProviderMeta {
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.into(),
+            "OpenAI Official".into(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        db.save_provider("codex", &modelhub).unwrap();
+        db.save_provider("codex", &official).unwrap();
+        db.set_current_provider("codex", &modelhub.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&modelhub.id)).unwrap();
+        write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &modelhub).unwrap();
+        state
+            .proxy_service
+            .set_takeover_for_app("codex", true)
+            .await
+            .unwrap();
+        crate::codex_managed_route::apply(crate::codex_managed_route::CodexManagedRoute::ModelHub)
+            .unwrap();
+        let backup_before = db
+            .get_live_backup("codex")
+            .await
+            .unwrap()
+            .expect("backup")
+            .original_config;
+
+        crate::services::proxy::FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ProviderService::switch_routed(&state, AppType::Codex, &official.id)
+            .await
+            .expect_err("injected disable state write must fail");
+
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some(modelhub.id.as_str())
+        );
+        assert!(db.get_proxy_config_for_app("codex").await.unwrap().enabled);
+        assert_eq!(
+            db.get_live_backup("codex")
+                .await
+                .unwrap()
+                .unwrap()
+                .original_config,
+            backup_before
+        );
+        let live = read_live_settings(AppType::Codex).unwrap();
+        assert!(live["config"].as_str().unwrap().contains("127.0.0.1"));
+        let managed = std::fs::read_to_string(&managed_path).unwrap();
+        assert!(managed.contains("model_provider = \"modelhub\""));
+
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_test_home {
+            Some(v) => std::env::set_var("CC_SWITCH_TEST_HOME", v),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_managed {
+            Some(v) => std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", v),
+            None => std::env::remove_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH"),
+        }
+    }
 }
 
 impl ProviderService {
+    fn write_switch_live(
+        state: &AppState,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        #[cfg(test)]
+        if matches!(app_type, AppType::Codex)
+            && FAIL_NEXT_CODEX_SWITCH_LIVE_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Message(
+                "injected Codex switch live write failure".to_string(),
+            ));
+        }
+        write_live_with_common_config(state.db.as_ref(), app_type, provider)
+    }
+
+    async fn switch_blocking(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
+        let state = state.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || Self::switch(&state, app_type, &id))
+            .await
+            .map_err(|error| AppError::Message(format!("供应商切换任务执行失败: {error}")))?
+    }
+
+    pub async fn switch_routed(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
+        if !matches!(app_type, AppType::Codex) {
+            return Self::switch_blocking(state, app_type, id).await;
+        }
+        let _switch_guard = state
+            .proxy_service
+            .lock_switch_for_app(AppType::Codex.as_str())
+            .await;
+        let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
+        let target = providers
+            .get(id)
+            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        let previous_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+        let previous = previous_id
+            .as_deref()
+            .and_then(|provider_id| providers.get(provider_id));
+        let route = crate::codex_managed_route::route_for_switch(previous, target);
+        let Some(route) = route else {
+            return Self::switch_blocking_locked(state, app_type, id).await;
+        };
+
+        let takeover_config_before = state
+            .db
+            .get_proxy_config_for_app(AppType::Codex.as_str())
+            .await?;
+        let takeover_before = takeover_config_before.enabled;
+        let backup_before = state.db.get_live_backup(AppType::Codex.as_str()).await?;
+        let previous_local_provider_id = crate::settings::get_current_provider(&app_type);
+        let previous_db_provider_id = state.db.get_current_provider(app_type.as_str())?;
+        let managed_snapshot = crate::codex_managed_route::snapshot()?;
+        let enable_modelhub = route == crate::codex_managed_route::CodexManagedRoute::ModelHub;
+
+        if enable_modelhub && !takeover_before {
+            if let Err(error) = state
+                .proxy_service
+                .set_takeover_for_app_inner(&AppType::Codex, true)
+                .await
+            {
+                Self::rollback_routed_switch(
+                    state,
+                    &app_type,
+                    previous_local_provider_id.as_deref(),
+                    previous_db_provider_id.as_deref(),
+                    &takeover_config_before,
+                    backup_before.as_ref(),
+                    &managed_snapshot,
+                )
+                .await;
+                return Err(AppError::Message(error));
+            }
+        } else if !enable_modelhub && takeover_before {
+            if let Err(error) = state
+                .proxy_service
+                .set_takeover_for_app_inner(&AppType::Codex, false)
+                .await
+            {
+                Self::rollback_routed_switch(
+                    state,
+                    &app_type,
+                    previous_local_provider_id.as_deref(),
+                    previous_db_provider_id.as_deref(),
+                    &takeover_config_before,
+                    backup_before.as_ref(),
+                    &managed_snapshot,
+                )
+                .await;
+                return Err(AppError::Message(error));
+            }
+        }
+
+        let operation = match crate::codex_managed_route::apply(route) {
+            Ok(()) => Self::switch_blocking_locked(state, app_type.clone(), id).await,
+            Err(error) => {
+                Self::rollback_routed_switch(
+                    state,
+                    &app_type,
+                    previous_local_provider_id.as_deref(),
+                    previous_db_provider_id.as_deref(),
+                    &takeover_config_before,
+                    backup_before.as_ref(),
+                    &managed_snapshot,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        match operation {
+            Ok(mut result) => {
+                result.codex_restart_required = true;
+                Ok(result)
+            }
+            Err(error) => {
+                Self::rollback_routed_switch(
+                    state,
+                    &app_type,
+                    previous_local_provider_id.as_deref(),
+                    previous_db_provider_id.as_deref(),
+                    &takeover_config_before,
+                    backup_before.as_ref(),
+                    &managed_snapshot,
+                )
+                .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn switch_blocking_locked(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
+        let state = state.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || Self::switch_locked(&state, app_type, &id))
+            .await
+            .map_err(|error| AppError::Message(format!("供应商切换任务执行失败: {error}")))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rollback_routed_switch(
+        state: &AppState,
+        app_type: &AppType,
+        previous_local_provider_id: Option<&str>,
+        previous_db_provider_id: Option<&str>,
+        takeover_config_before: &crate::proxy::types::AppProxyConfig,
+        backup_before: Option<&crate::proxy::types::LiveBackup>,
+        managed_snapshot: &crate::codex_managed_route::ManagedConfigSnapshot,
+    ) {
+        if let Err(error) =
+            crate::settings::set_current_provider(app_type, previous_local_provider_id)
+        {
+            log::error!("路由切换回滚本地当前供应商失败: {error}");
+        }
+        if let Err(error) = state
+            .db
+            .restore_current_provider(app_type.as_str(), previous_db_provider_id)
+        {
+            log::error!("路由切换回滚数据库当前供应商失败: {error}");
+        }
+        if let Err(error) = crate::codex_managed_route::restore(managed_snapshot) {
+            log::error!("路由切换回滚系统托管配置失败: {error}");
+        }
+
+        if let Err(error) = state
+            .proxy_service
+            .restore_takeover_snapshot_inner(app_type, takeover_config_before, backup_before)
+            .await
+        {
+            log::error!("路由切换回滚代理接管失败: {error}");
+        }
+        state
+            .proxy_service
+            .refresh_active_target_for_app(app_type)
+            .await;
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -3012,6 +3614,21 @@ impl ProviderService {
         } else {
             None
         };
+        Self::switch_locked(state, app_type, id)
+    }
+
+    /// Execute a provider switch while the caller already owns the per-app
+    /// switch lock. Routed Codex switching uses this to keep managed config,
+    /// takeover state and provider state in one critical section.
+    fn switch_locked(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let provider = providers
+            .get(id)
+            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
 
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the
@@ -3030,8 +3647,8 @@ impl ProviderService {
         // Block switching to official providers when proxy takeover is active.
         // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
         if should_hot_switch
-            && _provider.category.as_deref() == Some("official")
-            && !official_provider_supports_proxy_takeover(&app_type, _provider)
+            && provider.category.as_deref() == Some("official")
+            && !official_provider_supports_proxy_takeover(&app_type, provider)
         {
             return Err(AppError::localized(
                 "switch.official_blocked_by_proxy",
@@ -3076,6 +3693,19 @@ impl ProviderService {
         let provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        let previous_local_provider_id = crate::settings::get_current_provider(&app_type);
+        let previous_db_provider_id = state.db.get_current_provider(app_type.as_str())?;
+        let current_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+        let previous_provider = current_id
+            .as_deref()
+            .and_then(|provider_id| providers.get(provider_id))
+            .cloned();
+        let previous_snippet = state.db.get_config_snippet(app_type.as_str())?;
+        let previous_codex_live = if matches!(app_type, AppType::Codex) {
+            Some(CodexLiveSnapshot::capture()?)
+        } else {
+            None
+        };
 
         // OMO ↔ OMO Slim are mutually exclusive; activating one removes the other's config file.
         if matches!(app_type, AppType::OpenCode) {
@@ -3100,8 +3730,6 @@ impl ProviderService {
 
         // Backfill: Backfill current live config to current provider
         // Use effective current provider (validated existence) to ensure backfill targets valid provider
-        let current_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
-
         let mut backfill_completed = false;
         if let Some(current_id) = current_id {
             if current_id != id {
@@ -3145,17 +3773,59 @@ impl ProviderService {
             }
         }
 
-        // Additive mode apps skip setting is_current (no such concept)
-        if !app_type.is_additive_mode() {
-            // Update local settings (device-level, takes priority)
-            crate::settings::set_current_provider(&app_type, Some(id))?;
-
-            // Update database is_current (as default for new devices)
-            state.db.set_current_provider(app_type.as_str(), id)?;
+        let commit_result = (|| -> Result<(), AppError> {
+            // Write the target Live config before publishing the new logical
+            // current provider. A filesystem failure must never leave settings
+            // or the DB claiming that the switch succeeded.
+            Self::write_switch_live(state, &app_type, provider)?;
+            if !app_type.is_additive_mode() {
+                crate::settings::set_current_provider(&app_type, Some(id))?;
+                #[cfg(test)]
+                if matches!(app_type, AppType::Codex)
+                    && FAIL_NEXT_CODEX_SWITCH_DB_COMMIT
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(AppError::Message(
+                        "injected Codex switch database failure".to_string(),
+                    ));
+                }
+                state.db.set_current_provider(app_type.as_str(), id)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = commit_result {
+            if let Err(rollback_error) = crate::settings::set_current_provider(
+                &app_type,
+                previous_local_provider_id.as_deref(),
+            ) {
+                log::error!("供应商切换失败后恢复本地 current 失败: {rollback_error}");
+            }
+            if let Err(rollback_error) = state
+                .db
+                .restore_current_provider(app_type.as_str(), previous_db_provider_id.as_deref())
+            {
+                log::error!("供应商切换失败后恢复数据库 current 失败: {rollback_error}");
+            }
+            if let Some(previous_provider) = previous_provider.as_ref() {
+                if let Err(rollback_error) =
+                    state.db.save_provider(app_type.as_str(), previous_provider)
+                {
+                    log::error!("供应商切换失败后恢复原供应商快照失败: {rollback_error}");
+                }
+            }
+            if let Err(rollback_error) = state
+                .db
+                .set_config_snippet(app_type.as_str(), previous_snippet)
+            {
+                log::error!("供应商切换失败后恢复公共配置失败: {rollback_error}");
+            }
+            if let Some(snapshot) = previous_codex_live.as_ref() {
+                if let Err(rollback_error) = snapshot.restore() {
+                    log::error!("供应商切换失败后恢复 Codex Live 失败: {rollback_error}");
+                }
+            }
+            return Err(error);
         }
-
-        // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
 
         // A material-less official Codex provider gets a config-only live
         // write, which can leave the previous third-party key in

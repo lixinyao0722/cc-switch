@@ -100,6 +100,9 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    /// Pending ModelHub response checkpoint, filled by the forwarder and
+    /// completed only after the downstream response reaches a terminal event.
+    pub modelhub_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -207,6 +210,7 @@ impl RequestContext {
             request_endpoint: String::new(),
             session_id,
             session_client_provided: session_result.client_provided,
+            modelhub_checkpoint: None,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -275,6 +279,8 @@ impl RequestContext {
             state.modelhub_activity_summary_dedup.clone(),
             state.modelhub_unclassified_luna_fingerprints.clone(),
             state.modelhub_429_cooldown.clone(),
+            state.modelhub_context.clone(),
+            state.modelhub_admission.clone(),
             state.failover_manager.clone(),
             state.app_handle.clone(),
             self.current_provider_id.clone(),

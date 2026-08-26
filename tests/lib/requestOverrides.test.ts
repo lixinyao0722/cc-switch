@@ -17,6 +17,15 @@ describe("requestOverrides", () => {
     codexActivitySummaryMode: "map" as const,
     codexMetadataModel: "gpt-5.6-sol",
     rememberInvalidEncryptedReasoning: true,
+    contextOptimization: {
+      enabled: true,
+      checkpointTtlSeconds: 21600,
+    },
+    admissionControl: {
+      enabled: true,
+      largeRequestTokens: 100000,
+      concurrency: 4,
+    },
     retry429: {
       maxRetries: 10,
       baseDelayMs: 1000,
@@ -107,6 +116,15 @@ describe("requestOverrides", () => {
           baseDelayMs: 1000,
           maxDelayMs: 30000,
           honorRetryAfter: true,
+        },
+        contextOptimization: {
+          enabled: true,
+          checkpointTtlSeconds: 21600,
+        },
+        admissionControl: {
+          enabled: true,
+          largeRequestTokens: 100000,
+          concurrency: 4,
         },
       },
     });

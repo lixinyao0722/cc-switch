@@ -54,6 +54,10 @@ enum ClaudeTakeoverAuthPolicy {
     ManagedAccount { keep_auth_token: bool },
 }
 
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
@@ -440,6 +444,11 @@ impl ProxyService {
         }
     }
 
+    pub(crate) async fn refresh_active_target_for_app(&self, app_type: &AppType) {
+        self.refresh_active_target_from_current_provider(app_type)
+            .await;
+    }
+
     async fn rollback_hot_switch_preparation(
         &self,
         app_type: &AppType,
@@ -741,6 +750,16 @@ impl ProxyService {
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
         let app_type_str = app.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
+        self.set_takeover_for_app_inner(&app, enabled).await
+    }
+
+    /// Only call this while holding the per-app switch lock.
+    pub(crate) async fn set_takeover_for_app_inner(
+        &self,
+        app: &AppType,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let app_type_str = app.as_str();
 
         if enabled {
             // 1) 代理服务未运行则自动启动
@@ -765,7 +784,7 @@ impl ProxyService {
                     }
                 };
                 let live_matches_current_proxy =
-                    match self.live_takeover_matches_current_proxy(&app).await {
+                    match self.live_takeover_matches_current_proxy(app).await {
                         Ok(value) => value,
                         Err(e) => {
                             log::warn!("检测 {app_type_str} 接管配置失败（将继续重建接管）: {e}");
@@ -777,7 +796,7 @@ impl ProxyService {
                 // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
-                    self.refresh_active_target_from_current_provider(&app).await;
+                    self.refresh_active_target_from_current_provider(app).await;
                     return Ok(());
                 }
                 restore_existing_backup_before_takeover = has_backup;
@@ -789,21 +808,21 @@ impl ProxyService {
 
             // 3) 备份 Live 配置（严格：目标 app 不存在则报错）
             if restore_existing_backup_before_takeover {
-                self.restore_live_config_for_app_inner(&app).await?;
+                self.restore_live_config_for_app_inner(app).await?;
             } else {
-                self.backup_live_config_strict(&app).await?;
+                self.backup_live_config_strict(app).await?;
 
                 // 4) 同步 Live Token 到数据库（仅当前 app）
-                if let Err(e) = self.sync_live_to_provider(&app).await {
+                if let Err(e) = self.sync_live_to_provider(app).await {
                     let _ = self.db.delete_live_backup(app_type_str).await;
                     return Err(e);
                 }
             }
 
             // 5) 写入接管配置（仅当前 app）
-            if let Err(e) = self.takeover_live_config_strict(&app).await {
+            if let Err(e) = self.takeover_live_config_strict(app).await {
                 log::error!("{app_type_str} 接管 Live 配置失败，尝试恢复: {e}");
-                match self.restore_live_config_for_app_inner(&app).await {
+                match self.restore_live_config_for_app_inner(app).await {
                     Ok(()) => {
                         // 恢复成功才清理备份，避免失败场景下丢失唯一可回滚来源
                         let _ = self.db.delete_live_backup(app_type_str).await;
@@ -824,6 +843,13 @@ impl ProxyService {
                 .await
                 .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
             updated_config.enabled = true;
+            #[cfg(test)]
+            if matches!(app, AppType::Codex)
+                && FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err("injected Codex takeover state write failure".to_string());
+            }
             self.db
                 .update_proxy_config_for_app(updated_config)
                 .await
@@ -832,16 +858,16 @@ impl ProxyService {
             // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能）
             let _ = self.db.set_live_takeover_active(true).await;
 
-            self.refresh_active_target_from_current_provider(&app).await;
+            self.refresh_active_target_from_current_provider(app).await;
 
             // 8) Warn if the current provider is official (risk of account ban via proxy)
             if let Ok(Some(current_id)) =
-                crate::settings::get_effective_current_provider(&self.db, &app)
+                crate::settings::get_effective_current_provider(&self.db, app)
             {
                 if let Ok(Some(provider)) = self.db.get_provider_by_id(&current_id, app_type_str) {
                     if provider.category.as_deref() == Some("official")
                         && !crate::services::provider::official_provider_supports_proxy_takeover(
-                            &app, &provider,
+                            app, &provider,
                         )
                     {
                         if let Some(handle) = self.app_handle.read().await.as_ref() {
@@ -876,7 +902,7 @@ impl ProxyService {
         // 必须走 with_fallback 版本：备份 → SSOT → 清理占位符 的三层兜底。
         // 简版 restore_live_config_for_app 在备份缺失时会静默 Ok(())，
         // 留下接管时写入的占位符（代理地址/PROXY_MANAGED token），客户端无法工作。
-        self.restore_live_config_for_app_with_fallback_inner(&app)
+        self.restore_live_config_for_app_with_fallback_inner(app)
             .await?;
 
         // 2) 删除该 app 的备份（避免长期存储敏感 Token）
@@ -892,6 +918,12 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
         updated_config.enabled = false;
+        #[cfg(test)]
+        if matches!(app, AppType::Codex)
+            && FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected Codex takeover state write failure".to_string());
+        }
         self.db
             .update_proxy_config_for_app(updated_config)
             .await
@@ -921,6 +953,73 @@ impl ProxyService {
         }
 
         Ok(())
+    }
+
+    /// Restore a previously captured takeover state without sampling the current
+    /// Live file. This is used by the routed-switch rollback path so a proxy
+    /// placeholder can never replace the user's real restore backup. The caller
+    /// must hold the per-app switch lock.
+    pub(crate) async fn restore_takeover_snapshot_inner(
+        &self,
+        app: &AppType,
+        config: &AppProxyConfig,
+        backup: Option<&LiveBackup>,
+    ) -> Result<(), String> {
+        let app_type = app.as_str();
+        if config.enabled {
+            let backup =
+                backup.ok_or_else(|| format!("无法恢复 {app_type} 接管：原始 Live 备份不存在"))?;
+            if !self.is_running().await {
+                self.start().await?;
+            }
+            self.db
+                .save_live_backup(app_type, &backup.original_config)
+                .await
+                .map_err(|error| format!("恢复 {app_type} 原 Live 备份失败: {error}"))?;
+            self.takeover_live_config_strict(app).await?;
+            self.db
+                .update_proxy_config_for_app(config.clone())
+                .await
+                .map_err(|error| format!("恢复 {app_type} 接管状态失败: {error}"))?;
+            let _ = self.db.set_live_takeover_active(true).await;
+            self.refresh_active_target_from_current_provider(app).await;
+            return Ok(());
+        }
+
+        // Do not trust the current enabled flag here. A failed enable can have
+        // already written the proxy placeholder and backup while the flag is
+        // still false; a failed disable can have restored Live and deleted the
+        // backup while the flag is still true. Reconstruct the disabled
+        // snapshot from the partial operation's backup or the provider SSOT.
+        if self.detect_takeover_in_live_config_for_app(app) {
+            if self
+                .db
+                .get_live_backup(app_type)
+                .await
+                .map_err(|error| format!("读取 {app_type} 半提交备份失败: {error}"))?
+                .is_some()
+            {
+                self.restore_live_config_for_app_inner(app).await?;
+            } else if !self.restore_live_from_ssot_for_app(app)? {
+                return Err(format!("无法恢复 {app_type} 半提交 Live 配置"));
+            }
+        }
+        match backup {
+            Some(backup) => self
+                .db
+                .save_live_backup(app_type, &backup.original_config)
+                .await
+                .map_err(|error| format!("恢复 {app_type} 原 Live 备份失败: {error}"))?,
+            None => self
+                .db
+                .delete_live_backup(app_type)
+                .await
+                .map_err(|error| format!("清理 {app_type} 半提交备份失败: {error}"))?,
+        }
+        self.db
+            .update_proxy_config_for_app(config.clone())
+            .await
+            .map_err(|error| format!("恢复 {app_type} 接管状态失败: {error}"))
     }
 
     /// 同步关闭指定应用的 Live 接管（恢复配置并清标志，不停止代理服务）。

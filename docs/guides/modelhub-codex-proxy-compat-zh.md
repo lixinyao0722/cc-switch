@@ -17,15 +17,15 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R16 基于 CC Switch 3.19.2，继承 R15 的 `1,050,000` GPT-5.5 模型窗口和 R14 的移动端强制路由。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库 Provider 快照仍保存真实 ModelHub 上游，避免代理回环；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
+R17 基于 CC Switch 3.19.3，继承 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口，并一次性交付 ModelHub / OpenAI Official 系统路由切换、原生远程压缩、严格增量续接和 429 准入治理。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游，避免代理回环；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R16 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R16 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R17 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R17 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R16 管理的模型、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R17 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R17 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；其中顶层 `model_provider = "modelhub"` 必须写入且只能出现一次，否则安装会失败并自动回滚，不会留下看似成功但实际无法联网的状态。输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
 
 Golden Codex 配置固定以下安装后状态：
 
@@ -60,11 +60,20 @@ base_url = "http://127.0.0.1:15721/v1"
 
 Codex 已经运行时可能不会热更新这些设置或新的 catalog。安装完成后若界面状态未刷新，请重启 Codex 并新建任务。
 
-如果安装器进程已继承非空 `MODELHUB_AK`，R16 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
+## 一键切换 ModelHub 与官方 Codex
+
+安装后打开 CC Switch 的 Codex 供应商列表即可看到两个入口：
+
+- `Bytedance ModelHub - 官方CLI`：默认选中，经 CC Switch 转发到 ModelHub。
+- `OpenAI Official`：使用当前 ChatGPT Plus/Pro 登录态，经 CC Switch 转发到 OpenAI 官方 Codex。
+
+点击目标供应商即可完成整套路由变更，不需要重新输入 ChatGPT 账号。切到 ModelHub 时，CC Switch 会开启 Codex 接管并把系统 managed config 的 Provider 与内置 OpenAI 地址同时指向本地路由，保证手机远程新建任务也进入 ModelHub；切到 `OpenAI Official` 时会移除这两个受管根键并关闭 Codex 接管，恢复官方直连。两种模式切换后都必须重启 Codex 并新建任务，界面提供“立即重启”；旧任务可能包含只能由原上游解密的 reasoning 内容。
+
+如果安装器进程已继承非空 `MODELHUB_AK`，R17 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
 
 写入 `/Applications` 和 `/etc/codex` 等系统位置前，安装器会说明接下来需要输入当前 Mac 登录用户的管理员密码，而不是 `MODELHUB_AK`。密码输入时终端不会显示字符，输入完成后按回车；这和后续单独输入或复用的 ModelHub AK 是两类不同凭据。
 
-R16 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
+R17 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
 
 ```toml
 model_provider = "modelhub"
@@ -95,9 +104,12 @@ review_model = "gpt-5.5-2026-04-24"
 model_max_output_tokens = 128_000
 model_provider = "modelhub"
 model_reasoning_effort = "high"
-model_auto_compact_token_limit = 500000
+model_auto_compact_token_limit = 300000
 model_context_window = 921_860
 model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
+
+[features]
+remote_compaction_v2 = true
 
 [desktop]
 git-branch-prefix = "feat/"
@@ -131,10 +143,23 @@ Provider 元数据承接全部 CC Switch ModelHub 兼容策略。这些字段在
       "baseDelayMs": 2000,
       "maxDelayMs": 30000,
       "honorRetryAfter": true
+    },
+    "contextOptimization": {
+      "enabled": true,
+      "checkpointTtlSeconds": 21600
+    },
+    "admissionControl": {
+      "enabled": true,
+      "largeRequestTokens": 100000,
+      "concurrency": 4
     }
   }
 }
 ```
+
+R17 已对真实 ModelHub 做过三项协议验真：`store=true` 返回可续接的 `resp_...`，仅发送新输入和 `previous_response_id` 能恢复上一轮精确信息，`/responses/compact` 返回的完整 opaque compaction output 也能在下一轮恢复压缩前细节。CC Switch 因此仅在 Provider、会话、模型、稳定请求选项和完整历史前缀逐项匹配时发送增量；fork、并发请求、过期游标、重启或任意哈希不一致都自动发送完整历史。checkpoint 只保存在内存中，本地原始 transcript 不会删除。
+
+`remote_compaction_v2` 交给 Codex 原生实现 compact 时机与 opaque output 延续，CC Switch 负责透明透传。ModelHub Provider 同时启用按 Provider + 模型隔离的 token 加权准入：估算达到 10 万输入 token 的请求独占四个并发槽，小请求占一个槽；`-2004` 容量不足最多恢复一次，标题、摘要与 Skill 选择等 helper 仍只请求一次。日志只记录 full/delta、估算 token、请求体字节数、排队耗时和 checkpoint 是否存在，不记录正文、会话 ID、response ID 或凭据。
 
 `codexActivitySummaryMode` 只作用于 Codex Desktop 固定的 `gpt-5.6-luna` 活动摘要提示词，可选 `passthrough`、`block`、`map`。R14 默认 `map`，复用 `codexMetadataModel` 生成摘要；`block` 在本地返回不可重试 400；`passthrough` 保留 Luna，适用于拥有 Luna 权限的 Provider。完全相同的 Provider/thread/摘要内容在 5 秒内只允许一次上游请求，映射摘要及动态 Skill 选择辅助请求遇到 429 都只访问上游一次。
 

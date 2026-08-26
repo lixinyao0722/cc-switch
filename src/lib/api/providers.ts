@@ -19,6 +19,7 @@ export interface ProviderSwitchEvent {
 
 export interface SwitchResult {
   warnings: string[];
+  codexRestartRequired?: boolean;
 }
 
 export interface OpenTerminalOptions {
@@ -89,6 +90,10 @@ export const providersApi = {
 
   async switch(id: string, appId: AppId): Promise<SwitchResult> {
     return await invoke("switch_provider", { id, app: appId });
+  },
+
+  async restartCodexDesktop(): Promise<void> {
+    await invoke("restart_codex_desktop");
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

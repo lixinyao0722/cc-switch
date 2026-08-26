@@ -107,14 +107,29 @@ pub async fn switch_provider(
     id: String,
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app_handle
-            .try_state::<AppState>()
-            .ok_or_else(|| "应用状态不可用".to_string())?;
-        switch_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+    let state = app_handle
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用状态不可用".to_string())?;
+    ProviderService::switch_routed(state.inner(), app_type, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn switch_provider_routed(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+) -> Result<SwitchResult, AppError> {
+    ProviderService::switch_routed(state, app_type, id).await
+}
+
+#[tauri::command]
+pub async fn restart_codex_desktop() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::codex_managed_route::restart_codex_desktop().map_err(|error| error.to_string())
     })
     .await
-    .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
+    .map_err(|error| format!("Codex 重启任务执行失败: {error}"))?
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
