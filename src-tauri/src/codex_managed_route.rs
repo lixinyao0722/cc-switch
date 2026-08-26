@@ -235,12 +235,12 @@ fn install_rendered(rendered: &str) -> Result<(), AppError> {
         std::env::temp_dir().join(format!("cc-switch-codex-route-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&stage_dir)
         .map_err(|error| AppError::Message(format!("无法创建路由暂存目录: {error}")))?;
-    let mut permissions = std::fs::metadata(&stage_dir)
-        .map_err(|error| AppError::Message(format!("无法读取路由暂存目录权限: {error}")))?
-        .permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&stage_dir)
+            .map_err(|error| AppError::Message(format!("无法读取路由暂存目录权限: {error}")))?
+            .permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&stage_dir, permissions)
             .map_err(|error| AppError::Message(format!("无法保护路由暂存目录: {error}")))?;
