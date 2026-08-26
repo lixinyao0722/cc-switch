@@ -4,6 +4,7 @@
 use crate::error::AppError;
 use crate::provider::{CodexSessionHeaderAdapter, Provider};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use toml_edit::{value, DocumentMut};
 
@@ -111,6 +112,7 @@ fn read_existing(path: &Path) -> Result<String, AppError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
