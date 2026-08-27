@@ -1094,7 +1094,7 @@ impl RequestForwarder {
                                         );
                                         e = retry_err;
                                     } else {
-                                        if let Some(err) = self
+                                        let terminal_error = self
                                             .handle_rectifier_retry_failure(
                                                 retry_err,
                                                 provider,
@@ -1104,8 +1104,8 @@ impl RequestForwarder {
                                                 &mut last_error,
                                                 &mut last_provider,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        if let Some(err) = terminal_error {
                                             return Err(err);
                                         }
                                         continue;
