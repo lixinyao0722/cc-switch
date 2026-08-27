@@ -5008,11 +5008,30 @@ mod tests {
         let mut provider = provider_with_modelhub_header_adapter();
         provider.settings_config = json!({
             "base_url": format!("http://{address}/v1"),
-            "api_key": "test-key"
+            "api_key": "test-key",
+            "auth": {"OPENAI_API_KEY": "test-key"}
+        });
+        let overrides = provider
+            .meta
+            .as_mut()
+            .expect("provider meta")
+            .local_proxy_request_overrides
+            .as_mut()
+            .expect("ModelHub overrides");
+        overrides.context_optimization = Some(
+            crate::provider::ModelhubContextOptimizationConfig {
+                enabled: true,
+                checkpoint_ttl_seconds: 3600,
+            },
+        );
+        overrides.admission_control = Some(crate::provider::ModelhubAdmissionConfig {
+            enabled: true,
+            large_request_tokens: 1,
+            concurrency: 1,
         });
         let body = json!({
             "model": "gpt-5.6-sol",
-            "stream": false,
+            "stream": true,
             "input": [
                 {
                     "type": "reasoning",
@@ -5055,8 +5074,9 @@ mod tests {
         forwarder.session_id = "side-task-session".to_string();
         forwarder.session_client_provided = true;
 
-        let result = forwarder
-            .forward_with_retry(
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            forwarder.forward_with_retry(
                 &AppType::Codex,
                 http::Method::POST,
                 "/responses",
@@ -5064,19 +5084,26 @@ mod tests {
                 headers,
                 Extensions::new(),
                 vec![provider],
+            ),
+        )
+        .await
+        .expect("chained fallback must release its checkpoint and admission leases")
+        .unwrap_or_else(|failure| {
+            panic!(
+                "chained ModelHub compatibility retries should recover: {}",
+                failure.error
             )
-            .await
-            .unwrap_or_else(|failure| {
-                panic!(
-                    "chained ModelHub compatibility retries should recover: {}",
-                    failure.error
-                )
-            });
+        });
         server.abort();
 
         assert_eq!(result.response.status(), StatusCode::OK);
+        assert!(
+            result.modelhub_checkpoint.is_some(),
+            "the final successful retry must retain a checkpoint lease"
+        );
         let bodies = received_bodies.lock().expect("request body lock");
         assert_eq!(bodies.len(), 3);
+        assert!(bodies.iter().all(|body| body["store"] == true));
 
         let first_input = bodies[0]["input"].as_array().expect("first input");
         assert!(first_input.iter().all(|item| item.get("id").is_some()));
