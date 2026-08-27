@@ -5076,17 +5076,13 @@ mod tests {
             .any(|item| item.get("encrypted_content").is_some()));
 
         let detached_input = bodies[1]["input"].as_array().expect("detached input");
-        assert!(detached_input
-            .iter()
-            .all(|item| item.get("id").is_none()));
+        assert!(detached_input.iter().all(|item| item.get("id").is_none()));
         assert!(detached_input
             .iter()
             .any(|item| item.get("encrypted_content").is_some()));
 
         let sanitized_input = bodies[2]["input"].as_array().expect("sanitized input");
-        assert!(sanitized_input
-            .iter()
-            .all(|item| item.get("id").is_none()));
+        assert!(sanitized_input.iter().all(|item| item.get("id").is_none()));
         assert!(sanitized_input
             .iter()
             .all(|item| item.get("encrypted_content").is_none()));
