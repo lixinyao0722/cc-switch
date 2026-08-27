@@ -103,6 +103,10 @@ pub struct RequestContext {
     /// Pending ModelHub response checkpoint, filled by the forwarder and
     /// completed only after the downstream response reaches a terminal event.
     pub modelhub_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    /// Sanitized encrypted-reasoning retry awaiting a successful Responses
+    /// terminal before the session may be learned as incompatible.
+    pub modelhub_compatibility_learning:
+        Option<super::forwarder::PendingModelhubCompatibilityLearning>,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -211,6 +215,7 @@ impl RequestContext {
             session_id,
             session_client_provided: session_result.client_provided,
             modelhub_checkpoint: None,
+            modelhub_compatibility_learning: None,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,

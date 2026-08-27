@@ -347,7 +347,8 @@ pub(crate) fn sanitize_encrypted_reasoning(body: &mut Value) -> ReasoningSanitiz
 
     let mut result = ReasoningSanitization::default();
     let mut retained = Vec::with_capacity(input.len());
-    for mut item in input.drain(..) {
+    let preserve_for_tool_dependency = reasoning_tool_dependency_mask(input);
+    for (index, mut item) in std::mem::take(input).into_iter().enumerate() {
         let is_encrypted_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning")
             && item.get("encrypted_content").is_some();
         if !is_encrypted_reasoning {
@@ -362,7 +363,7 @@ pub(crate) fn sanitize_encrypted_reasoning(body: &mut Value) -> ReasoningSanitiz
         {
             result.removed_encrypted_fields += 1;
         }
-        if reasoning_has_visible_text(&item) {
+        if reasoning_has_visible_text(&item) || preserve_for_tool_dependency[index] {
             retained.push(item);
         } else {
             result.removed_empty_items += 1;
@@ -370,6 +371,26 @@ pub(crate) fn sanitize_encrypted_reasoning(body: &mut Value) -> ReasoningSanitiz
     }
     *input = retained;
     result
+}
+
+fn reasoning_tool_dependency_mask(input: &[Value]) -> Vec<bool> {
+    let mut preserve = vec![false; input.len()];
+    let mut segment_has_tool_call = false;
+    for (index, item) in input.iter().enumerate().rev() {
+        match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => {
+                preserve[index] = segment_has_tool_call;
+            }
+            Some("message") => segment_has_tool_call = false,
+            Some(item_type) if is_responses_tool_call(item_type) => segment_has_tool_call = true,
+            _ => {}
+        }
+    }
+    preserve
+}
+
+fn is_responses_tool_call(item_type: &str) -> bool {
+    item_type.ends_with("_call") && !item_type.ends_with("_call_output")
 }
 
 fn reasoning_has_visible_text(item: &Value) -> bool {
@@ -1003,6 +1024,116 @@ mod tests {
         assert!(body["input"][1].get("encrypted_content").is_none());
         assert_eq!(body["input"][2]["id"], "rs_unencrypted");
         assert_eq!(body["input"][3]["content"][0]["text"], "continue");
+    }
+
+    #[test]
+    fn encrypted_reasoning_sanitizer_preserves_reasoning_tool_dependency_groups() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_custom",
+                    "summary": [],
+                    "encrypted_content": "custom-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_custom_followup",
+                    "summary": [],
+                    "encrypted_content": "custom-followup-ciphertext"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_item",
+                    "call_id": "ctc_call",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ctc_call",
+                    "output": "Done!"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_function",
+                    "content": [],
+                    "encrypted_content": "function-ciphertext"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_item",
+                    "call_id": "fc_call",
+                    "name": "read_file",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "fc_call",
+                    "output": "file contents"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_tool_search_preamble",
+                    "summary": [],
+                    "encrypted_content": "orphan-ciphertext"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_tool_search",
+                    "summary": [],
+                    "encrypted_content": "tool-search-ciphertext"
+                },
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_item",
+                    "arguments": {}
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}]
+                }
+            ]
+        });
+
+        let result = sanitize_encrypted_reasoning(&mut body);
+        let input = body["input"].as_array().expect("sanitized input");
+
+        assert_eq!(result.removed_encrypted_fields, 5);
+        assert_eq!(result.removed_empty_items, 0);
+        assert_eq!(
+            input
+                .iter()
+                .map(|item| item.get("type").and_then(Value::as_str).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "reasoning",
+                "reasoning",
+                "custom_tool_call",
+                "custom_tool_call_output",
+                "reasoning",
+                "function_call",
+                "function_call_output",
+                "reasoning",
+                "reasoning",
+                "tool_search_call",
+                "message",
+            ]
+        );
+        assert_eq!(input[0]["id"], "rs_custom");
+        assert_eq!(input[1]["id"], "rs_custom_followup");
+        assert_eq!(input[2]["call_id"], "ctc_call");
+        assert_eq!(input[3]["call_id"], "ctc_call");
+        assert_eq!(input[4]["id"], "rs_function");
+        assert_eq!(input[5]["call_id"], "fc_call");
+        assert_eq!(input[6]["call_id"], "fc_call");
+        assert_eq!(input[7]["id"], "rs_tool_search_preamble");
+        assert_eq!(input[8]["id"], "rs_tool_search");
+        assert_eq!(input[9]["type"], "tool_search_call");
+        assert!(input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none()));
     }
 
     #[test]

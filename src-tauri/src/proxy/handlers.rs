@@ -222,6 +222,7 @@ async fn handle_messages_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
+    ctx.modelhub_compatibility_learning = result.modelhub_compatibility_learning.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let api_format = result
@@ -852,6 +853,7 @@ async fn handle_responses_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
+    ctx.modelhub_compatibility_learning = result.modelhub_compatibility_learning.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -988,6 +990,7 @@ async fn handle_responses_compact_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
+    ctx.modelhub_compatibility_learning = result.modelhub_compatibility_learning.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;

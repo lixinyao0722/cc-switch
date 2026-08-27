@@ -17,15 +17,15 @@ ChatGPT App
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R18 基于 CC Switch 3.19.4，修复 macOS 上从 ModelHub 切换回 OpenAI Official 时因系统工具路径错误导致的退出码 127，并继承 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口、ModelHub / OpenAI Official 系统路由切换、原生远程压缩、严格增量续接和 429 准入治理。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游，避免代理回环；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
+R19 基于 CC Switch 3.19.5，修复接管备份缺失时可能把本地 `127.0.0.1:15721` 当成上游而形成代理自循环的问题，并加上请求前自指检测。它同时修复 ModelHub encrypted reasoning 兼容清理：reasoning 与后续 function/custom tool call 及 output 保持依赖完整，只有清理后的兼容重试真正成功才会临时记忆不兼容会话，失败的 400/429 不会污染后续请求。R19 继承 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口、ModelHub / OpenAI Official 系统路由切换、原生远程压缩、严格增量续接和 429 准入治理。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R18 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R18 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R19 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R19 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R18 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R18 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；其中顶层 `model_provider = "modelhub"` 必须写入且只能出现一次，否则安装会失败并自动回滚，不会留下看似成功但实际无法联网的状态。输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R19 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R19 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；其中顶层 `model_provider = "modelhub"` 必须写入且只能出现一次，否则安装会失败并自动回滚，不会留下看似成功但实际无法联网的状态。输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
 
 Golden Codex 配置固定以下安装后状态：
 
@@ -69,11 +69,11 @@ Codex 已经运行时可能不会热更新这些设置或新的 catalog。安装
 
 点击目标供应商即可完成整套路由变更，不需要重新输入 ChatGPT 账号。切到 ModelHub 时，CC Switch 会开启 Codex 接管并把系统 managed config 的 Provider 与内置 OpenAI 地址同时指向本地路由，保证手机远程新建任务也进入 ModelHub；切到 `OpenAI Official` 时会移除这两个受管根键并关闭 Codex 接管，恢复官方直连。两种模式切换后都必须重启 Codex 并新建任务，界面提供“立即重启”；旧任务可能包含只能由原上游解密的 reasoning 内容。
 
-如果安装器进程已继承非空 `MODELHUB_AK`，R18 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
+如果安装器进程已继承非空 `MODELHUB_AK`，R19 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
 
 写入 `/Applications` 和 `/etc/codex` 等系统位置前，安装器会说明接下来需要输入当前 Mac 登录用户的管理员密码，而不是 `MODELHUB_AK`。密码输入时终端不会显示字符，输入完成后按回车；这和后续单独输入或复用的 ModelHub AK 是两类不同凭据。
 
-R18 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
+R19 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
 
 ```toml
 model_provider = "modelhub"
@@ -157,7 +157,7 @@ Provider 元数据承接全部 CC Switch ModelHub 兼容策略。这些字段在
 }
 ```
 
-R18 继承对真实 ModelHub 的三项协议验真：`store=true` 返回可续接的 `resp_...`，仅发送新输入和 `previous_response_id` 能恢复上一轮精确信息，`/responses/compact` 返回的完整 opaque compaction output 也能在下一轮恢复压缩前细节。CC Switch 因此仅在 Provider、会话、模型、稳定请求选项和完整历史前缀逐项匹配时发送增量；fork、并发请求、过期游标、重启或任意哈希不一致都自动发送完整历史。checkpoint 只保存在内存中，本地原始 transcript 不会删除。
+R19 继承对真实 ModelHub 的三项协议验真：`store=true` 返回可续接的 `resp_...`，仅发送新输入和 `previous_response_id` 能恢复上一轮精确信息，`/responses/compact` 返回的完整 opaque compaction output 也能在下一轮恢复压缩前细节。CC Switch 因此仅在 Provider、会话、模型、稳定请求选项和完整历史前缀逐项匹配时发送增量；fork、并发请求、过期游标、重启或任意哈希不一致都自动发送完整历史。checkpoint 只保存在内存中，本地原始 transcript 不会删除。
 
 `remote_compaction_v2` 交给 Codex 原生实现 compact 时机与 opaque output 延续，CC Switch 负责透明透传。ModelHub Provider 同时启用按 Provider + 模型隔离的 token 加权准入：估算达到 10 万输入 token 的请求独占四个并发槽，小请求占一个槽；`-2004` 容量不足最多恢复一次，标题、摘要与 Skill 选择等 helper 仍只请求一次。日志只记录 full/delta、估算 token、请求体字节数、排队耗时和 checkpoint 是否存在，不记录正文、会话 ID、response ID 或凭据。
 
@@ -165,7 +165,7 @@ R18 继承对真实 ModelHub 的三项协议验真：`store=true` 返回可续�
 
 `codexMetadataModel` 改写 Codex Desktop 固定的任务标题、任务描述、标题重考虑、语音标题，以及使用 `skill_selection` schema、developer/assistant/user 三段角色结构和完整有序 Skill 指令标记的动态 Skill 选择请求，也是活动摘要 `map` 模式的目标模型。主任务、标题和活动摘要 helper 都使用这一协议。普通 Luna、错误 schema、角色乱序或缺少稳定标记的结构化请求不匹配精确分类，仍按原路由转发。App 中关闭“内部元数据映射”会清除该字段；活动摘要处于 `map` 时必须提供非空目标模型。
 
-`rememberInvalidEncryptedReasoning` 在 ModelHub 精确返回 `invalid_encrypted_content` 后，按 Provider + 客户端会话在进程内记录不兼容状态。同会话后续请求会在第一次发送前删除 reasoning item 的 `encrypted_content`；含非空明文 `summary/content` 的 item 继续保留，只有密文且没有可用明文的 item 才整项删除。状态不写数据库，CC Switch 重启后自动清空；将该字段改为 `false` 可关闭学习与预清理。
+`rememberInvalidEncryptedReasoning` 只在 ModelHub 精确返回 `invalid_encrypted_content` 且清理后的兼容重试成功后，按 Provider + 客户端会话临时记录不兼容状态；清理后若得到 400、429 或其他失败，不会记录。同会话下一次请求会在第一次发送前删除 reasoning item 的 `encrypted_content`，请求成功后自动清除该提示并恢复原始历史探测。含非空明文 `summary/content` 的 reasoning 继续保留；即使明文为空，只要后续存在依赖它的 `function_call`、`custom_tool_call` 及对应 output，也会保留整个依赖组，避免产生孤儿调用。只有没有可见内容且没有工具依赖的 reasoning 才整项删除。状态不写数据库，CC Switch 重启后自动清空；将该字段改为 `false` 可关闭学习与预清理。
 
 作用域内仍使用 Luna、但未命中上述精确提示词或 Skill 选择协议的请求不会被 R14 自动映射。CC Switch 只记录一次脱敏的短指纹、input/user 数量和 schema 标志；日志不记录提示词、session/thread ID 或凭据。发布验收要求一个完整 Codex 回合中的有效 Skill 选择均映射到 Sol，未分类 Luna 与 ModelHub Luna 401 均为 0。
 

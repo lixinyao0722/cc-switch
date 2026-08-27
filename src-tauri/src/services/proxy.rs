@@ -775,6 +775,7 @@ impl ProxyService {
                 .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
 
             let mut restore_existing_backup_before_takeover = false;
+            let mut rebuild_missing_codex_backup_from_provider = false;
             if current_config.enabled {
                 let has_backup = match self.db.get_live_backup(app_type_str).await {
                     Ok(v) => v.is_some(),
@@ -799,6 +800,20 @@ impl ProxyService {
                     self.refresh_active_target_from_current_provider(app).await;
                     return Ok(());
                 }
+                if !has_backup && matches!(app, AppType::Codex) {
+                    rebuild_missing_codex_backup_from_provider = match self
+                        .codex_live_route_matches_current_proxy()
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(e) => {
+                            log::warn!(
+                                    "检测 Codex Live 本地代理地址失败（将继续按普通 Live 重建接管）: {e}"
+                                );
+                            false
+                        }
+                    };
+                }
                 restore_existing_backup_before_takeover = has_backup;
 
                 log::warn!(
@@ -809,6 +824,13 @@ impl ProxyService {
             // 3) 备份 Live 配置（严格：目标 app 不存在则报错）
             if restore_existing_backup_before_takeover {
                 self.restore_live_config_for_app_inner(app).await?;
+            } else if rebuild_missing_codex_backup_from_provider {
+                let provider = self.require_current_provider_for_app(app)?;
+                self.update_live_backup_from_provider_inner(app_type_str, &provider)
+                    .await?;
+                log::warn!(
+                    "Codex Live 已指向当前本地代理但缺少备份，已从当前 Provider 重建可恢复配置"
+                );
             } else {
                 self.backup_live_config_strict(app).await?;
 
@@ -2145,14 +2167,8 @@ impl ProxyService {
             }
             AppType::Codex => {
                 let config = self.read_codex_live()?;
-                let base_url_matches = config
-                    .get("config")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|config_text| {
-                        Self::codex_config_has_base_url_matching(config_text, |url| {
-                            Self::proxy_urls_match(url, &proxy_codex_base_url)
-                        })
-                    });
+                let base_url_matches =
+                    Self::codex_live_route_matches_proxy_url(&config, &proxy_codex_base_url);
                 Ok(Self::is_codex_live_taken_over(&config) && base_url_matches)
             }
             AppType::Gemini => {
@@ -2179,6 +2195,26 @@ impl ProxyService {
             }
             _ => Ok(false),
         }
+    }
+
+    async fn codex_live_route_matches_current_proxy(&self) -> Result<bool, String> {
+        let (_, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let config = self.read_codex_live()?;
+        Ok(Self::codex_live_route_matches_proxy_url(
+            &config,
+            &proxy_codex_base_url,
+        ))
+    }
+
+    fn codex_live_route_matches_proxy_url(config: &Value, proxy_codex_base_url: &str) -> bool {
+        config
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(|config_text| {
+                Self::codex_config_has_base_url_matching(config_text, |url| {
+                    Self::proxy_urls_match(url, proxy_codex_base_url)
+                })
+            })
     }
 
     fn cleanup_claude_takeover_placeholders_in_live(&self) -> Result<(), String> {
@@ -4942,6 +4978,164 @@ wire_api = "responses"
                 .is_some_and(|config| config.contains("deepseek-key")
                     && !config.contains("http://127.0.0.1")),
             "backup should remain the restorable DeepSeek config, not the proxy config"
+        );
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_set_takeover_rebuilds_missing_backup_from_provider_for_markerless_local_route() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        let modelhub_key = "modelhub-key";
+        let modelhub_upstream = "https://aidp.bytedance.net/api/modelhub/online";
+        let mut provider = Provider::with_id(
+            "bytedance-modelhub-official-cli".to_string(),
+            "Bytedance ModelHub - 官方CLI".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": modelhub_key
+                },
+                "config": format!(r#"model_provider = "modelhub"
+model = "gpt-5.6-sol"
+
+[model_providers.modelhub]
+name = "modelhub"
+base_url = "{modelhub_upstream}"
+wire_api = "responses"
+requires_openai_auth = true
+env_key = "MODELHUB_AK"
+"#)
+            }),
+            None,
+        );
+        provider.category = Some("third_party".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save ModelHub provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set local current provider");
+
+        service.start().await.expect("start proxy");
+        let local_proxy_url = running_codex_base_url(&service).await;
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let markerless_installer_config = format!(
+            r#"model_provider = "modelhub"
+model = "gpt-5.6-sol"
+
+[model_providers.modelhub]
+name = "modelhub"
+base_url = "{local_proxy_url}"
+wire_api = "responses"
+requires_openai_auth = true
+env_key = "MODELHUB_AK"
+"#
+        );
+        assert!(!markerless_installer_config.contains(PROXY_TOKEN_PLACEHOLDER));
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(&markerless_installer_config),
+        )
+        .expect("seed installer-style markerless local route");
+
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("get Codex proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Codex takeover enabled");
+        assert!(
+            db.get_live_backup("codex")
+                .await
+                .expect("read missing backup")
+                .is_none(),
+            "the installer database intentionally starts without a Live backup"
+        );
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("repair installer takeover state");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read rebuilt backup")
+            .expect("missing backup should be rebuilt from Provider SSOT");
+        let backup_value: Value =
+            serde_json::from_str(&backup.original_config).expect("parse rebuilt backup");
+        let backup_config = backup_value
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config");
+        assert!(
+            backup_config.contains(modelhub_upstream),
+            "rebuilt backup must use the real ModelHub upstream"
+        );
+        assert!(
+            !backup_config.contains("127.0.0.1") && !backup_config.contains("localhost"),
+            "rebuilt backup must never point back to the local proxy"
+        );
+        assert_eq!(
+            crate::codex_config::extract_codex_experimental_bearer_token(backup_config).as_deref(),
+            Some(modelhub_key),
+            "rebuilt backup must retain a recoverable ModelHub API key"
+        );
+
+        let stored_provider = db
+            .get_provider_by_id(&provider.id, "codex")
+            .expect("read ModelHub provider")
+            .expect("ModelHub provider exists");
+        assert!(
+            stored_provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(
+                    |config| config.contains(modelhub_upstream) && !config.contains("127.0.0.1")
+                ),
+            "repair must not overwrite the Provider SSOT with the local proxy route"
+        );
+        assert_eq!(
+            stored_provider
+                .settings_config
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some(modelhub_key),
+            "repair must not blank the ModelHub API key"
+        );
+
+        let live = service
+            .read_codex_live()
+            .expect("read repaired Live config");
+        let live_config = live
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("live config");
+        assert!(
+            live_config.contains(&local_proxy_url),
+            "Live must remain routed through the local proxy"
         );
 
         service
