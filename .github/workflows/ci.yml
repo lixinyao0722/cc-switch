@@ -244,6 +244,8 @@ jobs:
           if ($testList -notcontains $expected) {
             throw "Expected ignored test was not discovered: $testName"
           }
+          $env:TEMP = $env:CC_SWITCH_WSL_TEST_TEMP
+          $env:TMP = $env:CC_SWITCH_WSL_TEST_TEMP
           & $env:CC_SWITCH_TEST_EXE $testName --ignored --exact --nocapture
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
