@@ -297,12 +297,16 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 18. Session Log Sync 表 (会话日志同步状态)
+        //
+        // last_byte_offset：Claude 路径的字节游标（seek 增量读）；NULL 表示
+        // 尚无字节游标（旧行号游标或非 Claude 路径行），此时回退全量读。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER
             )",
             [],
         )
@@ -535,6 +539,11 @@ impl Database {
                         log::info!("迁移数据库从 v16 到 v17（添加会话用量持久去重账本）");
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（会话日志字节游标列）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1561,7 +1570,20 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
-        .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))?;
+        .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))
+    }
+
+    /// v17 -> v18: Claude 会话日志的字节游标列。
+    ///
+    /// 独立成版而非搭 v17 车：v17 已在开发库上执行过（迁移不会重跑，
+    /// `CREATE TABLE IF NOT EXISTS` 也不补列），追加进 v17 会让这些库
+    /// 永远缺列。存量行保持 NULL，首轮扫描按旧行号游标转换为字节位置
+    /// 后继续增量；之后写入字节偏移走 seek 增量。
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        // 缺表的库（异常/测试夹具）跳过：create_tables 会以含列的新 DDL 建表。
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+        }
         Ok(())
     }
 
@@ -3407,6 +3429,39 @@ mod tests {
              VALUES ('pi_session', 'request', 'semantic', 1)",
             [],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_adds_byte_cursor_to_existing_sync_table() -> Result<(), AppError> {
+        // 真实升级路径：v17 库带旧 DDL 的 session_log_sync（无字节游标列，
+        // 字节游标曾短暂搭 v17 车、已执行过 v17 的开发库正是这个形状）
+        // 与存量游标行，迁移后列补上、存量行保持 NULL（首轮按行号转换）
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+             );
+             INSERT INTO session_log_sync VALUES ('/tmp/a.jsonl', 5, 3, 1);",
+        )?;
+        Database::set_user_version(&conn, 17)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_byte_offset"
+        )?);
+        let byte_offset: Option<i64> = conn.query_row(
+            "SELECT last_byte_offset FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(byte_offset, None, "存量行的字节游标必须为 NULL");
         Ok(())
     }
 }
