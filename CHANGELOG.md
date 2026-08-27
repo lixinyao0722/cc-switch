@@ -5,6 +5,10 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.19.4] - 2026-08-27
+
+- **ModelHub R18 macOS Official Route Switching Hotfix**: Switching from ModelHub back to OpenAI Official no longer fails with exit code 127. The privileged route script now uses the macOS system locations `/bin/test` and `/bin/rmdir` instead of nonexistent `/usr/bin` paths, with regression coverage that executes both tools directly.
+
 ## [3.19.3] - 2026-08-27
 
 - **ModelHub R17 One-click Routing**: ModelHub and OpenAI Official now switch as complete system routes. The app atomically updates the R14 managed routing keys, preserves unrelated policy and ChatGPT OAuth, enables Codex takeover for ModelHub, restores direct routing for Official, and asks the user to restart Codex before creating a new task.
