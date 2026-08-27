@@ -4927,6 +4927,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modelhub_cross_resource_then_invalid_encrypted_content_chains_compat_retries() {
+        let received_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received_bodies_for_route = received_bodies.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_bodies = received_bodies_for_route.clone();
+                async move {
+                    let input = body
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .expect("request input");
+                    let has_resource_bound_id =
+                        input.iter().any(|item| item.get("id").is_some());
+                    let has_encrypted_reasoning = input.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("reasoning")
+                            && item.get("encrypted_content").is_some()
+                    });
+                    received_bodies
+                        .lock()
+                        .expect("request body lock")
+                        .push(body);
+
+                    if has_resource_bound_id {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.",
+                                    "type": "invalid_request_error",
+                                    "code": "-4003"
+                                }
+                            })),
+                        )
+                    } else if has_encrypted_reasoning {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "code: invalid_encrypted_content; message: The encrypted content for item rs_parent could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+                                    "type": "invalid_request_error",
+                                    "code": "-4003"
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "id": "resp_child",
+                                "object": "response",
+                                "status": "completed",
+                                "output": []
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_parent",
+                    "summary": [{"type": "summary_text", "text": "parent reasoning"}],
+                    "encrypted_content": "stale-parent-ciphertext"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_item",
+                    "call_id": "call_parent",
+                    "name": "exec",
+                    "input": "echo ok"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "ctco_item",
+                    "call_id": "call_parent",
+                    "output": "ok"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_child",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue the side task"}]
+                }
+            ]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "side-task-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "side-task-thread".parse().unwrap(),
+            ),
+        ]);
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "side-task-session".to_string();
+        forwarder.session_client_provided = true;
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "chained ModelHub compatibility retries should recover: {}",
+                    failure.error
+                )
+            });
+        server.abort();
+
+        assert_eq!(result.response.status(), StatusCode::OK);
+        let bodies = received_bodies.lock().expect("request body lock");
+        assert_eq!(bodies.len(), 3);
+
+        let first_input = bodies[0]["input"].as_array().expect("first input");
+        assert!(first_input.iter().all(|item| item.get("id").is_some()));
+        assert!(first_input
+            .iter()
+            .any(|item| item.get("encrypted_content").is_some()));
+
+        let detached_input = bodies[1]["input"].as_array().expect("detached input");
+        assert!(detached_input
+            .iter()
+            .all(|item| item.get("id").is_none()));
+        assert!(detached_input
+            .iter()
+            .any(|item| item.get("encrypted_content").is_some()));
+
+        let sanitized_input = bodies[2]["input"].as_array().expect("sanitized input");
+        assert!(sanitized_input
+            .iter()
+            .all(|item| item.get("id").is_none()));
+        assert!(sanitized_input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none()));
+        assert_eq!(sanitized_input[1]["call_id"], "call_parent");
+        assert_eq!(sanitized_input[2]["call_id"], "call_parent");
+    }
+
+    #[tokio::test]
     async fn modelhub_similar_bad_request_does_not_retry_without_resource_bound_item_ids() {
         let received_requests = Arc::new(AtomicUsize::new(0));
         let received_requests_for_route = received_requests.clone();
