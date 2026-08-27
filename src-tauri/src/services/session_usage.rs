@@ -224,6 +224,14 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
                     log::warn!("[SESSION-SYNC] {msg}");
                     result.errors.push(msg);
                 }
+                if let Some(reason) = file_sync.pinned_rewrite {
+                    // 永久跳过（防已剪明细双算），不会有下轮重试——须让
+                    // 手动同步的用户看到，不能显示为无事发生的成功
+                    result.errors.push(format!(
+                        "{}: 检测到文件被外部{reason}，改写区间已跳过以防重复计数（不会再导入）",
+                        file_path.display()
+                    ));
+                }
             }
             Err(e) => {
                 let msg = format!("{}: {e}", file_path.display());
@@ -329,6 +337,10 @@ struct ClaudeFileSync {
     /// 续读，但必须向上层报告：手动同步没有"下一轮"，静默返回会让用户
     /// 把未读完的文件当成同步成功。
     read_error: Option<String>,
+    /// 检测到外部截断/重写、游标已钉至当前 EOF（值为原因描述）。旧区间
+    /// 被永久跳过以防已剪明细双算——这不是 deferred（下轮不会重试），
+    /// 必须走 errors 上报让用户知道发生了不可恢复的跳过。
+    pinned_rewrite: Option<&'static str>,
 }
 
 /// 游标边界指纹覆盖的尾部字节数（与 Pi 的 `REVISION_TAIL_BYTES` 同值）。
@@ -445,7 +457,10 @@ fn sync_single_file(
                     file_size,
                     Some(fingerprint),
                 )?;
-                return Ok(ClaudeFileSync::default());
+                return Ok(ClaudeFileSync {
+                    pinned_rewrite: Some(reason),
+                    ..Default::default()
+                });
             }
             (offset, 0, seed.unwrap_or_default())
         }
@@ -673,6 +688,7 @@ fn sync_single_file(
         skipped,
         incomplete_tail,
         read_error,
+        pinned_rewrite: None,
     })
 }
 
@@ -1317,6 +1333,11 @@ mod tests {
             (0, 0),
             "截断后不重放任何旧区间"
         );
+        assert_eq!(
+            rescan.pinned_rewrite,
+            Some("截断"),
+            "永久跳过必须上报，不得静默成功"
+        );
         let size = fs::metadata(&file).unwrap().len() as i64;
         assert_eq!(byte_cursor(&db, &file), Some(size), "游标钉在当前 EOF");
         {
@@ -1365,6 +1386,11 @@ mod tests {
             (rescan.imported, rescan.skipped),
             (0, 0),
             "指纹失配后不重放重写内容"
+        );
+        assert_eq!(
+            rescan.pinned_rewrite,
+            Some("重写"),
+            "永久跳过必须上报，不得静默成功"
         );
         {
             let conn = lock_conn!(db.conn);
