@@ -1270,7 +1270,7 @@ impl ProxyService {
             if let Err(e) = self.takeover_live_config_strict(app).await {
                 log::error!("{app_type_str} 接管 Live 配置失败，尝试恢复: {e}");
                 match self
-                    .rollback_failed_takeover_activation(&app, codex_live_before_takeover.as_ref())
+                    .rollback_failed_takeover_activation(app, codex_live_before_takeover.as_ref())
                     .await
                 {
                     Ok(()) => {
@@ -1310,7 +1310,7 @@ impl ProxyService {
             if let Err(error) = enable_result {
                 log::error!("{app_type_str} 提交接管状态失败，尝试恢复 Live: {error}");
                 match self
-                    .rollback_failed_takeover_activation(&app, codex_live_before_takeover.as_ref())
+                    .rollback_failed_takeover_activation(app, codex_live_before_takeover.as_ref())
                     .await
                 {
                     Ok(()) => {
