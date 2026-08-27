@@ -3151,6 +3151,15 @@ fn set_codex_experimental_bearer_token_with_policy(
             && provider_table.get("aws").is_none()
             && !table_declares_authorization_header(provider_table.get("http_headers"))
             && !table_declares_authorization_header(provider_table.get("env_http_headers"));
+        if only_env_key_short_circuit {
+            // A takeover backup must be self-contained. Codex resolves
+            // env_key before experimental_bearer_token, so retaining the
+            // environment lookup would make the embedded token unreachable
+            // after a restart where the variable is absent.
+            provider_table.remove("env_key");
+            provider_table.insert("experimental_bearer_token", toml_edit::value(token));
+            return Ok(doc.to_string());
+        }
         if codex_provider_table_declares_auth(&*provider_table) && !only_env_key_short_circuit {
             return Ok(config_text.to_string());
         }
@@ -4898,6 +4907,36 @@ http_headers = { x-api-version = "2026-01-01" }
         assert!(
             output.contains("experimental_bearer_token = \"sk-test\""),
             "plain http_headers without Authorization must not suppress injection; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn backup_bearer_token_replaces_env_key_for_self_contained_restore() {
+        let input = r#"model_provider = "modelhub"
+
+[model_providers.modelhub]
+name = "ModelHub"
+base_url = "https://modelhub.example/v1"
+env_key = "MODELHUB_AK"
+"#;
+
+        let output = set_codex_backup_bearer_token(input, "backup-secret")
+            .expect("prepare self-contained backup config");
+        let parsed: toml::Value = toml::from_str(&output).expect("parse backup config");
+        let provider = parsed
+            .get("model_providers")
+            .and_then(|value| value.get("modelhub"))
+            .expect("modelhub provider table");
+
+        assert!(
+            provider.get("env_key").is_none(),
+            "backup must not retain an env lookup that outranks its bearer: {output}"
+        );
+        assert_eq!(
+            provider
+                .get("experimental_bearer_token")
+                .and_then(|value| value.as_str()),
+            Some("backup-secret")
         );
     }
 

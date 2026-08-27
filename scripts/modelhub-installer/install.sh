@@ -7,9 +7,9 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260827-r21'
+readonly RELEASE_TAG='modelhub-installer-20260828-r22'
 readonly INSTALLER_ASSET='install.sh'
-readonly APP_ASSET='CC-Switch-ModelHub-3.19.5-arm64.app.zip'
+readonly APP_ASSET='CC-Switch-ModelHub-3.20.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
@@ -1016,7 +1016,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R21 context-window contract'
+    die 'ModelHub model catalog does not match the R22 context-window contract'
     return 1
   fi
 }
@@ -1170,8 +1170,10 @@ validate_golden_database() {
   fi
   [[ "$(golden_sqlite_scalar "$database" 'PRAGMA integrity_check;')" == 'ok' ]] \
     || { die 'golden CC Switch database integrity check failed'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '16' ]] \
-    || { die 'golden CC Switch database schema version is not 16'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '17' ]] \
+    || { die 'golden CC Switch database schema version is not 17'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
+    || { die 'golden CC Switch database is missing session_usage_dedup'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
     || { die 'golden CC Switch database must contain ModelHub and OpenAI Official'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND is_current=1;")" == '1' ]] \
@@ -1185,7 +1187,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 600000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R21 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R22 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1195,7 +1197,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.checkpointTtlSeconds')=21600 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.largeRequestTokens')=100000 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.concurrency')=4;")" == '1' ]] \
-    || { die 'golden CC Switch provider R21 context policy is invalid'; return 1; }
+    || { die 'golden CC Switch provider R22 context policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -2966,9 +2968,9 @@ choose_codex_config_install_mode() {
       fi
     else
       if [[ "$requires_explicit_overwrite" == "1" ]]; then
-        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R21 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R22 标准配置完整覆盖？[y/N] ' >/dev/tty
       else
-        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R21 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R22 标准配置完整覆盖？[y/N] ' >/dev/tty
       fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
@@ -4185,7 +4187,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R21 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R22 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
