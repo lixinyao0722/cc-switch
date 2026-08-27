@@ -5018,12 +5018,10 @@ mod tests {
             .local_proxy_request_overrides
             .as_mut()
             .expect("ModelHub overrides");
-        overrides.context_optimization = Some(
-            crate::provider::ModelhubContextOptimizationConfig {
-                enabled: true,
-                checkpoint_ttl_seconds: 3600,
-            },
-        );
+        overrides.context_optimization = Some(crate::provider::ModelhubContextOptimizationConfig {
+            enabled: true,
+            checkpoint_ttl_seconds: 3600,
+        });
         overrides.admission_control = Some(crate::provider::ModelhubAdmissionConfig {
             enabled: true,
             large_request_tokens: 1,
