@@ -1089,6 +1089,12 @@ impl RequestForwarder {
                                     if super::modelhub_compat::is_invalid_encrypted_content_error(
                                         &retry_err,
                                     ) {
+                                        retry_attempt.admission_permit.take();
+                                        if let Some(pending) = retry_attempt.checkpoint.take() {
+                                            self.modelhub_context
+                                                .release_without_update(pending)
+                                                .await;
+                                        }
                                         log::warn!(
                                             "[{app_type_str}] [ModelHubCompat] resource-detached item retry exposed invalid encrypted reasoning; continuing with encrypted reasoning fallback"
                                         );
