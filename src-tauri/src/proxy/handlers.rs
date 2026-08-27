@@ -221,6 +221,7 @@ async fn handle_messages_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let api_format = result
@@ -496,6 +497,7 @@ async fn handle_claude_transform(
             sse_stream,
             "Claude/OpenRouter",
             usage_collector,
+            None,
             timeout_config,
             connection_guard,
         );
@@ -849,6 +851,7 @@ async fn handle_responses_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -984,6 +987,7 @@ async fn handle_responses_compact_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.modelhub_checkpoint = result.modelhub_checkpoint.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -1080,6 +1084,7 @@ async fn handle_codex_responses_namespace_restore(
             restore_stream,
             ctx.tag,
             usage_collector,
+            None,
             ctx.streaming_timeout_config(),
             connection_guard,
         );
@@ -1273,6 +1278,7 @@ async fn handle_codex_chat_to_responses_transform(
             sse_stream,
             ctx.tag,
             usage_collector,
+            None,
             ctx.streaming_timeout_config(),
             connection_guard,
         );
@@ -1646,6 +1652,7 @@ fn build_codex_anthropic_sse_response(
         sse_stream,
         ctx.tag,
         usage_collector,
+        None,
         ctx.streaming_timeout_config(),
         connection_guard,
     );

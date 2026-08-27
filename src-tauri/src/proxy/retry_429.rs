@@ -259,7 +259,7 @@ where
     let Some(config) = config else {
         return send().await;
     };
-    let max_retries = config.max_retries.min(MAX_SAME_PROVIDER_RETRIES);
+    let configured_max_retries = config.max_retries.min(MAX_SAME_PROVIDER_RETRIES);
     let mut retry_number = 0_u8;
 
     loop {
@@ -282,6 +282,14 @@ where
         }
 
         let retry_after = response.headers().get(http::header::RETRY_AFTER).cloned();
+        let response_headers = response.headers().clone();
+        let response_body = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+        let capacity_limited = is_modelhub_capacity_error(&response_body);
+        let max_retries = if capacity_limited {
+            configured_max_retries.min(1)
+        } else {
+            configured_max_retries
+        };
         let next_retry_number = retry_number.saturating_add(1);
         let delay =
             randomized_retry_delay(config, next_retry_number, retry_after.as_ref(), Utc::now());
@@ -290,23 +298,28 @@ where
         }
         probe_cleanup.disarm();
         if retry_number >= max_retries {
-            return Ok(response);
+            return Ok(ProxyResponse::buffered(
+                http::StatusCode::TOO_MANY_REQUESTS,
+                response_headers,
+                response_body,
+            ));
         }
 
         retry_number = next_retry_number;
-        if let Err(error) = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await {
-            log::debug!(
-                "[Retry429] failed to drain intermediate 429 response before retry: {error}"
-            );
-        }
         log::warn!(
-            "[Retry429] retrying same provider after HTTP 429 ({retry_number}/{max_retries}, delay_ms={})",
+            "[Retry429] retrying same provider after HTTP 429 ({retry_number}/{max_retries}, delay_ms={}, capacity_limited={capacity_limited})",
             delay.as_millis()
         );
         if scope.is_none() && !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
     }
+}
+
+fn is_modelhub_capacity_error(body: &[u8]) -> bool {
+    std::str::from_utf8(body)
+        .ok()
+        .is_some_and(|text| text.contains("-2004") || text.contains("业务申请资源不足"))
 }
 
 fn parse_retry_after(value: &HeaderValue, now: DateTime<Utc>) -> Option<Duration> {
@@ -538,6 +551,65 @@ mod tests {
                     StatusCode::TOO_MANY_REQUESTS,
                     headers,
                     Bytes::from_static(b"rate limited"),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn modelhub_capacity_429_is_retried_at_most_once() {
+        let attempts = Arc::new(Mutex::new(0_u8));
+        let attempts_for_send = attempts.clone();
+        let config = Retry429Config {
+            max_retries: 5,
+            ..config()
+        };
+
+        let response = send_with_retry_429(Some(&config), None, || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                *attempts.lock().unwrap() += 1;
+                let mut headers = HeaderMap::new();
+                headers.insert("retry-after", "0".parse().unwrap());
+                Ok(ProxyResponse::buffered(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    headers,
+                    Bytes::from(
+                        r#"{"error":{"code":"-2004","message":"业务申请资源不足，平台申请扩容"}}"#
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                ))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn non_capacity_429_still_uses_configured_retry_budget() {
+        let attempts = Arc::new(Mutex::new(0_u8));
+        let attempts_for_send = attempts.clone();
+        let config = Retry429Config {
+            max_retries: 2,
+            ..config()
+        };
+        let response = send_with_retry_429(Some(&config), None, || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                *attempts.lock().unwrap() += 1;
+                Ok(ProxyResponse::buffered(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    HeaderMap::new(),
+                    Bytes::from_static(br#"{"error":{"code":"rate_limit"}}"#),
                 ))
             }
         })

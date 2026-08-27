@@ -164,6 +164,27 @@ INSERT INTO providers (
   0,
   NULL
 );
+INSERT INTO providers (
+  id, app_type, name, settings_config, website_url, category, created_at,
+  sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue,
+  provider_type
+) VALUES (
+  'codex-official',
+  'codex',
+  'OpenAI Official',
+  json_object('auth', json('{}'), 'config', ''),
+  'https://chatgpt.com/codex',
+  'official',
+  0,
+  1,
+  'ChatGPT Plus/Pro official Codex subscription',
+  'openai',
+  '#00A67E',
+  '{}',
+  0,
+  0,
+  NULL
+);
 INSERT INTO proxy_config (app_type, created_at, updated_at)
 VALUES
   ('claude', '1970-01-01 00:00:00', '1970-01-01 00:00:00'),
@@ -198,13 +219,15 @@ SQL
   [[ "$integrity" == 'ok' ]] || { die 'golden database integrity check failed'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA user_version;')" == '16' ]] \
     || { die 'golden database user_version is not 16'; return 1; }
-  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'SELECT count(*) FROM providers;')" == '1' ]] \
-    || { die 'golden database must contain exactly one provider'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
+    || { die 'golden database must contain ModelHub and OpenAI Official'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE id='codex-official' AND app_type='codex' AND category='official' AND is_current=0 AND settings_config=json_object('auth', json('{}'), 'config', '');")" == '1' ]] \
+    || { die 'golden database official Codex provider is invalid'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM proxy_request_logs")" == '0' ]] \
     || { die 'golden database contains request history'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM proxy_live_backup")" == '0' ]] \
     || { die 'golden database contains a live backup'; return 1; }
-  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers")" == '0' ]] \
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli'")" == '0' ]] \
     || { die 'golden provider points to the local proxy'; return 1; }
 
   raw_strings="$(/usr/bin/strings "$staged_db")"

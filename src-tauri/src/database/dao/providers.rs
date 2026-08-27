@@ -288,6 +288,16 @@ impl Database {
     }
 
     pub fn set_current_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
+        self.restore_current_provider(app_type, Some(id))
+    }
+
+    /// Restore the exact current-provider state, including the absence of a
+    /// current provider. Used by higher-level switch transactions.
+    pub(crate) fn restore_current_provider(
+        &self,
+        app_type: &str,
+        id: Option<&str>,
+    ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -299,11 +309,19 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        tx.execute(
-            "UPDATE providers SET is_current = 1 WHERE id = ?1 AND app_type = ?2",
-            params![id, app_type],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        if let Some(id) = id {
+            let updated = tx
+                .execute(
+                    "UPDATE providers SET is_current = 1 WHERE id = ?1 AND app_type = ?2",
+                    params![id, app_type],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            if updated != 1 {
+                return Err(AppError::Database(format!(
+                    "Failed to restore current provider: provider '{id}' not found in app '{app_type}'"
+                )));
+            }
+        }
 
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())

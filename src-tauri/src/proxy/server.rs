@@ -54,6 +54,10 @@ pub struct ProxyState {
     pub modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Provider-scoped ModelHub HTTP 429 cooldown and recovery-probe state.
     pub modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
+    /// Fail-closed ModelHub Responses checkpoints. Memory-only by design.
+    pub modelhub_context: Arc<super::modelhub_context::ModelhubContextStore>,
+    /// Provider/model scoped token-weighted admission gates.
+    pub modelhub_admission: Arc<super::modelhub_context::ModelhubAdmissionController>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -99,6 +103,10 @@ impl ProxyServer {
                 std::collections::HashSet::new(),
             )),
             modelhub_429_cooldown: Arc::new(super::retry_429::Provider429Cooldown::default()),
+            modelhub_context: Arc::new(super::modelhub_context::ModelhubContextStore::default()),
+            modelhub_admission: Arc::new(
+                super::modelhub_context::ModelhubAdmissionController::default(),
+            ),
             app_handle,
             failover_manager,
         };

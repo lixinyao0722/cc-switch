@@ -429,6 +429,23 @@ pub struct Retry429Config {
     pub honor_retry_after: bool,
 }
 
+/// Provider-scoped request admission policy for large ModelHub prompts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelhubAdmissionConfig {
+    pub enabled: bool,
+    pub large_request_tokens: u64,
+    pub concurrency: u32,
+}
+
+/// Provider-scoped native Responses state reuse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelhubContextOptimizationConfig {
+    pub enabled: bool,
+    pub checkpoint_ttl_seconds: u64,
+}
+
 /// Local proxy request overrides applied after route/protocol transforms.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct LocalProxyRequestOverrides {
@@ -443,6 +460,13 @@ pub struct LocalProxyRequestOverrides {
     pub codex_session_header_adapter: Option<CodexSessionHeaderAdapter>,
     #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
     pub retry_429: Option<Retry429Config>,
+    #[serde(rename = "admissionControl", skip_serializing_if = "Option::is_none")]
+    pub admission_control: Option<ModelhubAdmissionConfig>,
+    #[serde(
+        rename = "contextOptimization",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_optimization: Option<ModelhubContextOptimizationConfig>,
     #[serde(
         rename = "codexActivitySummaryMode",
         skip_serializing_if = "Option::is_none"
@@ -468,6 +492,8 @@ impl LocalProxyRequestOverrides {
             && self.body.is_none()
             && self.codex_session_header_adapter.is_none()
             && self.retry_429.is_none()
+            && self.admission_control.is_none()
+            && self.context_optimization.is_none()
             && self.codex_activity_summary_mode.is_none()
             && self.block_codex_activity_summaries.is_none()
             && self.codex_metadata_model.is_none()
@@ -1053,8 +1079,9 @@ pub struct OpenCodeModelLimit {
 mod tests {
     use super::{
         ClaudeModelConfig, CodexActivitySummaryMode, CodexModelConfig, CodexSessionHeaderAdapter,
-        GeminiModelConfig, LocalProxyRequestOverrides, OpenCodeProviderConfig, Provider,
-        ProviderManager, ProviderMeta, Retry429Config, UniversalProvider,
+        GeminiModelConfig, LocalProxyRequestOverrides, ModelhubAdmissionConfig,
+        ModelhubContextOptimizationConfig, OpenCodeProviderConfig, Provider, ProviderManager,
+        ProviderMeta, Retry429Config, UniversalProvider,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1149,6 +1176,15 @@ mod tests {
                 max_delay_ms: 30_000,
                 honor_retry_after: true,
             }),
+            admission_control: Some(ModelhubAdmissionConfig {
+                enabled: true,
+                large_request_tokens: 100_000,
+                concurrency: 4,
+            }),
+            context_optimization: Some(ModelhubContextOptimizationConfig {
+                enabled: true,
+                checkpoint_ttl_seconds: 21_600,
+            }),
             block_codex_activity_summaries: Some(true),
             codex_activity_summary_mode: Some(CodexActivitySummaryMode::Map),
             codex_metadata_model: Some("gpt-5.6-sol".to_string()),
@@ -1174,6 +1210,15 @@ mod tests {
                     "baseDelayMs": 1000,
                     "maxDelayMs": 30000,
                     "honorRetryAfter": true
+                },
+                "admissionControl": {
+                    "enabled": true,
+                    "largeRequestTokens": 100000,
+                    "concurrency": 4
+                },
+                "contextOptimization": {
+                    "enabled": true,
+                    "checkpointTtlSeconds": 21600
                 }
             })
         );

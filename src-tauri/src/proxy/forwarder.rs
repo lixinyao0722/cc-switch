@@ -115,6 +115,44 @@ fn modelhub_retry_429_scope(
     ))
 }
 
+fn is_invalid_previous_response_error(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError {
+        status: 400 | 404,
+        body: Some(body),
+    } = error
+    else {
+        return false;
+    };
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("previous_response_id")
+        || normalized.contains("previous response")
+        || normalized.contains("response not found")
+}
+
+fn is_invalid_previous_response_body(body: &[u8]) -> bool {
+    std::str::from_utf8(body).ok().is_some_and(|body| {
+        let normalized = body.to_ascii_lowercase();
+        normalized.contains("previous_response_id")
+            || normalized.contains("previous response")
+            || normalized.contains("response not found")
+    })
+}
+
+#[cfg(test)]
+mod previous_response_tests {
+    use super::*;
+
+    #[test]
+    fn detects_only_cursor_related_error_payloads() {
+        assert!(is_invalid_previous_response_body(
+            br#"{"error":{"message":"previous_response_id was not found"}}"#
+        ));
+        assert!(!is_invalid_previous_response_body(
+            br#"{"error":{"message":"invalid tool schema"}}"#
+        ));
+    }
+}
+
 #[cfg(test)]
 fn should_block_modelhub_activity_summary(
     app_type: &AppType,
@@ -189,11 +227,21 @@ pub struct ForwardResult {
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
+    /// ModelHub checkpoint candidate completed by the response processor.
+    pub(crate) modelhub_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    pub(crate) modelhub_admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub struct ForwardError {
     pub error: ProxyError,
     pub provider: Option<Provider>,
+}
+
+#[derive(Default)]
+struct ModelhubAttemptState {
+    checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    mode: super::modelhub_context::ContextMode,
 }
 
 /// 活跃连接 RAII guard
@@ -208,6 +256,7 @@ pub struct ForwardError {
 /// 不需要每条出口路径都手动调用。
 pub(crate) struct ActiveConnectionGuard {
     status: Arc<RwLock<ProxyStatus>>,
+    _modelhub_admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ActiveConnectionGuard {
@@ -216,7 +265,14 @@ impl ActiveConnectionGuard {
             let mut s = status.write().await;
             s.active_connections = s.active_connections.saturating_add(1);
         }
-        Self { status }
+        Self {
+            status,
+            _modelhub_admission_permit: None,
+        }
+    }
+
+    fn hold_modelhub_admission(&mut self, permit: Option<tokio::sync::OwnedSemaphorePermit>) {
+        self._modelhub_admission_permit = permit;
     }
 }
 
@@ -246,6 +302,8 @@ pub struct RequestForwarder {
         Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
     modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
     modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
+    modelhub_context: Arc<super::modelhub_context::ModelhubContextStore>,
+    modelhub_admission: Arc<super::modelhub_context::ModelhubAdmissionController>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -336,6 +394,8 @@ impl RequestForwarder {
         >,
         modelhub_unclassified_luna_fingerprints: Arc<RwLock<std::collections::HashSet<String>>>,
         modelhub_429_cooldown: Arc<super::retry_429::Provider429Cooldown>,
+        modelhub_context: Arc<super::modelhub_context::ModelhubContextStore>,
+        modelhub_admission: Arc<super::modelhub_context::ModelhubAdmissionController>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -361,6 +421,8 @@ impl RequestForwarder {
             modelhub_activity_summary_dedup,
             modelhub_unclassified_luna_fingerprints,
             modelhub_429_cooldown,
+            modelhub_context,
+            modelhub_admission,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -574,7 +636,7 @@ impl RequestForwarder {
         extensions: Extensions,
         providers: Vec<Provider>,
     ) -> Result<ForwardResult, ForwardError> {
-        let guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
+        let mut guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
         {
             let mut s = self.status.write().await;
             s.total_requests = s.total_requests.saturating_add(1);
@@ -589,6 +651,7 @@ impl RequestForwarder {
         // 在流式 body 的 future 内才真正 drop。
         // Err 路径：guard 在函数 scope 内随返回值落地时自动 drop。
         result.map(|mut fr| {
+            guard.hold_modelhub_admission(fr.modelhub_admission_permit.take());
             fr.connection_guard = Some(guard);
             fr
         })
@@ -716,6 +779,9 @@ impl RequestForwarder {
                 status.current_provider_id = Some(provider.id.clone());
             }
 
+            let original_provider_body = provider_body.clone();
+            let mut modelhub_attempt = ModelhubAttemptState::default();
+
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
             match self
                 .forward(
@@ -727,10 +793,73 @@ impl RequestForwarder {
                     &headers,
                     &extensions,
                     adapter.as_ref(),
+                    &mut modelhub_attempt,
                 )
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
+                    if modelhub_attempt.mode == super::modelhub_context::ContextMode::Delta
+                        && matches!(response.status().as_u16(), 400 | 404)
+                    {
+                        let status = response.status();
+                        let response_headers = response.headers().clone();
+                        let response_body = response
+                            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                            .await
+                            .map_err(|error| ForwardError {
+                                error,
+                                provider: Some(provider.clone()),
+                            })?;
+                        if is_invalid_previous_response_body(&response_body) {
+                            if let Some(pending) = modelhub_attempt.checkpoint.take() {
+                                self.modelhub_context.invalidate(pending).await;
+                            }
+                            modelhub_attempt.admission_permit.take();
+                            log::warn!(
+                                "[ModelHubContext] invalid cursor response; retrying once with full history"
+                            );
+                            let mut retry_attempt = ModelhubAttemptState::default();
+                            let (response, claude_api_format, outbound_model) = self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &original_provider_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                    &mut retry_attempt,
+                                )
+                                .await
+                                .map_err(|error| ForwardError {
+                                    error,
+                                    provider: Some(provider.clone()),
+                                })?;
+                            return Ok(ForwardResult {
+                                response,
+                                provider: provider.clone(),
+                                claude_api_format,
+                                outbound_model,
+                                connection_guard: None,
+                                modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                modelhub_admission_permit: retry_attempt.admission_permit.take(),
+                            });
+                        }
+                        return Ok(ForwardResult {
+                            response: ProxyResponse::buffered(
+                                status,
+                                response_headers,
+                                response_body,
+                            ),
+                            provider: provider.clone(),
+                            claude_api_format,
+                            outbound_model,
+                            connection_guard: None,
+                            modelhub_checkpoint: modelhub_attempt.checkpoint.take(),
+                            modelhub_admission_permit: modelhub_attempt.admission_permit.take(),
+                        });
+                    }
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
@@ -780,9 +909,52 @@ impl RequestForwarder {
                         claude_api_format,
                         outbound_model,
                         connection_guard: None,
+                        modelhub_checkpoint: modelhub_attempt.checkpoint.take(),
+                        modelhub_admission_permit: modelhub_attempt.admission_permit.take(),
                     });
                 }
                 Err(e) => {
+                    // The first attempt is finished. Release its admission permit
+                    // before any same-provider fallback prepares and queues a new
+                    // final outbound body; large requests otherwise self-deadlock
+                    // while holding the gate's full capacity.
+                    modelhub_attempt.admission_permit.take();
+                    if let Some(pending) = modelhub_attempt.checkpoint.take() {
+                        if modelhub_attempt.mode == super::modelhub_context::ContextMode::Delta
+                            && super::modelhub_context::ModelhubContextStore::response_belongs_to_provider(&pending, provider)
+                            && is_invalid_previous_response_error(&e)
+                        {
+                            self.modelhub_context.invalidate(pending).await;
+                            log::warn!("[ModelHubContext] invalid cursor; retrying once with full history");
+                            let mut retry_attempt = ModelhubAttemptState::default();
+                            if let Ok((response, claude_api_format, outbound_model)) = self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &original_provider_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                    &mut retry_attempt,
+                                )
+                                .await
+                            {
+                                return Ok(ForwardResult {
+                                    response,
+                                    provider: provider.clone(),
+                                    claude_api_format,
+                                    outbound_model,
+                                    connection_guard: None,
+                                    modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                    modelhub_admission_permit: retry_attempt.admission_permit.take(),
+                                });
+                            }
+                        } else {
+                            self.modelhub_context.invalidate(pending).await;
+                        }
+                    }
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
@@ -811,6 +983,7 @@ impl RequestForwarder {
                                 sanitization.removed_empty_items
                             );
 
+                            let mut retry_attempt = ModelhubAttemptState::default();
                             match self
                                 .forward(
                                     app_type,
@@ -821,6 +994,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut retry_attempt,
                                 )
                                 .await
                             {
@@ -877,6 +1051,10 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_admission_permit: retry_attempt
+                                            .admission_permit
+                                            .take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -928,6 +1106,7 @@ impl RequestForwarder {
                                 super::media_sanitizer::UNSUPPORTED_IMAGE_MARKER
                             );
 
+                            let mut retry_attempt = ModelhubAttemptState::default();
                             match self
                                 .forward(
                                     app_type,
@@ -938,6 +1117,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut retry_attempt,
                                 )
                                 .await
                             {
@@ -995,6 +1175,10 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_admission_permit: retry_attempt
+                                            .admission_permit
+                                            .take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -1074,6 +1258,7 @@ impl RequestForwarder {
                                 let _ = std::mem::replace(&mut rectifier_retried, true);
 
                                 // 使用同一供应商重试（不计入熔断器）
+                                let mut retry_attempt = ModelhubAttemptState::default();
                                 match self
                                     .forward(
                                         app_type,
@@ -1084,6 +1269,7 @@ impl RequestForwarder {
                                         &headers,
                                         &extensions,
                                         adapter.as_ref(),
+                                        &mut retry_attempt,
                                     )
                                     .await
                                 {
@@ -1144,6 +1330,10 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             connection_guard: None,
+                                            modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                            modelhub_admission_permit: retry_attempt
+                                                .admission_permit
+                                                .take(),
                                         });
                                     }
                                     Err(retry_err) => {
@@ -1240,6 +1430,7 @@ impl RequestForwarder {
                             let _ = std::mem::replace(&mut budget_rectifier_retried, true);
 
                             // 使用同一供应商重试（不计入熔断器）
+                            let mut retry_attempt = ModelhubAttemptState::default();
                             match self
                                 .forward(
                                     app_type,
@@ -1250,6 +1441,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut retry_attempt,
                                 )
                                 .await
                             {
@@ -1304,6 +1496,10 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_admission_permit: retry_attempt
+                                            .admission_permit
+                                            .take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -1474,6 +1670,7 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        modelhub_attempt: &mut ModelhubAttemptState,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
@@ -2022,6 +2219,50 @@ impl RequestForwarder {
             .filter(|m| !m.is_empty())
         {
             outbound_model = Some(m.to_string());
+        }
+
+        // ModelHub checkpoint identity and admission must use the final native
+        // Responses body, after model mapping, suffix normalization, body
+        // overrides, metadata routing and private-field filtering. Otherwise a
+        // changed outbound model/options could reuse a cursor or bypass the
+        // Provider+final-model admission bucket.
+        if is_modelhub_codex_responses_route(app_type, endpoint, provider) {
+            let final_full_body = filtered_body.clone();
+            let is_compact = endpoint
+                .split('?')
+                .next()
+                .unwrap_or(endpoint)
+                .ends_with("/compact");
+            if !is_compact {
+                let prepared = self
+                    .modelhub_context
+                    .prepare(
+                        provider,
+                        &self.session_id,
+                        self.session_client_provided,
+                        headers,
+                        &final_full_body,
+                    )
+                    .await;
+                filtered_body = prepared.body;
+                modelhub_attempt.checkpoint = prepared.pending;
+                modelhub_attempt.mode = prepared.mode;
+            }
+            if let Some((permit, estimated_tokens, queue_ms)) = self
+                .modelhub_admission
+                .acquire(provider, &final_full_body)
+                .await
+            {
+                log::info!(
+                    "[ModelHubContext] mode={:?} estimated_tokens={} body_bytes={} queue_ms={} checkpoint_present={}",
+                    modelhub_attempt.mode,
+                    estimated_tokens,
+                    serde_json::to_vec(&filtered_body).map(|bytes| bytes.len()).unwrap_or(0),
+                    queue_ms,
+                    modelhub_attempt.checkpoint.is_some(),
+                );
+                modelhub_attempt.admission_permit = Some(permit);
+            }
         }
         log_prompt_cache_trace(
             app_type,
@@ -4119,6 +4360,12 @@ mod tests {
                 std::collections::HashSet::new(),
             )),
             modelhub_429_cooldown: Arc::new(super::super::retry_429::Provider429Cooldown::default()),
+            modelhub_context: Arc::new(
+                super::super::modelhub_context::ModelhubContextStore::default(),
+            ),
+            modelhub_admission: Arc::new(
+                super::super::modelhub_context::ModelhubAdmissionController::default(),
+            ),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -5857,6 +6104,103 @@ mod tests {
         assert_eq!(body["metadata"]["temperature"], 0.2);
         assert_eq!(body["metadata"]["top_p"], 0.9);
         assert_eq!(body["messages"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn modelhub_checkpoint_uses_final_mapped_model_and_body_overrides() {
+        let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received_for_route = received.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received = received_for_route.clone();
+                async move {
+                    received.lock().unwrap().push(body);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "id": "resp_final",
+                            "object": "response",
+                            "status": "completed",
+                            "output": []
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        let mut provider_config = serde_json::Map::new();
+        provider_config.insert(
+            "base_url".to_string(),
+            Value::String(format!("http://{address}/v1")),
+        );
+        provider_config.insert("api_key".to_string(), Value::String("test-key".to_string()));
+        provider_config.insert("auth".to_string(), json!({ "OPENAI_API_KEY": "test-key" }));
+        provider_config.insert(
+            "env".to_string(),
+            json!({ "ANTHROPIC_MODEL": "final-model" }),
+        );
+        provider.settings_config = Value::Object(provider_config);
+        let overrides = provider
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides
+            .as_mut()
+            .unwrap();
+        overrides.body = Some(json!({"max_output_tokens": 321}));
+        overrides.context_optimization = Some(crate::provider::ModelhubContextOptimizationConfig {
+            enabled: true,
+            checkpoint_ttl_seconds: 3600,
+        });
+        overrides.admission_control = Some(crate::provider::ModelhubAdmissionConfig {
+            enabled: true,
+            large_request_tokens: 100_000,
+            concurrency: 4,
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "final-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "final-thread".parse().unwrap(),
+            ),
+        ]);
+        let body = json!({
+            "model": "client-model",
+            "stream": true,
+            "input": [{"role": "user", "content": "one"}]
+        });
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "final-session".to_string();
+        forwarder.session_client_provided = true;
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("request failed: {}", failure.error));
+        drop(result);
+        server.abort();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0]["model"], "final-model");
+        assert_eq!(received[0]["max_output_tokens"], 321);
+        assert_eq!(received[0]["store"], true);
     }
 
     #[test]

@@ -7,9 +7,9 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.modelhub]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260819-r16'
+readonly RELEASE_TAG='modelhub-installer-20260827-r17'
 readonly INSTALLER_ASSET='install.sh'
-readonly APP_ASSET='CC-Switch-ModelHub-3.19.2-arm64.app.zip'
+readonly APP_ASSET='CC-Switch-ModelHub-3.19.3-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
@@ -20,6 +20,7 @@ readonly RENAME_HELPER_SHA256='__RENAME_HELPER_SHA256__'
 readonly TRUSTED_HELPER_TEMPLATE='/private/var/tmp/.cc-switch-modelhub-helper.XXXXXX'
 readonly MODELHUB_PROVIDER_ID='bytedance-modelhub-official-cli'
 readonly MODELHUB_PROVIDER_NAME='Bytedance ModelHub - 官方CLI'
+readonly CODEX_OFFICIAL_PROVIDER_ID='codex-official'
 readonly KEYCHAIN_SERVICE='com.ccswitch.modelhub.ak'
 readonly LAUNCH_AGENT_LABEL='com.ccswitch.modelhub-env'
 
@@ -1015,7 +1016,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R16 context-window contract'
+    die 'ModelHub model catalog does not match the R17 context-window contract'
     return 1
   fi
 }
@@ -1101,7 +1102,8 @@ validate_golden_codex_template() {
     || [[ "$(golden_config_exact_line_count "$file" 'review_model = "gpt-5.5-2026-04-24"')" != '1' ]] \
     || [[ "$(golden_config_exact_line_count "$file" 'base_url = "http://127.0.0.1:15721/v1"')" != '1' ]] \
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
-    || ! grep -Fq -- 'model_auto_compact_token_limit = 500000' "$file" \
+    || ! grep -Fq -- 'model_auto_compact_token_limit = 300000' "$file" \
+    || [[ "$(golden_config_exact_line_count "$file" 'remote_compaction_v2 = true')" != '1' ]] \
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
     || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
@@ -1170,16 +1172,20 @@ validate_golden_database() {
     || { die 'golden CC Switch database integrity check failed'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '16' ]] \
     || { die 'golden CC Switch database schema version is not 16'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
+    || { die 'golden CC Switch database must contain ModelHub and OpenAI Official'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND is_current=1;")" == '1' ]] \
     || { die 'golden CC Switch database current provider is invalid'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='$CODEX_OFFICIAL_PROVIDER_ID' AND app_type='codex' AND name='OpenAI Official' AND category='official' AND is_current=0 AND settings_config=json_object('auth', json('{}'), 'config', '');")" == '1' ]] \
+    || { die 'golden CC Switch database official Codex provider is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT COALESCE(SUM(CASE WHEN json_type(settings_config, '$.auth')='object' THEN json_array_length(json_extract(settings_config, '$.auth')) ELSE 0 END),0) FROM providers;")" == '0' ]] \
     || { die 'golden CC Switch provider auth objects must be empty'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '1' ]] \
     || { die 'golden CC Switch provider omits the ModelHub upstream'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 500000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R16 Codex defaults'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 300000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
+    || { die 'golden CC Switch provider omits R17 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1188,6 +1194,8 @@ validate_golden_database() {
     || { die 'golden CC Switch provider encrypted reasoning memory is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.checkpointTtlSeconds')=21600 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.largeRequestTokens')=100000 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.concurrency')=4;")" == '1' ]] \
+    || { die 'golden CC Switch provider R17 context policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -2025,6 +2033,10 @@ validate_merged_codex_config() {
       return 1
     fi
   done
+  if [[ "$(grep -Ec '^[[:space:]]*remote_compaction_v2[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$file")" != "1" ]]; then
+    die 'merged Codex config must enable remote_compaction_v2 exactly once'
+    return 1
+  fi
 
   section_count="$(modelhub_section_count "$file")" || return 1
   if [[ "$section_count" != "1" ]]; then
@@ -2110,12 +2122,15 @@ merge_codex_config() {
   local filtered_source
   local merged_file
   local managed_desktop
+  local managed_features
   local line
   local header_kind
   local in_root=1
   local skip_modelhub=0
   local in_desktop=0
   local saw_desktop=0
+  local in_features=0
+  local saw_features=0
   local skip_managed_section=0
   local syntax_status
 
@@ -2131,6 +2146,7 @@ merge_codex_config() {
   filtered_source="$work_dir/filtered-source.toml"
   merged_file="$work_dir/merged.toml"
   managed_desktop="$work_dir/managed-desktop.toml"
+  managed_features="$work_dir/managed-features.toml"
   escaped_home="$(toml_escape_basic_string "$user_home")"
   effective_source="$source_file"
   if [[ ! -f "$effective_source" ]]; then
@@ -2160,6 +2176,15 @@ merge_codex_config() {
     die "failed to extract managed Codex desktop fields"
     return 1
   fi
+  if ! awk '
+    $0 == "[features]" { emit = 1; next }
+    emit && /^[[:space:]]*\[/ { exit }
+    emit && /^[[:space:]]*remote_compaction_v2[[:space:]]*=/ { print }
+  ' "$rendered_template" >"$managed_features"; then
+    /bin/rm -rf "$work_dir" || true
+    die "failed to extract managed Codex feature fields"
+    return 1
+  fi
 
   if ! : >"$filtered_source"; then
     /bin/rm -rf "$work_dir" || true
@@ -2176,40 +2201,81 @@ merge_codex_config() {
         if [[ "$in_desktop" == "1" ]]; then
           cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
+        if [[ "$in_features" == "1" ]]; then
+          cat "$managed_features" >>"$filtered_source" || return 1
+        fi
         skip_modelhub=1
         skip_managed_section=1
         in_root=0
         in_desktop=0
+        in_features=0
         continue
         ;;
       computer-use-plugin|computer-use-mcp|node-repl-mcp)
         if [[ "$in_desktop" == "1" ]]; then
           cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
+        if [[ "$in_features" == "1" ]]; then
+          cat "$managed_features" >>"$filtered_source" || return 1
+        fi
         skip_modelhub=0
         skip_managed_section=1
         in_root=0
         in_desktop=0
+        in_features=0
         continue
         ;;
       desktop)
         if [[ "$in_desktop" == "1" ]]; then
           cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
+        if [[ "$in_features" == "1" ]]; then
+          cat "$managed_features" >>"$filtered_source" || return 1
+        fi
         skip_modelhub=0
         skip_managed_section=0
         in_root=0
         in_desktop=1
+        in_features=0
         saw_desktop=1
         ;;
-      table|openai-provider|openai-provider-child)
+      table)
+        if printf '%s\n' "$line" | grep -Eq '^[[:space:]]*\[features\][[:space:]]*$'; then
+          if [[ "$in_desktop" == "1" ]]; then
+            cat "$managed_desktop" >>"$filtered_source" || return 1
+          fi
+          skip_modelhub=0
+          skip_managed_section=0
+          in_root=0
+          in_desktop=0
+          in_features=1
+          saw_features=1
+        else
+          if [[ "$in_features" == "1" ]]; then
+            cat "$managed_features" >>"$filtered_source" || return 1
+          fi
+          if [[ "$in_desktop" == "1" ]]; then
+            cat "$managed_desktop" >>"$filtered_source" || return 1
+          fi
+          skip_modelhub=0
+          skip_managed_section=0
+          in_root=0
+          in_desktop=0
+          in_features=0
+        fi
+        ;;
+      openai-provider|openai-provider-child)
         if [[ "$in_desktop" == "1" ]]; then
           cat "$managed_desktop" >>"$filtered_source" || return 1
+        fi
+        if [[ "$in_features" == "1" ]]; then
+          cat "$managed_features" >>"$filtered_source" || return 1
         fi
         skip_modelhub=0
         skip_managed_section=0
         in_root=0
         in_desktop=0
+        in_features=0
         ;;
     esac
     if [[ "$skip_modelhub" == "1" || "$skip_managed_section" == "1" ]]; then
@@ -2217,6 +2283,10 @@ merge_codex_config() {
     fi
     if [[ "$in_desktop" == "1" ]] \
       && [[ "$line" =~ ^[[:space:]]*(git-branch-prefix|show-context-window-usage|preventSleepWhileRunning|enabled-reasoning-efforts)[[:space:]]*= ]]; then
+      continue
+    fi
+    if [[ "$in_features" == "1" ]] \
+      && [[ "$line" =~ ^[[:space:]]*remote_compaction_v2[[:space:]]*= ]]; then
       continue
     fi
     if [[ "$in_root" == "1" ]] \
@@ -2236,9 +2306,16 @@ merge_codex_config() {
   if [[ "$in_desktop" == "1" ]]; then
     cat "$managed_desktop" >>"$filtered_source" || return 1
   fi
+  if [[ "$in_features" == "1" ]]; then
+    cat "$managed_features" >>"$filtered_source" || return 1
+  fi
   if [[ "$saw_desktop" == "0" ]]; then
     printf '%s\n' '[desktop]' >>"$filtered_source" || return 1
     cat "$managed_desktop" >>"$filtered_source" || return 1
+  fi
+  if [[ "$saw_features" == "0" ]]; then
+    printf '%s\n' '[features]' >>"$filtered_source" || return 1
+    cat "$managed_features" >>"$filtered_source" || return 1
   fi
 
   if ! awk '/^[[:space:]]*\[/ { exit } { print }' "$rendered_template" >"$merged_file"; then
@@ -2889,9 +2966,9 @@ choose_codex_config_install_mode() {
       fi
     else
       if [[ "$requires_explicit_overwrite" == "1" ]]; then
-        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R17 标准配置完整覆盖？[y/N] ' >/dev/tty
       else
-        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R16 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R17 标准配置完整覆盖？[y/N] ' >/dev/tty
       fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
@@ -3848,7 +3925,9 @@ wait_for_golden_routing_state() {
   local sleep_bin="${CC_SWITCH_SLEEP_BIN:-/bin/sleep}"
   local attempt=1
   local provider_ready
+  local official_ready
   local live_ready
+  local live_provider_ready
 
   case "$timeout_seconds" in
     ''|*[!0-9]*)
@@ -3873,20 +3952,41 @@ wait_for_golden_routing_state() {
         AND instr(json_extract(settings_config, '$.config'),
                   '127.0.0.1:15721') = 0;
     " || true)"
+    official_ready="$(golden_sqlite_scalar "$database" "
+      SELECT count(*)
+      FROM providers
+      WHERE id='$CODEX_OFFICIAL_PROVIDER_ID'
+        AND app_type='codex'
+        AND category='official'
+        AND is_current=0;
+    " || true)"
     if [[ -f "$live_config" ]] \
       && grep -Fq -- 'base_url = "http://127.0.0.1:15721/v1"' "$live_config"; then
       live_ready=1
     else
       live_ready=0
     fi
-    if [[ "$provider_ready" == '1' && "$live_ready" == '1' ]]; then
+    live_provider_ready="$({
+      awk '
+        BEGIN { in_root = 1; count = 0 }
+        /^[[:space:]]*\[/ { in_root = 0 }
+        in_root && /^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"modelhub"[[:space:]]*(#.*)?$/ {
+          count += 1
+        }
+        END { print count }
+      ' "$live_config" 2>/dev/null
+    } || true)"
+    if [[ "$provider_ready" == '1' \
+      && "$official_ready" == '1' \
+      && "$live_ready" == '1' \
+      && "$live_provider_ready" == '1' ]]; then
       return 0
     fi
     "$sleep_bin" 1 || return 1
     attempt=$((attempt + 1))
   done
 
-  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex uses the local proxy'
+  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex selects modelhub through the local proxy'
   return 1
 }
 
@@ -4085,7 +4185,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R16 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R17 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -4192,7 +4292,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
-  printf '\n安装完成：桌面与移动端新会话已强制通过 CC Switch；代理不可用时会话将失败。\n' >&2
+  printf '\n安装完成：默认使用 ModelHub；可在 CC Switch 的 Codex 供应商列表中一键切换到 OpenAI Official，再切回 ModelHub。ModelHub 模式需要 CC Switch 保持运行；Official 模式恢复直连。切换后请重启 Codex 并新建任务。\n' >&2
 }
 
 rollback_latest() {

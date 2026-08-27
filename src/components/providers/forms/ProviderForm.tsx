@@ -1106,6 +1106,12 @@ function ProviderFormFull({
                 codexActivitySummaryMode,
                 codexMetadataModel,
                 rememberInvalidEncryptedReasoning,
+                contextOptimization:
+                  initialData?.meta?.localProxyRequestOverrides
+                    ?.contextOptimization,
+                admissionControl:
+                  initialData?.meta?.localProxyRequestOverrides
+                    ?.admissionControl,
               }
             : { appId: "claude" },
         )

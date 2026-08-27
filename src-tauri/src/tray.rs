@@ -492,8 +492,8 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
             let app_handle = app.clone();
             let provider_id = suffix.to_string();
             let app_type = section.app_type.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                if let Err(e) = handle_provider_click(&app_handle, &app_type, &provider_id) {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = handle_provider_click(&app_handle, &app_type, &provider_id).await {
                     log::error!("切换{}供应商失败: {e}", section.log_name);
                 }
             });
@@ -593,7 +593,7 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
 }
 
 /// 处理供应商点击：关闭 auto_failover + 切换供应商
-fn handle_provider_click(
+async fn handle_provider_click(
     app: &tauri::AppHandle,
     app_type: &AppType,
     provider_id: &str,
@@ -607,9 +607,8 @@ fn handle_provider_click(
             .db
             .set_proxy_flags_sync(app_type_str, proxy_enabled, false)?;
 
-        // 切换供应商。需要本地路由的供应商也不在这里自动启动代理，
-        // 由用户在页面/设置中手动开启。
-        crate::services::ProviderService::switch(app_state.inner(), app_type.clone(), provider_id)?;
+        crate::commands::switch_provider_routed(app_state.inner(), app_type.clone(), provider_id)
+            .await?;
 
         // 更新托盘菜单
         if let Ok(new_menu) = create_tray_menu(app, app_state.inner()) {

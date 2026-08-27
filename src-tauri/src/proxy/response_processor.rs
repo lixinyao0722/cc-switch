@@ -186,6 +186,7 @@ pub async fn handle_streaming(
 
     // 创建使用量收集器；关闭 usage logging 时不要在流式热路径上解析每个 SSE event。
     let usage_collector = create_usage_collector(ctx, state, status.as_u16(), parser_config);
+    let checkpoint_collector = create_modelhub_checkpoint_collector(ctx, state);
 
     // 获取流式超时配置
     let timeout_config = ctx.streaming_timeout_config();
@@ -195,6 +196,7 @@ pub async fn handle_streaming(
         stream,
         ctx.tag,
         usage_collector,
+        checkpoint_collector,
         timeout_config,
         connection_guard,
     );
@@ -225,8 +227,16 @@ pub async fn handle_non_streaming(
         } else {
             Duration::ZERO
         };
-    let (mut response_headers, status, body_bytes) =
-        read_decoded_body(response, ctx.tag, body_timeout).await?;
+    let decoded = read_decoded_body(response, ctx.tag, body_timeout).await;
+    let (mut response_headers, status, body_bytes) = match decoded {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            if let Some(pending) = ctx.modelhub_checkpoint.clone() {
+                state.modelhub_context.release_without_update(pending).await;
+            }
+            return Err(error);
+        }
+    };
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
@@ -234,6 +244,14 @@ pub async fn handle_non_streaming(
         ctx.tag,
         body_bytes.len()
     );
+
+    if let Some(pending) = ctx.modelhub_checkpoint.clone() {
+        let parsed = serde_json::from_slice::<Value>(&body_bytes).ok();
+        state
+            .modelhub_context
+            .complete(pending, parsed.as_ref())
+            .await;
+    }
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
     if usage_logging_enabled(state) {
@@ -342,6 +360,32 @@ pub async fn process_response(
 // ============================================================================
 
 type UsageCallbackWithTiming = Arc<dyn Fn(Vec<Value>, Option<u64>) + Send + Sync + 'static>;
+
+fn create_modelhub_checkpoint_collector(
+    ctx: &RequestContext,
+    state: &ProxyState,
+) -> Option<SseUsageCollector> {
+    let pending = ctx.modelhub_checkpoint.clone()?;
+    let store = state.modelhub_context.clone();
+    Some(SseUsageCollector::new(
+        ctx.start_time,
+        Some(|data| data.contains("\"response.completed\"")),
+        move |events, _| {
+            let terminal = events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("type").and_then(Value::as_str) == Some("response.completed")
+                })
+                .cloned();
+            let store = store.clone();
+            let pending = pending.clone();
+            tokio::spawn(async move {
+                store.complete(pending, terminal.as_ref()).await;
+            });
+        },
+    ))
+}
 
 /// SSE 使用量收集器
 #[derive(Clone)]
@@ -684,6 +728,7 @@ pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
     tag: &'static str,
     usage_collector: Option<SseUsageCollector>,
+    checkpoint_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
@@ -692,9 +737,14 @@ pub fn create_logged_passthrough_stream(
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut collector = usage_collector;
+        let mut checkpoint_collector = checkpoint_collector;
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
+        let mut checkpoint_finish_guard = checkpoint_collector
+            .clone()
+            .map(SseUsageFinishGuard::new);
         let inspect_sse_events =
             collector.is_some()
+                || checkpoint_collector.is_some()
                 || timeout_config.progress_timeout > 0
                 || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
@@ -820,6 +870,13 @@ pub fn create_logged_passthrough_stream(
                                                 }
                                                 _ => false,
                                             };
+                                            if let Some(c) = &checkpoint_collector {
+                                                if c.should_collect(data) {
+                                                    if let Ok(value) = serde_json::from_str::<Value>(data) {
+                                                        c.push(value).await;
+                                                    }
+                                                }
+                                            }
                                             log::trace!(
                                                 "[{tag}] <<< SSE data: bytes={}, usage_collected={collected} (content omitted)",
                                                 data.len()
@@ -851,6 +908,12 @@ pub fn create_logged_passthrough_stream(
             c.finish().await;
         }
         if let Some(guard) = &mut finish_guard {
+            guard.disarm();
+        }
+        if let Some(c) = checkpoint_collector.take() {
+            c.finish().await;
+        }
+        if let Some(guard) = &mut checkpoint_finish_guard {
             guard.disarm();
         }
     }
@@ -1004,10 +1067,16 @@ mod tests {
             total_timeout: 5,
             progress_timeout: 0,
         };
-        let results =
-            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
-                .collect::<Vec<_>>()
-                .await;
+        let results = create_logged_passthrough_stream(
+            heartbeat_stream,
+            "ModelHub/Test",
+            None,
+            None,
+            config,
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         assert!(results
             .last()
@@ -1033,10 +1102,16 @@ mod tests {
             total_timeout: 30,
             progress_timeout: 3,
         };
-        let results =
-            create_logged_passthrough_stream(heartbeat_stream, "ModelHub/Test", None, config, None)
-                .collect::<Vec<_>>()
-                .await;
+        let results = create_logged_passthrough_stream(
+            heartbeat_stream,
+            "ModelHub/Test",
+            None,
+            None,
+            config,
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         assert!(results
             .last()
@@ -1072,9 +1147,10 @@ mod tests {
             total_timeout: 30,
             progress_timeout: 3,
         };
-        let results = create_logged_passthrough_stream(stream, "ModelHub/Test", None, config, None)
-            .collect::<Vec<_>>()
-            .await;
+        let results =
+            create_logged_passthrough_stream(stream, "ModelHub/Test", None, None, config, None)
+                .collect::<Vec<_>>()
+                .await;
 
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 4);
         assert!(results
@@ -1252,6 +1328,12 @@ mod tests {
                 std::collections::HashSet::new(),
             )),
             modelhub_429_cooldown: Arc::new(crate::proxy::retry_429::Provider429Cooldown::default()),
+            modelhub_context: Arc::new(
+                crate::proxy::modelhub_context::ModelhubContextStore::default(),
+            ),
+            modelhub_admission: Arc::new(
+                crate::proxy::modelhub_context::ModelhubAdmissionController::default(),
+            ),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }
