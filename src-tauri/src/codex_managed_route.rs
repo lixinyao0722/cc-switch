@@ -11,6 +11,10 @@ use toml_edit::{value, DocumentMut};
 const MANAGED_CONFIG_PATH: &str = "/etc/codex/managed_config.toml";
 const MODELHUB_PROVIDER: &str = "modelhub";
 const MODELHUB_PROXY_URL: &str = "http://127.0.0.1:15721/v1";
+#[cfg(target_os = "macos")]
+const MACOS_TEST_BIN: &str = "/bin/test";
+#[cfg(target_os = "macos")]
+const MACOS_RMDIR_BIN: &str = "/bin/rmdir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexManagedRoute {
@@ -132,13 +136,14 @@ fn install_privileged(candidate: &Path, target: &Path) -> Result<(), AppError> {
         .map_err(|error| AppError::Message(format!("无法校验路由候选配置: {error}")))?
         .uid();
     let command = format!(
-        "/usr/bin/test -f {candidate} && /usr/bin/test ! -L {candidate} && \
+        "{test_bin} -f {candidate} && {test_bin} ! -L {candidate} && \
          /usr/bin/stat -f %u {candidate} | /usr/bin/grep -qx {expected_uid} && \
          /usr/bin/stat -f %Lp {candidate} | /usr/bin/grep -qx 600 && \
-         /usr/bin/test ! -L {parent} && \
-         (/usr/bin/test ! -e {target} || (/usr/bin/test -f {target} && /usr/bin/test ! -L {target})) && \
+         {test_bin} ! -L {parent} && \
+         ({test_bin} ! -e {target} || ({test_bin} -f {target} && {test_bin} ! -L {target})) && \
          /bin/mkdir -p {parent} && /usr/bin/install -o root -g wheel -m 0644 {candidate} {temp} && \
          /bin/mv -f {temp} {target}",
+        test_bin = MACOS_TEST_BIN,
         candidate = shell_quote(&candidate.display().to_string()),
         expected_uid = expected_uid,
         parent = shell_quote(&parent.display().to_string()),
@@ -177,7 +182,8 @@ fn remove_target() -> Result<(), AppError> {
         .parent()
         .ok_or_else(|| AppError::Message("Codex 系统托管配置目标路径无父目录".to_string()))?;
     let command = format!(
-        "/bin/rm -f {target} && (/usr/bin/rmdir {parent} 2>/dev/null || true)",
+        "/bin/rm -f {target} && ({rmdir_bin} {parent} 2>/dev/null || true)",
+        rmdir_bin = MACOS_RMDIR_BIN,
         target = shell_quote(&target.display().to_string()),
         parent = shell_quote(&parent.display().to_string()),
     );
@@ -348,5 +354,50 @@ mod tests {
             Some(CodexManagedRoute::Official)
         );
         assert_eq!(route_for_switch(Some(&other), &official), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_test_tool_can_validate_a_regular_file() {
+        let candidate = std::env::temp_dir().join(format!(
+            "cc-switch-codex-route-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&candidate, "route").expect("create candidate");
+
+        let status = std::process::Command::new(MACOS_TEST_BIN)
+            .arg("-f")
+            .arg(&candidate)
+            .status();
+
+        let _ = std::fs::remove_file(&candidate);
+        assert!(
+            status.expect("launch the macOS test tool").success(),
+            "the macOS test tool should recognize a regular file"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_rmdir_tool_can_remove_an_empty_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "cc-switch-codex-route-rmdir-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&directory).expect("create empty directory");
+
+        let status = std::process::Command::new(MACOS_RMDIR_BIN)
+            .arg(&directory)
+            .status();
+
+        let directory_still_exists = directory.exists();
+        if directory_still_exists {
+            let _ = std::fs::remove_dir(&directory);
+        }
+        assert!(
+            status.expect("launch the macOS rmdir tool").success(),
+            "the macOS rmdir tool should remove an empty directory"
+        );
+        assert!(!directory_still_exists);
     }
 }
