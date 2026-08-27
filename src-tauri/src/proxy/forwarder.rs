@@ -951,7 +951,7 @@ impl RequestForwarder {
                         modelhub_admission_permit: modelhub_attempt.admission_permit.take(),
                     });
                 }
-                Err(e) => {
+                Err(mut e) => {
                     // The first attempt is finished. Release its admission permit
                     // before any same-provider fallback prepares and queues a new
                     // final outbound body; large requests otherwise self-deadlock
@@ -1086,21 +1086,30 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [ModelHubCompat] resource-detached item retry failed: {retry_err}"
                                     );
-                                    if let Some(err) = self
-                                        .handle_rectifier_retry_failure(
-                                            retry_err,
-                                            provider,
-                                            app_type_str,
-                                            used_half_open_permit,
-                                            "ModelHub cross-resource item fallback",
-                                            &mut last_error,
-                                            &mut last_provider,
-                                        )
-                                        .await
-                                    {
-                                        return Err(err);
+                                    if super::modelhub_compat::is_invalid_encrypted_content_error(
+                                        &retry_err,
+                                    ) {
+                                        log::warn!(
+                                            "[{app_type_str}] [ModelHubCompat] resource-detached item retry exposed invalid encrypted reasoning; continuing with encrypted reasoning fallback"
+                                        );
+                                        e = retry_err;
+                                    } else {
+                                        if let Some(err) = self
+                                            .handle_rectifier_retry_failure(
+                                                retry_err,
+                                                provider,
+                                                app_type_str,
+                                                used_half_open_permit,
+                                                "ModelHub cross-resource item fallback",
+                                                &mut last_error,
+                                                &mut last_provider,
+                                            )
+                                            .await
+                                        {
+                                            return Err(err);
+                                        }
+                                        continue;
                                     }
-                                    continue;
                                 }
                             }
                         }
