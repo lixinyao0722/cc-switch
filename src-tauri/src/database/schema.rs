@@ -300,13 +300,17 @@ impl Database {
         //
         // last_byte_offset：Claude 路径的字节游标（seek 增量读）；NULL 表示
         // 尚无字节游标（旧行号游标或非 Claude 路径行），此时回退全量读。
+        // last_tail_fingerprint：游标边界前尾部字节的指纹，用于识别文件被
+        // 外部重写（同尺寸/更大的替换无法靠 size 检测）；NULL 表示无指纹
+        // 可校验，按纯追加处理。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
                 last_synced_at INTEGER NOT NULL,
-                last_byte_offset INTEGER
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
             [],
         )
@@ -1573,16 +1577,24 @@ impl Database {
         .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))
     }
 
-    /// v17 -> v18: Claude 会话日志的字节游标列。
+    /// v17 -> v18: Claude 会话日志的字节游标列与尾部指纹列。
     ///
     /// 独立成版而非搭 v17 车：v17 已在开发库上执行过（迁移不会重跑，
     /// `CREATE TABLE IF NOT EXISTS` 也不补列），追加进 v17 会让这些库
     /// 永远缺列。存量行保持 NULL，首轮扫描按旧行号游标转换为字节位置
-    /// 后继续增量；之后写入字节偏移走 seek 增量。
+    /// 后继续增量；之后写入字节偏移走 seek 增量，并记录游标边界前的
+    /// 尾部指纹用于识别外部重写（截断由 size 检测，同尺寸/更大的替换
+    /// 只有指纹能发现）。
     fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
         // 缺表的库（异常/测试夹具）跳过：create_tables 会以含列的新 DDL 建表。
         if Self::table_exists(conn, "session_log_sync")? {
             Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
         }
         Ok(())
     }
@@ -3456,12 +3468,19 @@ mod tests {
             "session_log_sync",
             "last_byte_offset"
         )?);
-        let byte_offset: Option<i64> = conn.query_row(
-            "SELECT last_byte_offset FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_tail_fingerprint"
+        )?);
+        let (byte_offset, fingerprint): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(byte_offset, None, "存量行的字节游标必须为 NULL");
+        assert_eq!(fingerprint, None, "存量行的尾部指纹必须为 NULL");
         Ok(())
     }
 }

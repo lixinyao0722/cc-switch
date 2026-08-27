@@ -18,9 +18,10 @@ use crate::services::usage_stats::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -66,6 +67,9 @@ pub(crate) struct SyncCursor {
     pub last_modified: i64,
     pub last_line_offset: i64,
     pub last_byte_offset: Option<i64>,
+    /// 游标边界前尾部字节的指纹（仅 Claude 路径写入），用于识别文件被
+    /// 外部重写；NULL 表示无指纹可校验。
+    pub last_tail_fingerprint: Option<i64>,
     pub last_synced_at: i64,
 }
 
@@ -79,7 +83,8 @@ pub(crate) fn load_sync_cursors(db: &Database) -> Result<HashMap<String, SyncCur
     let conn = lock_conn!(db.conn);
     let mut stmt = conn
         .prepare(
-            "SELECT file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset
+            "SELECT file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset,
+                    last_tail_fingerprint
              FROM session_log_sync",
         )
         .map_err(|e| AppError::Database(format!("预取同步游标失败: {e}")))?;
@@ -91,6 +96,7 @@ pub(crate) fn load_sync_cursors(db: &Database) -> Result<HashMap<String, SyncCur
                 last_line_offset: row.get(2)?,
                 last_synced_at: row.get(3)?,
                 last_byte_offset: row.get(4)?,
+                last_tail_fingerprint: row.get(5)?,
             },
         ))
     });
@@ -207,8 +213,16 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
             Ok(file_sync) => {
                 result.imported += file_sync.imported;
                 result.skipped += file_sync.skipped;
-                if file_sync.incomplete_tail {
+                if file_sync.incomplete_tail || file_sync.read_error.is_some() {
                     result.deferred_files += 1;
+                }
+                if let Some(err) = file_sync.read_error {
+                    let msg = format!(
+                        "{}: 读取中断，已入库部分保留、下轮从断点续读: {err}",
+                        file_path.display()
+                    );
+                    log::warn!("[SESSION-SYNC] {msg}");
+                    result.errors.push(msg);
                 }
             }
             Err(e) => {
@@ -311,6 +325,47 @@ struct ClaudeFileSync {
     /// 解析成功仍会导入（request_id 去重防重复），但游标不越过它，
     /// 待下轮补全后重新确认。
     incomplete_tail: bool,
+    /// 解析中途 IO 读错误。已提交部分照常入库、游标盖旧 mtime 让下轮
+    /// 续读，但必须向上层报告：手动同步没有"下一轮"，静默返回会让用户
+    /// 把未读完的文件当成同步成功。
+    read_error: Option<String>,
+}
+
+/// 游标边界指纹覆盖的尾部字节数（与 Pi 的 `REVISION_TAIL_BYTES` 同值）。
+const TAIL_FINGERPRINT_BYTES: i64 = 4096;
+
+/// 游标边界前尾部字节的指纹。域标签防止与其他用途的哈希混淆。
+fn claude_tail_fingerprint(tail: &[u8]) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"claude-session-tail-v1");
+    hasher.update(tail);
+    let digest = hasher.finalize();
+    i64::from(u32::from_be_bytes(
+        digest[..4].try_into().unwrap_or_default(),
+    ))
+}
+
+/// 读取 `end` 之前最多 [`TAIL_FINGERPRINT_BYTES`] 字节；返回后文件位置
+/// 恰好停在 `end`，增量路径可直接从这里继续读。
+fn read_tail_before(file: &mut fs::File, end: i64) -> Result<Vec<u8>, AppError> {
+    let len = end.clamp(0, TAIL_FINGERPRINT_BYTES);
+    let mut tail = vec![0u8; len as usize];
+    file.seek(SeekFrom::Start((end - len) as u64))
+        .map_err(|e| AppError::Config(format!("无法定位文件偏移: {e}")))?;
+    if len > 0 {
+        file.read_exact(&mut tail)
+            .map_err(|e| AppError::Config(format!("无法读取游标边界尾部: {e}")))?;
+    }
+    Ok(tail)
+}
+
+/// 向滚动尾部缓冲追加已提交的行字节，只保留末尾指纹窗口大小。
+fn push_committed_tail(tail_buf: &mut Vec<u8>, bytes: &[u8]) {
+    tail_buf.extend_from_slice(bytes);
+    let max = TAIL_FINGERPRINT_BYTES as usize;
+    if tail_buf.len() > max {
+        tail_buf.drain(..tail_buf.len() - max);
+    }
 }
 
 /// 同步单个 JSONL 文件。
@@ -325,8 +380,12 @@ struct ClaudeFileSync {
 /// 30 天前的明细汇总后删除，request_id 去重只查明细表、对已剪条目失明，
 /// 重导会在下次 rollup 时二次累加、永久放大统计。代价是旧行号游标半行
 /// bug 吞掉的历史行无法找回（无持久账本时与已剪条目不可区分，双算比
-/// 丢行更糟）。游标超过当前文件大小（截断/重写，Claude Code 正常路径是
-/// 纯追加，此情形只来自外部干预）时回 0 重扫。
+/// 丢行更糟）。
+///
+/// 同一双算风险决定了对非追加变化（Claude Code 正常路径纯追加，此情形
+/// 只来自外部干预）的处理：截断（游标超过文件大小）与重写（游标边界前
+/// 尾部指纹失配——同尺寸/更大的替换靠 size 检测不出来）都把游标钉到
+/// 当前 EOF、不重放任何旧区间，之后的追加恢复正常增量。
 fn sync_single_file(
     db: &Database,
     file_path: &Path,
@@ -342,28 +401,62 @@ fn sync_single_file(
 
     let last_modified = cursor.map_or(0, |c| c.last_modified);
     let last_byte_offset = cursor.and_then(|c| c.last_byte_offset);
+    let last_fingerprint = cursor.and_then(|c| c.last_tail_fingerprint);
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
         return Ok(ClaudeFileSync::default());
     }
 
-    let start_byte = match last_byte_offset {
-        Some(offset) if (0..=file_size).contains(&offset) => offset,
-        _ => 0,
-    };
-    // 旧行号游标待转换的行数（仅在无字节游标时生效）
-    let legacy_lines = match last_byte_offset {
-        None => cursor.map_or(0, |c| c.last_line_offset.max(0)),
-        Some(_) => 0,
-    };
-
     let mut file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    if start_byte > 0 {
-        file.seek(SeekFrom::Start(start_byte as u64))
-            .map_err(|e| AppError::Config(format!("无法定位文件偏移: {e}")))?;
-    }
+
+    // 非追加变化检测（仅字节游标路径）。检出后游标钉到当前 EOF、旧偏移
+    // 一概不重放（见函数文档：重放会把已剪明细双算进汇总）。指纹为 NULL
+    // （升级存量行转换后的首轮之前）时无从校验，按纯追加处理——这是旧
+    // 行号游标本就存在的暴露面，首轮写入后即有指纹。
+    let (start_byte, legacy_lines, mut tail_buf) = match last_byte_offset {
+        Some(offset) => {
+            let truncated = !(0..=file_size).contains(&offset);
+            // seed 同时用于指纹校验与滚动尾部缓冲；读取后文件位置恰好
+            // 停在 offset，无需再显式 seek
+            let seed = if truncated {
+                None
+            } else {
+                Some(read_tail_before(&mut file, offset)?)
+            };
+            let rewritten = match (&seed, last_fingerprint) {
+                (Some(seed), Some(expected)) => claude_tail_fingerprint(seed) != expected,
+                _ => false,
+            };
+            if truncated || rewritten {
+                let reason = if truncated { "截断" } else { "重写" };
+                log::warn!(
+                    "[SESSION-SYNC] 文件被外部{reason}，游标钉至 EOF、不重放旧区间: {}",
+                    file_path.display()
+                );
+                let tail = read_tail_before(&mut file, file_size)?;
+                let fingerprint = claude_tail_fingerprint(&tail);
+                let conn = lock_conn!(db.conn);
+                update_claude_sync_state_on_conn(
+                    &conn,
+                    &file_path_str,
+                    file_modified,
+                    file_size,
+                    Some(fingerprint),
+                )?;
+                return Ok(ClaudeFileSync::default());
+            }
+            (offset, 0, seed.unwrap_or_default())
+        }
+        // 旧行号游标：从头按行转换（下方转换段），tail 缓冲从空积累
+        None => (
+            0,
+            cursor.map_or(0, |c| c.last_line_offset.max(0)),
+            Vec::new(),
+        ),
+    };
+
     let mut reader = BufReader::new(file);
 
     // 游标只推进到最后一个完整行之后
@@ -386,11 +479,12 @@ fn sync_single_file(
         if read == 0 {
             break;
         }
+        push_committed_tail(&mut tail_buf, &buf);
         committed_offset += read as i64;
         skipped_legacy_lines += 1;
     }
 
-    let mut read_error = false;
+    let mut read_error: Option<String> = None;
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
     let mut current_session_id: Option<String> = None;
 
@@ -399,14 +493,16 @@ fn sync_single_file(
         let read = match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(_) => {
+            Err(e) => {
                 // IO 错误：已提交的部分照常入库；游标写旧 mtime 让下轮
-                // mtime 门放行、从 committed_offset 续读（见写入处）
-                read_error = true;
+                // mtime 门放行、从 committed_offset 续读（见写入处）。
+                // 错误消息带回上层：手动同步没有下一轮，须让用户看到
+                read_error = Some(e.to_string());
                 break;
             }
         };
         if buf.ends_with(b"\n") {
+            push_committed_tail(&mut tail_buf, &buf);
             committed_offset += read as i64;
         } else {
             incomplete_tail = true;
@@ -554,12 +650,21 @@ fn sync_single_file(
     // 更新同步状态（字节游标）。读错误时盖旧 mtime 而非当前值：盖当前值
     // 会让下轮在 mtime 门被跳过，未读完的完整行要等文件再次变化才有机会。
     // incomplete_tail 无需此处理——半行补全必然伴随 append 抬高 mtime。
-    let stamped_modified = if read_error {
+    let stamped_modified = if read_error.is_some() {
         last_modified
     } else {
         file_modified
     };
-    update_claude_sync_state_on_conn(&tx, &file_path_str, stamped_modified, committed_offset)?;
+    // tail_buf 始终恰好是 committed_offset 前的末段字节：增量路径以边界
+    // seed 起始，之后只在游标推进（完整行）时追加
+    let fingerprint = claude_tail_fingerprint(&tail_buf);
+    update_claude_sync_state_on_conn(
+        &tx,
+        &file_path_str,
+        stamped_modified,
+        committed_offset,
+        Some(fingerprint),
+    )?;
     tx.commit()
         .map_err(|e| AppError::Database(format!("提交会话用量导入事务失败: {e}")))?;
 
@@ -567,6 +672,7 @@ fn sync_single_file(
         imported,
         skipped,
         incomplete_tail,
+        read_error,
     })
 }
 
@@ -577,6 +683,7 @@ fn update_claude_sync_state_on_conn(
     file_path: &str,
     last_modified: i64,
     byte_offset: i64,
+    tail_fingerprint: Option<i64>,
 ) -> Result<(), AppError> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -585,15 +692,17 @@ fn update_claude_sync_state_on_conn(
 
     conn.prepare_cached(
         "INSERT OR REPLACE INTO session_log_sync
-             (file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset)
-         VALUES (?1, ?2, 0, ?3, ?4)",
+             (file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset,
+              last_tail_fingerprint)
+         VALUES (?1, ?2, 0, ?3, ?4, ?5)",
     )
     .and_then(|mut stmt| {
         stmt.execute(rusqlite::params![
             file_path,
             last_modified,
             now,
-            byte_offset
+            byte_offset,
+            tail_fingerprint
         ])
     })
     .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
@@ -1172,7 +1281,12 @@ mod tests {
     }
 
     #[test]
-    fn test_truncated_file_rescans_from_start_without_duplicates() -> Result<(), AppError> {
+    fn test_truncated_file_pins_cursor_at_eof_without_replay() -> Result<(), AppError> {
+        // 文件被外部截断（游标超过新大小）：游标钉到当前 EOF、不重放旧
+        // 区间。关键场景：明细已被 rollup_and_prune 剪掉（这里导入后删掉
+        // 模拟），request_id 去重失明——若回退从头重扫，截断文件里残留的
+        // msg_a 会重导并在下次 rollup 二次累加。代价（刻意）：msg_a 也
+        // 不再重放，丢行优于双算
         let db = Database::memory()?;
         let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
@@ -1189,13 +1303,90 @@ mod tests {
         .unwrap();
         assert_eq!(sync_with_cursor(&db, &file)?.imported, 2);
 
-        // 文件被截断重写（游标超过新大小）→ 从头重扫，已导入的行去重
+        // 模拟 rollup 剪掉明细
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute("DELETE FROM proxy_request_logs", [])?;
+        }
+
         fs::write(&file, format!("{}\n", assistant_line("msg_a", 5))).unwrap();
         bump_mtime(&file);
         let rescan = sync_with_cursor(&db, &file)?;
-        assert_eq!((rescan.imported, rescan.skipped), (0, 1));
+        assert_eq!(
+            (rescan.imported, rescan.skipped),
+            (0, 0),
+            "截断后不重放任何旧区间"
+        );
         let size = fs::metadata(&file).unwrap().len() as i64;
-        assert_eq!(byte_cursor(&db, &file), Some(size));
+        assert_eq!(byte_cursor(&db, &file), Some(size), "游标钉在当前 EOF");
+        {
+            let conn = lock_conn!(db.conn);
+            let rows: i64 =
+                conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))?;
+            assert_eq!(rows, 0, "已剪明细不得被重导");
+        }
+
+        // 钉住后追加恢复正常增量
+        let mut content = fs::read(&file).unwrap();
+        content.extend_from_slice(format!("{}\n", assistant_line("msg_c", 7)).as_bytes());
+        fs::write(&file, &content).unwrap();
+        bump_mtime(&file);
+        let after = sync_with_cursor(&db, &file)?;
+        assert_eq!((after.imported, after.skipped), (1, 0), "追加恢复增量");
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_same_size_rewrite_detected_by_tail_fingerprint() -> Result<(), AppError> {
+        // 同尺寸重写靠 size 检测不出来（游标仍在范围内），只有游标边界前
+        // 的尾部指纹能发现。检出后同样钉 EOF 不重放：重写内容里可能混着
+        // 已剪的旧事件，从旧偏移切入或回头重扫都会双算
+        let db = Database::memory()?;
+        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("session.jsonl");
+
+        fs::write(&file, format!("{}\n", assistant_line("msg_a", 5))).unwrap();
+        assert_eq!(sync_with_cursor(&db, &file)?.imported, 1);
+        let original_size = fs::metadata(&file).unwrap().len() as i64;
+
+        // 等长不同内容的重写（msg_x 与 msg_a 同字节数）
+        fs::write(&file, format!("{}\n", assistant_line("msg_x", 5))).unwrap();
+        bump_mtime(&file);
+        assert_eq!(
+            fs::metadata(&file).unwrap().len() as i64,
+            original_size,
+            "前置条件：重写后文件大小不变"
+        );
+        let rescan = sync_with_cursor(&db, &file)?;
+        assert_eq!(
+            (rescan.imported, rescan.skipped),
+            (0, 0),
+            "指纹失配后不重放重写内容"
+        );
+        {
+            let conn = lock_conn!(db.conn);
+            let msg_x_rows: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
+                rusqlite::params![format!(
+                    "{}msg_x",
+                    crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX
+                )],
+                |row| row.get(0),
+            )?;
+            assert_eq!(msg_x_rows, 0, "重写内容不得入库");
+        }
+        assert_eq!(byte_cursor(&db, &file), Some(original_size));
+
+        // 指纹已按新内容更新：之后的追加恢复正常增量
+        let mut content = fs::read(&file).unwrap();
+        content.extend_from_slice(format!("{}\n", assistant_line("msg_c", 7)).as_bytes());
+        fs::write(&file, &content).unwrap();
+        bump_mtime(&file);
+        let after = sync_with_cursor(&db, &file)?;
+        assert_eq!((after.imported, after.skipped), (1, 0), "追加恢复增量");
 
         fs::remove_dir_all(&tmp).ok();
         Ok(())
