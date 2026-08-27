@@ -1718,7 +1718,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.19.5-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260827-r20'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260827-r21'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1731,7 +1731,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260827-r20/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260827-r21/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2522,9 +2522,9 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
     || fail 'privileged staging test left a candidate directory'
 }
 
-test_r20_release_contract_and_documentation() {
-  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260827-r20'"
-  assert_contains "$INSTALLER" '下载并校验 R20 安装器、CC Switch 和配置资源'
+test_r21_release_contract_and_documentation() {
+  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260827-r21'"
+  assert_contains "$INSTALLER" '下载并校验 R21 安装器、CC Switch 和配置资源'
   assert_contains "$MODELHUB_GUIDE" '/etc/codex/managed_config.toml'
   assert_contains "$MODELHUB_GUIDE" 'openai_base_url = "http://127.0.0.1:15721/v1"'
   assert_contains "$MODELHUB_GUIDE" 'model_auto_compact_token_limit = 600000'
@@ -2541,13 +2541,13 @@ test_r20_release_contract_and_documentation() {
   assert_contains "$MODELHUB_GUIDE" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
   assert_contains "$MODELHUB_GUIDE" 'review_model = "gpt-5.5-2026-04-24"'
   assert_contains "$MODELHUB_GUIDE" 'base_url = "http://127.0.0.1:15721/v1"'
-  assert_contains "$MODELHUB_GUIDE" '是否使用 R20 标准配置完整覆盖？[y/N]'
+  assert_contains "$MODELHUB_GUIDE" '是否使用 R21 标准配置完整覆盖？[y/N]'
   assert_contains "$MODELHUB_GUIDE" 'Mac 登录用户的管理员密码'
   assert_contains "$MODELHUB_GUIDE" '不是 `MODELHUB_AK`'
   assert_contains "$MODELHUB_GUIDE" '1,050,000'
   assert_contains "$MODELHUB_GUIDE" '移动端新建全新会话'
   assert_contains "$MODELHUB_GUIDE" 'CC Switch 不可用'
-  assert_contains "$CHANGELOG_FILE" 'ModelHub R20'
+  assert_contains "$CHANGELOG_FILE" 'ModelHub R21'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -3473,7 +3473,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260827-r20'"
+    "readonly RELEASE_TAG='modelhub-installer-20260827-r21'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.19.5-arm64.app.zip' \
@@ -3945,7 +3945,7 @@ run_test "managed config rollback restores existing file and mode" test_managed_
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
 run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
 run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
-run_test "R20 release contract and documentation" test_r20_release_contract_and_documentation
+run_test "R21 release contract and documentation" test_r21_release_contract_and_documentation
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -3989,7 +3989,7 @@ run_test "preflight rejects golden database without R12 resilience defaults" tes
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R20 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R21 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -4042,7 +4042,7 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R20 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R21 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
 run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
 run_test "package rejects sensitive content" test_package_rejects_sensitive_content
