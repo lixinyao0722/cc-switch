@@ -247,10 +247,22 @@ pub async fn handle_non_streaming(
 
     if let Some(pending) = ctx.modelhub_checkpoint.clone() {
         let parsed = serde_json::from_slice::<Value>(&body_bytes).ok();
-        state
-            .modelhub_context
-            .complete(pending, parsed.as_ref())
-            .await;
+        complete_modelhub_terminal_state(
+            &state.modelhub_context,
+            Some(pending),
+            ctx.modelhub_compatibility_learning.clone(),
+            parsed.as_ref(),
+        )
+        .await;
+    } else if ctx.modelhub_compatibility_learning.is_some() {
+        let parsed = serde_json::from_slice::<Value>(&body_bytes).ok();
+        complete_modelhub_terminal_state(
+            &state.modelhub_context,
+            None,
+            ctx.modelhub_compatibility_learning.clone(),
+            parsed.as_ref(),
+        )
+        .await;
     }
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
@@ -365,23 +377,76 @@ fn create_modelhub_checkpoint_collector(
     ctx: &RequestContext,
     state: &ProxyState,
 ) -> Option<SseUsageCollector> {
-    let pending = ctx.modelhub_checkpoint.clone()?;
-    let store = state.modelhub_context.clone();
-    Some(SseUsageCollector::new(
+    create_modelhub_terminal_collector(
         ctx.start_time,
-        Some(|data| data.contains("\"response.completed\"")),
+        state.modelhub_context.clone(),
+        ctx.modelhub_checkpoint.clone(),
+        ctx.modelhub_compatibility_learning.clone(),
+    )
+}
+
+async fn complete_modelhub_terminal_state(
+    store: &Arc<super::modelhub_context::ModelhubContextStore>,
+    pending_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    pending_learning: Option<super::forwarder::PendingModelhubCompatibilityLearning>,
+    terminal: Option<&Value>,
+) {
+    if let Some(pending) = pending_checkpoint {
+        store.complete(pending, terminal).await;
+    }
+    if let Some(pending) = pending_learning {
+        pending.complete(terminal).await;
+    }
+}
+
+fn create_modelhub_terminal_collector(
+    start_time: std::time::Instant,
+    store: Arc<super::modelhub_context::ModelhubContextStore>,
+    pending_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    pending_learning: Option<super::forwarder::PendingModelhubCompatibilityLearning>,
+) -> Option<SseUsageCollector> {
+    if pending_checkpoint.is_none() && pending_learning.is_none() {
+        return None;
+    }
+    Some(SseUsageCollector::new(
+        start_time,
+        Some(|data| {
+            [
+                "\"response.completed\"",
+                "\"response.failed\"",
+                "\"response.cancelled\"",
+                "\"response.incomplete\"",
+            ]
+            .iter()
+            .any(|terminal| data.contains(terminal))
+        }),
         move |events, _| {
             let terminal = events
                 .iter()
                 .rev()
                 .find(|event| {
-                    event.get("type").and_then(Value::as_str) == Some("response.completed")
+                    matches!(
+                        event.get("type").and_then(Value::as_str),
+                        Some(
+                            "response.completed"
+                                | "response.failed"
+                                | "response.cancelled"
+                                | "response.incomplete"
+                        )
+                    )
                 })
                 .cloned();
             let store = store.clone();
-            let pending = pending.clone();
+            let pending_checkpoint = pending_checkpoint.clone();
+            let pending_learning = pending_learning.clone();
             tokio::spawn(async move {
-                store.complete(pending, terminal.as_ref()).await;
+                complete_modelhub_terminal_state(
+                    &store,
+                    pending_checkpoint,
+                    pending_learning,
+                    terminal.as_ref(),
+                )
+                .await;
             });
         },
     ))
@@ -468,6 +533,16 @@ impl SseUsageCollector {
 
         (self.inner.on_complete)(events, first_token_ms);
     }
+
+    /// Stop collecting without invoking the completion callback. Terminal
+    /// state must not be committed when the upstream stream errors, times out,
+    /// or the downstream consumer drops it before a normal end.
+    pub async fn cancel(&self) {
+        if self.inner.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.inner.events.lock().await.clear();
+    }
 }
 
 struct SseUsageFinishGuard {
@@ -495,6 +570,36 @@ impl Drop for SseUsageFinishGuard {
                 });
             } else {
                 log::warn!("SSE 用量收尾保护触发时 Tokio runtime 不可用，跳过异步 finish");
+            }
+        }
+    }
+}
+
+struct SseTerminalFinishGuard {
+    collector: Option<SseUsageCollector>,
+}
+
+impl SseTerminalFinishGuard {
+    fn new(collector: SseUsageCollector) -> Self {
+        Self {
+            collector: Some(collector),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.collector = None;
+    }
+}
+
+impl Drop for SseTerminalFinishGuard {
+    fn drop(&mut self) {
+        if let Some(collector) = self.collector.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    collector.cancel().await;
+                });
+            } else {
+                log::warn!("SSE 终态收尾保护触发时 Tokio runtime 不可用，跳过异步 cancel");
             }
         }
     }
@@ -741,7 +846,8 @@ pub fn create_logged_passthrough_stream(
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
         let mut checkpoint_finish_guard = checkpoint_collector
             .clone()
-            .map(SseUsageFinishGuard::new);
+            .map(SseTerminalFinishGuard::new);
+        let mut stream_completed_normally = false;
         let inspect_sse_events =
             collector.is_some()
                 || checkpoint_collector.is_some()
@@ -899,6 +1005,7 @@ pub fn create_logged_passthrough_stream(
                 }
                 None => {
                     // 流正常结束
+                    stream_completed_normally = true;
                     break;
                 }
             }
@@ -911,7 +1018,11 @@ pub fn create_logged_passthrough_stream(
             guard.disarm();
         }
         if let Some(c) = checkpoint_collector.take() {
-            c.finish().await;
+            if stream_completed_normally {
+                c.finish().await;
+            } else {
+                c.cancel().await;
+            }
         }
         if let Some(guard) = &mut checkpoint_finish_guard {
             guard.disarm();
@@ -1022,10 +1133,203 @@ mod tests {
     };
     use crate::proxy::types::{ProxyConfig, ProxyStatus};
     use rust_decimal::Decimal;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::str::FromStr;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    async fn wait_for_session_learning(
+        sessions: &Arc<RwLock<std::collections::HashSet<String>>>,
+        expected: bool,
+    ) {
+        if !expected {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!sessions.read().await.contains("provider\0session"));
+            return;
+        }
+        for _ in 0..20 {
+            if sessions.read().await.contains("provider\0session") {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(sessions.read().await.contains("provider\0session"));
+    }
+
+    #[tokio::test]
+    async fn modelhub_non_streaming_failed_response_does_not_learn_session() {
+        let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let pending = crate::proxy::forwarder::PendingModelhubCompatibilityLearning::new(
+            sessions.clone(),
+            "provider\0session".into(),
+        );
+        let store = Arc::new(crate::proxy::modelhub_context::ModelhubContextStore::default());
+        let failed = json!({"id": "resp_failed", "status": "failed"});
+
+        complete_modelhub_terminal_state(&store, None, Some(pending), Some(&failed)).await;
+
+        assert!(sessions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modelhub_streaming_failed_terminal_does_not_learn_after_output() {
+        let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let pending = crate::proxy::forwarder::PendingModelhubCompatibilityLearning::new(
+            sessions.clone(),
+            "provider\0session".into(),
+        );
+        let store = Arc::new(crate::proxy::modelhub_context::ModelhubContextStore::default());
+        let collector = create_modelhub_terminal_collector(
+            std::time::Instant::now(),
+            store,
+            None,
+            Some(pending),
+        )
+        .expect("terminal collector");
+        let stream = futures::stream::iter([Ok(Bytes::from_static(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"status\":\"failed\"}}\n\n",
+        ))]);
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        };
+
+        create_logged_passthrough_stream(
+            stream,
+            "ModelHub/Test",
+            None,
+            Some(collector),
+            config,
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        wait_for_session_learning(&sessions, false).await;
+    }
+
+    #[tokio::test]
+    async fn modelhub_streaming_completed_terminal_learns_session() {
+        let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let pending = crate::proxy::forwarder::PendingModelhubCompatibilityLearning::new(
+            sessions.clone(),
+            "provider\0session".into(),
+        );
+        let store = Arc::new(crate::proxy::modelhub_context::ModelhubContextStore::default());
+        let collector = create_modelhub_terminal_collector(
+            std::time::Instant::now(),
+            store,
+            None,
+            Some(pending),
+        )
+        .expect("terminal collector");
+        let stream = futures::stream::iter([Ok(Bytes::from_static(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        ))]);
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        };
+
+        create_logged_passthrough_stream(
+            stream,
+            "ModelHub/Test",
+            None,
+            Some(collector),
+            config,
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        wait_for_session_learning(&sessions, true).await;
+    }
+
+    #[tokio::test]
+    async fn modelhub_streaming_interruption_after_completed_does_not_learn_session() {
+        let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let pending = crate::proxy::forwarder::PendingModelhubCompatibilityLearning::new(
+            sessions.clone(),
+            "provider\0session".into(),
+        );
+        let store = Arc::new(crate::proxy::modelhub_context::ModelhubContextStore::default());
+        let collector = create_modelhub_terminal_collector(
+            std::time::Instant::now(),
+            store,
+            None,
+            Some(pending),
+        )
+        .expect("terminal collector");
+        let stream = futures::stream::iter([
+            Ok(Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n",
+            )),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        };
+
+        let results = create_logged_passthrough_stream(
+            stream,
+            "ModelHub/Test",
+            None,
+            Some(collector),
+            config,
+            None,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(results.last().expect("stream error").is_err());
+        wait_for_session_learning(&sessions, false).await;
+    }
+
+    #[tokio::test]
+    async fn modelhub_downstream_drop_after_completed_does_not_learn_session() {
+        let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let pending = crate::proxy::forwarder::PendingModelhubCompatibilityLearning::new(
+            sessions.clone(),
+            "provider\0session".into(),
+        );
+        let store = Arc::new(crate::proxy::modelhub_context::ModelhubContextStore::default());
+        let collector = create_modelhub_terminal_collector(
+            std::time::Instant::now(),
+            store,
+            None,
+            Some(pending),
+        )
+        .expect("terminal collector");
+        let upstream = futures::stream::iter([Ok(Bytes::from_static(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        ))]);
+        let config = StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+            total_timeout: 0,
+            progress_timeout: 0,
+        };
+
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "ModelHub/Test",
+            None,
+            Some(collector),
+            config,
+            None,
+        ));
+        assert!(downstream.next().await.expect("first frame").is_ok());
+        drop(downstream);
+        wait_for_session_learning(&sessions, false).await;
+    }
 
     #[test]
     fn modelhub_stream_progress_ignores_heartbeats_and_metadata() {

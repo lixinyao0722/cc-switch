@@ -229,6 +229,9 @@ pub struct ForwardResult {
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
     /// ModelHub checkpoint candidate completed by the response processor.
     pub(crate) modelhub_checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
+    /// ModelHub encrypted-reasoning compatibility is learned only after the
+    /// downstream response reaches a successful Responses terminal.
+    pub(crate) modelhub_compatibility_learning: Option<PendingModelhubCompatibilityLearning>,
     pub(crate) modelhub_admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -242,6 +245,45 @@ struct ModelhubAttemptState {
     checkpoint: Option<super::modelhub_context::PendingCheckpoint>,
     admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     mode: super::modelhub_context::ContextMode,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingModelhubCompatibilityLearning {
+    sessions: Arc<RwLock<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl PendingModelhubCompatibilityLearning {
+    pub(crate) fn new(
+        sessions: Arc<RwLock<std::collections::HashSet<String>>>,
+        key: String,
+    ) -> Self {
+        Self { sessions, key }
+    }
+
+    pub(crate) async fn complete(self, response: Option<&Value>) {
+        if !modelhub_response_completed(response) {
+            return;
+        }
+        const MAX_KEYS: usize = 2048;
+        let mut sessions = self.sessions.write().await;
+        if sessions.len() >= MAX_KEYS && !sessions.contains(&self.key) {
+            sessions.clear();
+        }
+        sessions.insert(self.key);
+    }
+}
+
+fn modelhub_response_completed(response: Option<&Value>) -> bool {
+    let Some(response) = response else {
+        return false;
+    };
+    let response = if response.get("type").and_then(Value::as_str) == Some("response.completed") {
+        response.get("response").unwrap_or(response)
+    } else {
+        response
+    };
+    response.get("status").and_then(Value::as_str) == Some("completed")
 }
 
 /// 活跃连接 RAII guard
@@ -460,16 +502,11 @@ impl RequestForwarder {
         Some(format!("{}\0{}", provider.id, self.session_id))
     }
 
-    async fn remember_modelhub_invalid_encrypted_reasoning_session(&self, key: String) {
-        const MAX_KEYS: usize = 2048;
-        let mut sessions = self
-            .modelhub_invalid_encrypted_reasoning_sessions
+    async fn take_modelhub_invalid_encrypted_reasoning_session(&self, key: &str) -> bool {
+        self.modelhub_invalid_encrypted_reasoning_sessions
             .write()
-            .await;
-        if sessions.len() >= MAX_KEYS && !sessions.contains(&key) {
-            sessions.clear();
-        }
-        sessions.insert(key);
+            .await
+            .remove(key)
     }
 
     async fn is_duplicate_modelhub_activity_summary(
@@ -749,10 +786,8 @@ impl RequestForwarder {
                 self.modelhub_invalid_encrypted_reasoning_session_key(app_type, endpoint, provider);
             if let Some(key) = modelhub_invalid_encrypted_reasoning_session_key.as_deref() {
                 if self
-                    .modelhub_invalid_encrypted_reasoning_sessions
-                    .read()
+                    .take_modelhub_invalid_encrypted_reasoning_session(key)
                     .await
-                    .contains(key)
                 {
                     let sanitization =
                         super::modelhub_compat::sanitize_encrypted_reasoning(&mut provider_body);
@@ -843,6 +878,7 @@ impl RequestForwarder {
                                 outbound_model,
                                 connection_guard: None,
                                 modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                modelhub_compatibility_learning: None,
                                 modelhub_admission_permit: retry_attempt.admission_permit.take(),
                             });
                         }
@@ -857,6 +893,7 @@ impl RequestForwarder {
                             outbound_model,
                             connection_guard: None,
                             modelhub_checkpoint: modelhub_attempt.checkpoint.take(),
+                            modelhub_compatibility_learning: None,
                             modelhub_admission_permit: modelhub_attempt.admission_permit.take(),
                         });
                     }
@@ -910,6 +947,7 @@ impl RequestForwarder {
                         outbound_model,
                         connection_guard: None,
                         modelhub_checkpoint: modelhub_attempt.checkpoint.take(),
+                        modelhub_compatibility_learning: None,
                         modelhub_admission_permit: modelhub_attempt.admission_permit.take(),
                     });
                 }
@@ -948,6 +986,7 @@ impl RequestForwarder {
                                     outbound_model,
                                     connection_guard: None,
                                     modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                    modelhub_compatibility_learning: None,
                                     modelhub_admission_permit: retry_attempt.admission_permit.take(),
                                 });
                             }
@@ -970,12 +1009,6 @@ impl RequestForwarder {
                             &mut provider_body,
                         );
                         if sanitization.changed() {
-                            if let Some(key) =
-                                modelhub_invalid_encrypted_reasoning_session_key.clone()
-                            {
-                                self.remember_modelhub_invalid_encrypted_reasoning_session(key)
-                                    .await;
-                            }
                             log::warn!(
                                 "[{app_type_str}] [ModelHubCompat] invalid encrypted reasoning detected; retrying provider={} after sanitizing reasoning (removed_fields={}, removed_empty_items={})",
                                 provider.id,
@@ -1000,8 +1033,18 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!(
-                                        "[{app_type_str}] [ModelHubCompat] encrypted reasoning fallback succeeded"
+                                        "[{app_type_str}] [ModelHubCompat] encrypted reasoning fallback accepted; waiting for a completed Responses terminal before learning the session"
                                     );
+                                    let modelhub_compatibility_learning =
+                                        modelhub_invalid_encrypted_reasoning_session_key
+                                            .clone()
+                                            .map(|key| {
+                                                PendingModelhubCompatibilityLearning::new(
+                                                    self.modelhub_invalid_encrypted_reasoning_sessions
+                                                        .clone(),
+                                                    key,
+                                                )
+                                            });
                                     self.record_success_result(
                                         &provider.id,
                                         app_type_str,
@@ -1052,6 +1095,7 @@ impl RequestForwarder {
                                         outbound_model,
                                         connection_guard: None,
                                         modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_compatibility_learning,
                                         modelhub_admission_permit: retry_attempt
                                             .admission_permit
                                             .take(),
@@ -1176,6 +1220,7 @@ impl RequestForwarder {
                                         outbound_model,
                                         connection_guard: None,
                                         modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_compatibility_learning: None,
                                         modelhub_admission_permit: retry_attempt
                                             .admission_permit
                                             .take(),
@@ -1331,6 +1376,7 @@ impl RequestForwarder {
                                             outbound_model,
                                             connection_guard: None,
                                             modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                            modelhub_compatibility_learning: None,
                                             modelhub_admission_permit: retry_attempt
                                                 .admission_permit
                                                 .take(),
@@ -1497,6 +1543,7 @@ impl RequestForwarder {
                                         outbound_model,
                                         connection_guard: None,
                                         modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_compatibility_learning: None,
                                         modelhub_admission_permit: retry_attempt
                                             .admission_permit
                                             .take(),
@@ -1958,6 +2005,10 @@ impl RequestForwarder {
         } else {
             adapter.build_url(&base_url, &effective_endpoint)
         };
+        self.router
+            .reject_upstream_self_reference(&url)
+            .await
+            .map_err(|error| ProxyError::ConfigError(error.to_string()))?;
 
         // 记录映射后的出站模型名（此时 mapped_body 已完成接管映射 / [1m] 剥离 /
         // Copilot 归一化）。格式转换后若 body 仍带 model 字段会在下方刷新覆盖；
@@ -4575,6 +4626,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwarding_rejects_provider_upstream_that_points_to_cc_switch_itself() {
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": "http://127.0.0.1:15721/v1",
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "loop-session".parse().unwrap(),
+            ),
+            ("thread-id".parse().unwrap(), "loop-thread".parse().unwrap()),
+        ]);
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "loop-session".to_string();
+        forwarder.session_client_provided = true;
+        forwarder
+            .router
+            .set_active_listener(super::super::provider_router::ActiveListener::new(
+                "127.0.0.1:15721".parse().unwrap(),
+                false,
+            ))
+            .await;
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("self-referential upstream must fail before network I/O"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error.error, ProxyError::ConfigError(_)));
+        assert!(error.error.to_string().contains("代理自循环"));
+    }
+
+    #[tokio::test]
     async fn modelhub_invalid_encrypted_content_retries_without_inherited_reasoning_items() {
         let received_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
         let received_bodies_for_route = received_bodies.clone();
@@ -4688,6 +4793,13 @@ mod tests {
         let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
         forwarder.session_id = "child-session".to_string();
         forwarder.session_client_provided = true;
+        let session_key = forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &provider,
+            )
+            .expect("session key");
 
         let first_result = forwarder
             .forward_with_retry(
@@ -4701,7 +4813,222 @@ mod tests {
             )
             .await;
 
+        let mut first_result = match first_result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "sanitized retry should recover the fork request: {}",
+                error.error
+            ),
+        };
+        assert!(
+            !forwarder
+                .modelhub_invalid_encrypted_reasoning_sessions
+                .read()
+                .await
+                .contains(&session_key),
+            "receiving 2xx headers must not learn the session before the Responses terminal"
+        );
+        first_result
+            .modelhub_compatibility_learning
+            .take()
+            .expect("sanitized fallback should defer learning")
+            .complete(Some(&json!({
+                "type": "response.completed",
+                "response": {"id": "resp_child", "status": "completed", "output": []}
+            })))
+            .await;
+        assert!(
+            forwarder
+                .modelhub_invalid_encrypted_reasoning_sessions
+                .read()
+                .await
+                .contains(&session_key),
+            "a completed sanitized fallback should learn the incompatible session"
+        );
         let second_result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body.clone(),
+                headers.clone(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await;
+        let third_result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body.clone(),
+                headers.clone(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await;
+
+        server.abort();
+        let second_result = match second_result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "learned session cleanup should preserve later requests: {}",
+                error.error
+            ),
+        };
+        let third_result = match third_result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "re-probing the original history should remain recoverable: {}",
+                error.error
+            ),
+        };
+        assert_eq!(first_result.response.status(), StatusCode::OK);
+        assert_eq!(second_result.response.status(), StatusCode::OK);
+        assert_eq!(third_result.response.status(), StatusCode::OK);
+        let bodies = received_bodies.lock().expect("request body lock");
+        assert_eq!(
+            bodies.len(),
+            5,
+            "one learned pre-clean is followed by an original-history probe and fallback"
+        );
+        assert_eq!(
+            bodies[0]["input"]
+                .as_array()
+                .expect("first request input")
+                .len(),
+            6
+        );
+        let retry_input = bodies[1]["input"].as_array().expect("retry input");
+        assert_eq!(retry_input.len(), 6);
+        assert_eq!(retry_input[0]["id"], "rs_parent_1");
+        assert_eq!(retry_input[0]["summary"][0]["text"], "parent reasoning");
+        assert!(retry_input[0].get("encrypted_content").is_none());
+        assert_eq!(retry_input[1]["content"][0]["text"], "parent answer");
+        assert_eq!(retry_input[2]["id"], "rs_parent_2");
+        assert!(retry_input[2].get("encrypted_content").is_none());
+        assert_eq!(retry_input[3]["call_id"], "call_parent");
+        assert_eq!(retry_input[4]["output"], "file contents");
+        assert_eq!(retry_input[5]["content"][0]["text"], "continue in the fork");
+        assert!(retry_input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none()));
+        assert_eq!(bodies[2]["input"], bodies[1]["input"]);
+        assert!(bodies[3]["input"]
+            .as_array()
+            .expect("re-probe input")
+            .iter()
+            .any(|item| item.get("encrypted_content").is_some()));
+        assert_eq!(bodies[4]["input"], bodies[1]["input"]);
+        assert_eq!(
+            bodies[2]["input"]
+                .as_array()
+                .expect("learned request input")
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn modelhub_encrypted_reasoning_retry_failure_does_not_learn_session() {
+        let received_requests = Arc::new(AtomicUsize::new(0));
+        let received_requests_for_route = received_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_requests = received_requests_for_route.clone();
+                async move {
+                    received_requests.fetch_add(1, Ordering::SeqCst);
+                    let has_encrypted_reasoning = body
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .is_some_and(|input| {
+                            input.iter().any(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("reasoning")
+                                    && item.get("encrypted_content").is_some()
+                            })
+                        });
+                    if has_encrypted_reasoning {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "code: invalid_encrypted_content; message: incompatible ciphertext",
+                                    "type": "invalid_request_error",
+                                    "code": "-4003"
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(json!({
+                                "error": {
+                                    "message": "业务申请资源不足，平台申请扩容",
+                                    "code": "-2004"
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_mut())
+            .and_then(|overrides| overrides.retry_429.as_mut())
+            .expect("ModelHub 429 config")
+            .max_retries = 0;
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_parent",
+                "summary": [{"type": "summary_text", "text": "visible"}],
+                "encrypted_content": "ciphertext"
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "retry-429-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "retry-429-thread".parse().unwrap(),
+            ),
+        ]);
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "retry-429-session".to_string();
+        forwarder.session_client_provided = true;
+        let session_key = forwarder
+            .modelhub_invalid_encrypted_reasoning_session_key(
+                &AppType::Codex,
+                "/responses",
+                &provider,
+            )
+            .expect("session key");
+
+        let result = forwarder
             .forward_with_retry(
                 &AppType::Codex,
                 http::Method::POST,
@@ -4714,56 +5041,18 @@ mod tests {
             .await;
 
         server.abort();
-        let first_result = match first_result {
-            Ok(result) => result,
-            Err(error) => panic!(
-                "sanitized retry should recover the fork request: {}",
-                error.error
-            ),
-        };
-        let second_result = match second_result {
-            Ok(result) => result,
-            Err(error) => panic!(
-                "learned session cleanup should preserve later requests: {}",
-                error.error
-            ),
-        };
-        assert_eq!(first_result.response.status(), StatusCode::OK);
-        assert_eq!(second_result.response.status(), StatusCode::OK);
-        let bodies = received_bodies.lock().expect("request body lock");
-        assert_eq!(
-            bodies.len(),
-            3,
-            "the learned second request must skip the failing encrypted attempt"
+        assert!(
+            result.is_err(),
+            "the sanitized retry should surface the 429"
         );
-        assert_eq!(
-            bodies[0]["input"]
-                .as_array()
-                .expect("first request input")
-                .len(),
-            6
-        );
-        let retry_input = bodies[1]["input"].as_array().expect("retry input");
-        assert_eq!(retry_input.len(), 5);
-        assert_eq!(retry_input[0]["id"], "rs_parent_1");
-        assert_eq!(retry_input[0]["summary"][0]["text"], "parent reasoning");
-        assert!(retry_input[0].get("encrypted_content").is_none());
-        assert_eq!(retry_input[1]["content"][0]["text"], "parent answer");
-        assert_eq!(retry_input[2]["call_id"], "call_parent");
-        assert_eq!(retry_input[3]["output"], "file contents");
-        assert_eq!(retry_input[4]["content"][0]["text"], "continue in the fork");
-        assert!(retry_input
-            .iter()
-            .all(|item| item.get("encrypted_content").is_none()));
-        assert_eq!(bodies[2]["input"], bodies[1]["input"]);
-        assert_eq!(
-            bodies[2]["input"]
-                .as_array()
-                .expect("learned request input")
-                .iter()
-                .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
-                .count(),
-            1
+        assert_eq!(received_requests.load(Ordering::SeqCst), 2);
+        assert!(
+            !forwarder
+                .modelhub_invalid_encrypted_reasoning_sessions
+                .read()
+                .await
+                .contains(&session_key),
+            "a failed compatibility retry must not poison future requests"
         );
     }
 
@@ -4840,11 +5129,14 @@ mod tests {
             sessions.extend((0..2048).map(|index| format!("provider\0session-{index}")));
         }
 
-        forwarder
-            .remember_modelhub_invalid_encrypted_reasoning_session(
-                "current-provider\0current-session".to_string(),
-            )
-            .await;
+        PendingModelhubCompatibilityLearning::new(
+            forwarder
+                .modelhub_invalid_encrypted_reasoning_sessions
+                .clone(),
+            "current-provider\0current-session".to_string(),
+        )
+        .complete(Some(&json!({"status": "completed"})))
+        .await;
 
         let sessions = forwarder
             .modelhub_invalid_encrypted_reasoning_sessions
@@ -4852,6 +5144,45 @@ mod tests {
             .await;
         assert_eq!(sessions.len(), 1);
         assert!(sessions.contains("current-provider\0current-session"));
+    }
+
+    #[tokio::test]
+    async fn modelhub_compatibility_learning_requires_completed_response_terminal() {
+        for terminal in [
+            None,
+            Some(json!({"id": "resp_failed", "status": "failed"})),
+            Some(json!({
+                "type": "response.failed",
+                "response": {"id": "resp_failed", "status": "failed"}
+            })),
+            Some(json!({
+                "type": "response.cancelled",
+                "response": {"id": "resp_cancelled", "status": "cancelled"}
+            })),
+        ] {
+            let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+            PendingModelhubCompatibilityLearning::new(sessions.clone(), "provider\0session".into())
+                .complete(terminal.as_ref())
+                .await;
+            assert!(
+                sessions.read().await.is_empty(),
+                "failed, cancelled, or interrupted responses must not be learned"
+            );
+        }
+
+        for terminal in [
+            json!({"id": "resp_ok", "status": "completed"}),
+            json!({
+                "type": "response.completed",
+                "response": {"id": "resp_ok", "status": "completed"}
+            }),
+        ] {
+            let sessions = Arc::new(RwLock::new(std::collections::HashSet::new()));
+            PendingModelhubCompatibilityLearning::new(sessions.clone(), "provider\0session".into())
+                .complete(Some(&terminal))
+                .await;
+            assert!(sessions.read().await.contains("provider\0session"));
+        }
     }
 
     #[tokio::test]

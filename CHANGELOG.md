@@ -5,6 +5,11 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.19.5] - 2026-08-27
+
+- **ModelHub R19 Routing Recovery**: Codex takeover now rebuilds a missing Live backup from the current Provider source of truth instead of treating the local `127.0.0.1:15721` route as an upstream. Requests also fail fast when a Provider resolves back to the active CC Switch listener, preventing an infinite proxy loop while preserving the ModelHub API key and ChatGPT login state.
+- **Responses Reasoning Dependency Safety**: Encrypted-reasoning compatibility cleanup now preserves empty reasoning items that own following function or custom-tool calls, so calls and outputs are never orphaned. Provider/session incompatibility is remembered only after a successful sanitized retry; failed 400/429 retries do not poison the session, and a learned session automatically re-probes the original history after one successful pre-cleaned request.
+
 ## [3.19.4] - 2026-08-27
 
 - **ModelHub R18 macOS Official Route Switching Hotfix**: Switching from ModelHub back to OpenAI Official no longer fails with exit code 127. The privileged route script now uses the macOS system locations `/bin/test` and `/bin/rmdir` instead of nonexistent `/usr/bin` paths, with regression coverage that executes both tools directly.

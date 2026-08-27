@@ -8,16 +8,33 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use url::Host;
 
 /// 供应商路由器
 pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
+    /// 实际已绑定的监听地址。不能使用数据库配置代替：配置热更新后，
+    /// 运行中的 listener 仍可能绑定在旧 socket 上。
+    active_listener: Arc<RwLock<Option<ActiveListener>>>,
     /// 熔断器管理器 - key 格式: "app_type:provider_id"
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ActiveListener {
+    addr: SocketAddr,
+    ipv6_only: bool,
+}
+
+impl ActiveListener {
+    pub(crate) fn new(addr: SocketAddr, ipv6_only: bool) -> Self {
+        Self { addr, ipv6_only }
+    }
 }
 
 impl ProviderRouter {
@@ -25,8 +42,114 @@ impl ProviderRouter {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
             db,
+            active_listener: Arc::new(RwLock::new(None)),
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub async fn set_active_listener(&self, listener: ActiveListener) {
+        *self.active_listener.write().await = Some(listener);
+    }
+
+    pub async fn clear_active_listener(&self) {
+        *self.active_listener.write().await = None;
+    }
+
+    pub async fn reject_upstream_self_reference(&self, upstream_url: &str) -> Result<(), AppError> {
+        let Some(listener) = *self.active_listener.read().await else {
+            return Ok(());
+        };
+        if Self::upstream_points_to_proxy_listener(upstream_url, listener) {
+            return Err(AppError::Message(format!(
+                "上游地址 {} 指向 CC Switch 自身监听端口，已拒绝请求以避免代理自循环",
+                crate::proxy::http_client::mask_url(upstream_url)
+            )));
+        }
+        Ok(())
+    }
+
+    fn upstream_points_to_proxy_listener(upstream_url: &str, listener: ActiveListener) -> bool {
+        let Ok(url) = url::Url::parse(upstream_url) else {
+            return false;
+        };
+        if url.port_or_known_default() != Some(listener.addr.port()) {
+            return false;
+        }
+        let Some(upstream_host) = url.host() else {
+            return false;
+        };
+
+        let listener_addr = listener.addr;
+        let listener_ipv6_only = listener.ipv6_only;
+        let listener_ip = Self::canonical_ip(listener_addr.ip());
+        let is_local_interface = |candidate: IpAddr| {
+            let candidate = Self::canonical_ip(candidate);
+            candidate.is_loopback()
+                || if_addrs::get_if_addrs().is_ok_and(|interfaces| {
+                    interfaces
+                        .into_iter()
+                        .any(|interface| Self::canonical_ip(interface.ip()) == candidate)
+                })
+        };
+        match upstream_host {
+            Host::Domain(host) => {
+                std::net::ToSocketAddrs::to_socket_addrs(&(host, listener_addr.port())).is_ok_and(
+                    |mut addresses| {
+                        addresses.any(|address| {
+                            Self::listener_accepts_ip(
+                                listener_ip,
+                                listener_ipv6_only,
+                                address.ip(),
+                                &is_local_interface,
+                            )
+                        })
+                    },
+                )
+            }
+            Host::Ipv4(upstream) => Self::listener_accepts_ip(
+                listener_ip,
+                listener_ipv6_only,
+                IpAddr::V4(upstream),
+                &is_local_interface,
+            ),
+            Host::Ipv6(upstream) => Self::listener_accepts_ip(
+                listener_ip,
+                listener_ipv6_only,
+                IpAddr::V6(upstream),
+                &is_local_interface,
+            ),
+        }
+    }
+
+    fn canonical_ip(ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V6(ipv6) => ipv6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(ipv6)),
+            ipv4 => ipv4,
+        }
+    }
+
+    fn listener_accepts_ip(
+        listener: IpAddr,
+        ipv6_only: bool,
+        upstream: IpAddr,
+        is_local_interface: &impl Fn(IpAddr) -> bool,
+    ) -> bool {
+        let listener = Self::canonical_ip(listener);
+        let upstream = Self::canonical_ip(upstream);
+        if !listener.is_unspecified() {
+            return upstream == listener;
+        }
+        let same_family = matches!(
+            (listener, upstream),
+            (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+        );
+        // macOS IPv6 wildcard listeners are dual-stack unless IPV6_V6ONLY is
+        // explicitly enabled. Tokio's standard bind path keeps that default.
+        let ipv6_dual_stack = matches!(listener, IpAddr::V6(_)) && !ipv6_only;
+        (same_family || ipv6_dual_stack) && is_local_interface(upstream)
     }
 
     /// 选择可用的供应商（支持故障转移）
@@ -519,5 +642,146 @@ mod tests {
         let third = router.allow_provider_request("a", "claude").await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
+    }
+
+    #[tokio::test]
+    async fn upstream_self_reference_detection_matches_only_the_active_listener() {
+        let db = Arc::new(Database::memory().unwrap());
+        let mut stale_config = db.get_proxy_config().await.unwrap();
+        stale_config.listen_port = 7890;
+        db.update_proxy_config(stale_config).await.unwrap();
+        let router = ProviderRouter::new(db);
+        router
+            .set_active_listener(ActiveListener::new(
+                "127.0.0.1:15721".parse().unwrap(),
+                false,
+            ))
+            .await;
+
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://127.0.0.1:15721/v1",
+            ActiveListener::new("127.0.0.1:15721".parse().unwrap(), false),
+        ));
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://localhost:15721/v1/responses",
+            ActiveListener::new("127.0.0.1:15721".parse().unwrap(), false),
+        ));
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://[::1]:15721/v1",
+            ActiveListener::new("[::1]:15721".parse().unwrap(), true),
+        ));
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://127.0.0.1:15721/v1",
+            ActiveListener::new("0.0.0.0:15721".parse().unwrap(), false),
+        ));
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://[::1]:15721/v1",
+            ActiveListener::new("[::]:15721".parse().unwrap(), false),
+        ));
+        assert!(!ProviderRouter::upstream_points_to_proxy_listener(
+            "http://[::1]:15721/v1",
+            ActiveListener::new("0.0.0.0:15721".parse().unwrap(), false),
+        ));
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            "http://127.0.0.1:15721/v1",
+            ActiveListener::new("[::]:15721".parse().unwrap(), false),
+        ));
+        assert!(!ProviderRouter::upstream_points_to_proxy_listener(
+            "http://127.0.0.1:15721/v1",
+            ActiveListener::new("[::]:15721".parse().unwrap(), true),
+        ));
+        assert!(!ProviderRouter::upstream_points_to_proxy_listener(
+            "http://127.0.0.1:7890/v1",
+            ActiveListener::new("127.0.0.1:15721".parse().unwrap(), false),
+        ));
+        assert!(!ProviderRouter::upstream_points_to_proxy_listener(
+            "https://aidp.bytedance.net/api/modelhub/online",
+            ActiveListener::new("127.0.0.1:15721".parse().unwrap(), false),
+        ));
+
+        assert!(router
+            .reject_upstream_self_reference("http://localhost:15721/v1")
+            .await
+            .is_err());
+        assert!(router
+            .reject_upstream_self_reference("http://127.0.0.1:7890/v1")
+            .await
+            .is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn ipv6_wildcard_detection_matches_the_real_dual_stack_socket() {
+        let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let ipv6_only = socket2::SockRef::from(&listener).only_v6().unwrap();
+        assert!(!ipv6_only, "macOS wildcard listener should be dual stack");
+
+        let port = local_addr.port();
+        let connect = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+        assert!(connect.is_ok(), "the real socket must accept IPv4 loopback");
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            &format!("http://127.0.0.1:{port}/v1"),
+            ActiveListener::new(local_addr, ipv6_only),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn ipv4_listener_rejects_reachable_ipv4_mapped_ipv6_alias() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let port = local_addr.port();
+        let mapped_addr: SocketAddr = format!("[::ffff:127.0.0.1]:{port}").parse().unwrap();
+
+        let connect = tokio::net::TcpStream::connect(mapped_addr).await;
+        assert!(
+            connect.is_ok(),
+            "the real IPv4 socket must accept its IPv4-mapped IPv6 alias"
+        );
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            &format!("http://[::ffff:127.0.0.1]:{port}/v1"),
+            ActiveListener::new(local_addr, false),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn dual_stack_listener_rejects_reachable_ipv4_mapped_ipv6_alias() {
+        let listener = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let ipv6_only = socket2::SockRef::from(&listener).only_v6().unwrap();
+        assert!(!ipv6_only, "macOS wildcard listener should be dual stack");
+
+        let port = local_addr.port();
+        let mapped_addr: SocketAddr = format!("[::ffff:127.0.0.1]:{port}").parse().unwrap();
+        let connect = tokio::net::TcpStream::connect(mapped_addr).await;
+        assert!(
+            connect.is_ok(),
+            "the real dual-stack socket must accept the mapped IPv4 alias"
+        );
+        assert!(ProviderRouter::upstream_points_to_proxy_listener(
+            &format!("http://[::ffff:127.0.0.1]:{port}/v1"),
+            ActiveListener::new(local_addr, ipv6_only),
+        ));
+    }
+
+    #[test]
+    fn wildcard_detection_rejects_current_machine_interface_addresses() {
+        let interfaces = if_addrs::get_if_addrs().unwrap();
+        for ip in interfaces.into_iter().map(|interface| interface.ip()) {
+            let listener = match ip {
+                IpAddr::V4(_) => ActiveListener::new("0.0.0.0:15721".parse().unwrap(), false),
+                IpAddr::V6(_) => ActiveListener::new("[::]:15721".parse().unwrap(), true),
+            };
+            let url = match ip {
+                IpAddr::V4(ip) => format!("http://{ip}:15721/v1"),
+                IpAddr::V6(ip) => format!("http://[{ip}]:15721/v1"),
+            };
+            assert!(
+                ProviderRouter::upstream_points_to_proxy_listener(&url, listener),
+                "wildcard listener must reject local interface {ip}"
+            );
+        }
     }
 }

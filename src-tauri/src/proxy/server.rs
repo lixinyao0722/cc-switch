@@ -12,7 +12,7 @@ use super::{
     failover_switch::FailoverSwitchManager,
     handlers,
     log_codes::srv as log_srv,
-    provider_router::ProviderRouter,
+    provider_router::{ActiveListener, ProviderRouter},
     providers::{codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore},
     types::*,
     ProxyError,
@@ -143,7 +143,18 @@ impl ProxyServer {
         let local_addr = listener
             .local_addr()
             .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
+        let ipv6_only = if local_addr.is_ipv6() {
+            socket2::SockRef::from(&listener)
+                .only_v6()
+                .map_err(|e| ProxyError::BindFailed(format!("无法读取 IPv6 listener 模式: {e}")))?
+        } else {
+            false
+        };
         let actual_port = local_addr.port();
+        self.state
+            .provider_router
+            .set_active_listener(ActiveListener::new(local_addr, ipv6_only))
+            .await;
 
         log::info!("[{}] 代理服务器启动于 {local_addr}", log_srv::STARTED);
 
@@ -238,6 +249,7 @@ impl ProxyServer {
             // 服务器停止后更新状态
             state.status.write().await.running = false;
             *state.start_time.write().await = None;
+            state.provider_router.clear_active_listener().await;
         });
 
         // 保存服务器任务句柄
