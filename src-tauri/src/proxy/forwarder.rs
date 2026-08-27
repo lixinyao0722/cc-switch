@@ -994,6 +994,117 @@ impl RequestForwarder {
                             self.modelhub_context.invalidate(pending).await;
                         }
                     }
+
+                    if should_apply_modelhub_header_adapter(app_type, endpoint, provider, false)
+                        && super::modelhub_compat::is_cross_resource_item_error(&e)
+                    {
+                        let removed_ids = super::modelhub_compat::detach_resource_bound_item_ids(
+                            &mut provider_body,
+                        );
+                        if removed_ids > 0 {
+                            log::warn!(
+                                "[{app_type_str}] [ModelHubCompat] cross-resource item IDs detected; retrying provider={} after removing {removed_ids} resource-bound input item ID(s)",
+                                provider.id
+                            );
+
+                            let mut retry_attempt = ModelhubAttemptState::default();
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &provider_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                    &mut retry_attempt,
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format, outbound_model)) => {
+                                    log::info!(
+                                        "[{app_type_str}] [ModelHubCompat] resource-detached item retry succeeded"
+                                    );
+                                    self.record_success_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+
+                                    {
+                                        let mut current_providers =
+                                            self.current_providers.write().await;
+                                        current_providers.insert(
+                                            app_type_str.to_string(),
+                                            (provider.id.clone(), provider.name.clone()),
+                                        );
+                                    }
+
+                                    {
+                                        let mut status = self.status.write().await;
+                                        status.success_requests += 1;
+                                        status.last_error = None;
+                                        let should_switch =
+                                            self.current_provider_id_at_start.as_str()
+                                                != provider.id.as_str();
+                                        if should_switch {
+                                            status.failover_count += 1;
+                                            let fm = self.failover_manager.clone();
+                                            let ah = self.app_handle.clone();
+                                            let pid = provider.id.clone();
+                                            let pname = provider.name.clone();
+                                            let at = app_type_str.to_string();
+                                            tokio::spawn(async move {
+                                                let _ = fm
+                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
+                                                    .await;
+                                            });
+                                        }
+                                        if status.total_requests > 0 {
+                                            status.success_rate = (status.success_requests as f32
+                                                / status.total_requests as f32)
+                                                * 100.0;
+                                        }
+                                    }
+
+                                    return Ok(ForwardResult {
+                                        response,
+                                        provider: provider.clone(),
+                                        claude_api_format,
+                                        outbound_model,
+                                        connection_guard: None,
+                                        modelhub_checkpoint: retry_attempt.checkpoint.take(),
+                                        modelhub_compatibility_learning: None,
+                                        modelhub_admission_permit: retry_attempt
+                                            .admission_permit
+                                            .take(),
+                                    });
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] [ModelHubCompat] resource-detached item retry failed: {retry_err}"
+                                    );
+                                    if let Some(err) = self
+                                        .handle_rectifier_retry_failure(
+                                            retry_err,
+                                            provider,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                            "ModelHub cross-resource item fallback",
+                                            &mut last_error,
+                                            &mut last_provider,
+                                        )
+                                        .await
+                                    {
+                                        return Err(err);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
@@ -4677,6 +4788,228 @@ mod tests {
 
         assert!(matches!(error.error, ProxyError::ConfigError(_)));
         assert!(error.error.to_string().contains("代理自循环"));
+    }
+
+    #[tokio::test]
+    async fn modelhub_cross_resource_item_error_retries_without_resource_bound_item_ids() {
+        let received_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received_bodies_for_route = received_bodies.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let received_bodies = received_bodies_for_route.clone();
+                async move {
+                    let has_resource_bound_id = body
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .is_some_and(|input| input.iter().any(|item| item.get("id").is_some()));
+                    received_bodies
+                        .lock()
+                        .expect("request body lock")
+                        .push(body);
+                    if has_resource_bound_id {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": {
+                                    "message": "code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.",
+                                    "type": "invalid_request_error",
+                                    "code": "-4003"
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "id": "resp_child",
+                                "object": "response",
+                                "status": "completed",
+                                "output": []
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_parent",
+                    "summary": [{"type": "summary_text", "text": "parent reasoning"}],
+                    "encrypted_content": "portable-ciphertext"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_item",
+                    "call_id": "call_parent",
+                    "name": "exec",
+                    "input": "echo ok"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "ctco_item",
+                    "call_id": "call_parent",
+                    "output": "ok"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_parent",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_child",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue in the side task"}]
+                }
+            ]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "side-task-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "side-task-thread".parse().unwrap(),
+            ),
+        ]);
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "side-task-session".to_string();
+        forwarder.session_client_provided = true;
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await
+            .unwrap_or_else(|failure| {
+                panic!("resource-detached retry should recover: {}", failure.error)
+            });
+        server.abort();
+
+        assert_eq!(result.response.status(), StatusCode::OK);
+        let bodies = received_bodies.lock().expect("request body lock");
+        assert_eq!(bodies.len(), 2);
+        let first_input = bodies[0]["input"].as_array().expect("first input");
+        assert!(first_input.iter().all(|item| item.get("id").is_some()));
+        let retry_input = bodies[1]["input"].as_array().expect("retry input");
+        assert!(retry_input.iter().all(|item| item.get("id").is_none()));
+        assert_eq!(retry_input[1]["call_id"], "call_parent");
+        assert_eq!(retry_input[2]["call_id"], "call_parent");
+        assert_eq!(retry_input[0]["encrypted_content"], "portable-ciphertext");
+    }
+
+    #[tokio::test]
+    async fn modelhub_similar_bad_request_does_not_retry_without_resource_bound_item_ids() {
+        let received_requests = Arc::new(AtomicUsize::new(0));
+        let received_requests_for_route = received_requests.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(_body): Json<Value>| {
+                let received_requests = received_requests_for_route.clone();
+                async move {
+                    received_requests.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": {
+                                "message": "code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.",
+                                "type": "invalid_request_error",
+                                "code": "other"
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ModelHub");
+        let address = listener.local_addr().expect("mock ModelHub address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock ModelHub");
+        });
+
+        let mut provider = provider_with_modelhub_header_adapter();
+        provider.settings_config = json!({
+            "base_url": format!("http://{address}/v1"),
+            "api_key": "test-key"
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "id": "msg_parent",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}]
+            }]
+        });
+        let headers = HeaderMap::from_iter([
+            (
+                "session-id".parse().unwrap(),
+                "ordinary-400-session".parse().unwrap(),
+            ),
+            (
+                "thread-id".parse().unwrap(),
+                "ordinary-400-thread".parse().unwrap(),
+            ),
+        ]);
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.session_id = "ordinary-400-session".to_string();
+        forwarder.session_client_provided = true;
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await;
+        server.abort();
+
+        let failure = match result {
+            Ok(_) => panic!("ordinary 400 must remain an upstream failure"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure.error,
+            ProxyError::UpstreamError { status: 400, .. }
+        ));
+        assert_eq!(received_requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

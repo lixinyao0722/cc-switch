@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **ModelHub R19 Routing Recovery**: Codex takeover now rebuilds a missing Live backup from the current Provider source of truth instead of treating the local `127.0.0.1:15721` route as an upstream. Requests also fail fast when a Provider resolves back to the active CC Switch listener, preventing an infinite proxy loop while preserving the ModelHub API key and ChatGPT login state.
 - **Responses Reasoning Dependency Safety**: Encrypted-reasoning compatibility cleanup now preserves empty reasoning items that own following function or custom-tool calls, so calls and outputs are never orphaned. Provider/session incompatibility is remembered only after a successful sanitized retry; failed 400/429 retries do not poison the session, and a learned session automatically re-probes the original history after one successful pre-cleaned request.
+- **ModelHub R20 Cross-resource Fork Recovery**: When a fork or side task carries response item IDs created by a different Azure OpenAI resource, CC Switch removes only those resource-bound top-level IDs, preserves `call_id` tool relationships and content, then retries the same ModelHub provider once. The packaged Codex auto-compaction threshold is raised from 300,000 to 600,000 tokens.
 
 ## [3.19.4] - 2026-08-27
 

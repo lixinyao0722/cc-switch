@@ -328,6 +328,41 @@ pub(crate) fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
         })
 }
 
+pub(crate) fn is_cross_resource_item_error(error: &ProxyError) -> bool {
+    const MESSAGE: &str = "code: ; message: the requested item was created under a different azure openai resource. use the same resource that created the item to access it.";
+
+    let ProxyError::UpstreamError {
+        status: 400,
+        body: Some(body),
+    } = error
+    else {
+        return false;
+    };
+
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+
+    value.pointer("/error/type").and_then(Value::as_str) == Some("invalid_request_error")
+        && value.pointer("/error/code").and_then(Value::as_str) == Some("-4003")
+        && value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.trim().eq_ignore_ascii_case(MESSAGE))
+}
+
+pub(crate) fn detach_resource_bound_item_ids(body: &mut Value) -> usize {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+
+    input
+        .iter_mut()
+        .filter_map(Value::as_object_mut)
+        .map(|item| usize::from(item.remove("id").is_some()))
+        .sum()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ReasoningSanitization {
     pub removed_encrypted_fields: usize,
@@ -450,7 +485,7 @@ fn parse_extra_object(headers: &HeaderMap) -> Result<Map<String, Value>, ProxyEr
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_modelhub_codex_headers, codex_metadata_request_kind,
+        apply_modelhub_codex_headers, codex_metadata_request_kind, is_cross_resource_item_error,
         is_invalid_encrypted_content_error, is_unsupported_activity_summary_request,
         normalize_namespace_descriptions, sanitize_encrypted_reasoning,
         unclassified_codex_luna_observation, CodexMetadataRequestKind,
@@ -962,6 +997,51 @@ mod tests {
             ),
         };
         assert!(is_invalid_encrypted_content_error(&modelhub_actual));
+    }
+
+    #[test]
+    fn cross_resource_item_error_detection_requires_the_exact_modelhub_error() {
+        let exact = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"invalid_request_error","code":"-4003"}}"#
+                    .to_string(),
+            ),
+        };
+        let wrong_status = ProxyError::UpstreamError {
+            status: 500,
+            body: Some(
+                r#"{"error":{"message":"code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"invalid_request_error","code":"-4003"}}"#
+                    .to_string(),
+            ),
+        };
+        let wrong_code = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"invalid_request_error","code":"other"}}"#
+                    .to_string(),
+            ),
+        };
+        let wrong_type = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"code: ; message: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"server_error","code":"-4003"}}"#
+                    .to_string(),
+            ),
+        };
+        let similar_message = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"A caller said an item was created under a different Azure OpenAI resource and asked us to use the same resource.","type":"invalid_request_error","code":"-4003"}}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(is_cross_resource_item_error(&exact));
+        assert!(!is_cross_resource_item_error(&wrong_status));
+        assert!(!is_cross_resource_item_error(&wrong_code));
+        assert!(!is_cross_resource_item_error(&wrong_type));
+        assert!(!is_cross_resource_item_error(&similar_message));
     }
 
     #[test]
