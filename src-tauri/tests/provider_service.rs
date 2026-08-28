@@ -1317,6 +1317,104 @@ requires_openai_auth = true
 }
 
 #[test]
+fn provider_service_switches_modelhub_and_official_using_the_shared_history_bucket() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    cc_switch_lib::update_settings(cc_switch_lib::AppSettings {
+        preserve_codex_official_auth_on_switch: true,
+        unify_codex_session_history: true,
+        unify_codex_migrate_existing: Some(true),
+        ..Default::default()
+    })
+    .expect("enable shared Codex history");
+
+    let official_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-official"
+        }
+    });
+    let modelhub_config = r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+experimental_bearer_token = "modelhub-key"
+
+[model_providers.custom]
+name = "modelhub"
+base_url = "https://modelhub.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&official_auth, Some(modelhub_config))
+        .expect("seed ModelHub live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "modelhub".to_string();
+        manager.providers.insert(
+            "modelhub".to_string(),
+            Provider::with_id(
+                "modelhub".to_string(),
+                "ModelHub".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "modelhub-key"},
+                    "config": modelhub_config
+                }),
+                None,
+            ),
+        );
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("codex-official".to_string(), official);
+    }
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "codex-official")
+        .expect("switch ModelHub to official");
+    let official_live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read official live");
+    let official_config: toml::Value = toml::from_str(&official_live).expect("parse official live");
+    assert_eq!(
+        official_config
+            .get("model_provider")
+            .and_then(|value| value.as_str()),
+        Some("custom")
+    );
+
+    ProviderService::switch(&state, AppType::Codex, "modelhub")
+        .expect("switch official to ModelHub");
+    let modelhub_live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read ModelHub live");
+    let modelhub_config: toml::Value = toml::from_str(&modelhub_live).expect("parse ModelHub live");
+    assert_eq!(
+        modelhub_config
+            .get("model_provider")
+            .and_then(|value| value.as_str()),
+        Some("custom")
+    );
+    assert_eq!(
+        modelhub_config
+            .get("model_providers")
+            .and_then(|value| value.get("custom"))
+            .and_then(|value| value.get("base_url"))
+            .and_then(|value| value.as_str()),
+        Some("https://modelhub.example/v1")
+    );
+}
+
+#[test]
 fn provider_service_switch_codex_official_clears_stale_third_party_auth() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

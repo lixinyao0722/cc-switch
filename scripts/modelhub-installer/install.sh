@@ -5,9 +5,9 @@ set -euo pipefail
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 
-readonly MODELHUB_SECTION='[model_providers.modelhub]'
+readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260828-r22'
+readonly RELEASE_TAG='modelhub-installer-20260828-r23'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.20.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -1016,7 +1016,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R22 context-window contract'
+    die 'ModelHub model catalog does not match the R23 context-window contract'
     return 1
   fi
 }
@@ -1098,7 +1098,7 @@ validate_golden_codex_template() {
   fi
   placeholder_count="$(awk '{ count += gsub(/__USER_HOME__/, "") } END { print count + 0 }' "$file")"
   if [[ "$placeholder_count" -lt 1 ]] \
-    || ! grep -Fq -- 'model_provider = "modelhub"' "$file" \
+    || ! grep -Fq -- 'model_provider = "custom"' "$file" \
     || [[ "$(golden_config_exact_line_count "$file" 'review_model = "gpt-5.5-2026-04-24"')" != '1' ]] \
     || [[ "$(golden_config_exact_line_count "$file" 'base_url = "http://127.0.0.1:15721/v1"')" != '1' ]] \
     || ! grep -Fq -- 'env_key = "MODELHUB_AK"' "$file" \
@@ -1144,6 +1144,8 @@ validate_golden_settings() {
     .currentProviderCodex == "bytedance-modelhub-official-cli"
     and .enableLocalProxy == true
     and .preserveCodexOfficialAuthOnSwitch == true
+    and .unifyCodexSessionHistory == true
+    and .unifyCodexMigrateExisting == true
     and .firstRunNoticeConfirmed == true
     and .proxyConfirmed == true
   ' "$file" 2>/dev/null)" || return 1
@@ -1187,7 +1189,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 600000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R22 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R23 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1197,7 +1199,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.checkpointTtlSeconds')=21600 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.largeRequestTokens')=100000 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.concurrency')=4;")" == '1' ]] \
-    || { die 'golden CC Switch provider R22 context policy is invalid'; return 1; }
+    || { die 'golden CC Switch provider R23 context policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -1575,7 +1577,7 @@ update_settings_json() {
       return 1
     fi
   else
-    if ! printf '{\n  "currentProviderCodex": "%s",\n  "enableLocalProxy": true,\n  "preserveCodexOfficialAuthOnSwitch": true\n}\n' \
+    if ! printf '{\n  "currentProviderCodex": "%s",\n  "enableLocalProxy": true,\n  "preserveCodexOfficialAuthOnSwitch": true,\n  "unifyCodexSessionHistory": true,\n  "unifyCodexMigrateExisting": true\n}\n' \
       "$provider_id" \
       >"$work_file"; then
       rm -rf "$work_dir" || true
@@ -1602,6 +1604,8 @@ update_settings_json() {
   if ! plutil_set_value "$plutil_bin" "$work_file" currentProviderCodex -string "$provider_id" \
     || ! plutil_set_value "$plutil_bin" "$work_file" enableLocalProxy -bool true \
     || ! plutil_set_value "$plutil_bin" "$work_file" preserveCodexOfficialAuthOnSwitch -bool true \
+    || ! plutil_set_value "$plutil_bin" "$work_file" unifyCodexSessionHistory -bool true \
+    || ! plutil_set_value "$plutil_bin" "$work_file" unifyCodexMigrateExisting -bool true \
     || ! "$plutil_bin" -convert xml1 -o /dev/null "$work_file" >/dev/null 2>&1; then
     rm -rf "$work_dir"
     die "failed to update CC Switch settings"
@@ -1772,11 +1776,17 @@ toml_header_kind() {
         print "computer-use-mcp"
       } else if (count >= 2 && unquote(parts[1]) == "mcp_servers" && unquote(parts[2]) == "node_repl") {
         print "node-repl-mcp"
-      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "custom") {
         if (count == 2) {
           print "modelhub"
         } else {
           print "modelhub-child"
+        }
+      } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "modelhub") {
+        if (count == 2) {
+          print "legacy-modelhub"
+        } else {
+          print "legacy-modelhub-child"
         }
       } else if (count >= 2 && unquote(parts[1]) == "model_providers" && unquote(parts[2]) == "openai") {
         if (count == 2) {
@@ -1856,7 +1866,7 @@ validate_codex_managed_config() {
     die 'Codex managed config must contain one entry for each managed root key'
     return 1
   fi
-  if ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"modelhub"[[:space:]]*$' "$file" \
+  if ! grep -Eq '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"custom"[[:space:]]*$' "$file" \
     || ! grep -Eq '^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"http://127\.0\.0\.1:15721/v1"[[:space:]]*$' "$file"; then
     die 'Codex managed config contains an unexpected routing value'
     return 1
@@ -1893,7 +1903,7 @@ validate_codex_managed_config_with_parser() {
   if [[ "$(modelhub_section_count "$file")" == "0" ]]; then
     printf '%s\n' \
       '' \
-      '[model_providers.modelhub]' \
+      '[model_providers.custom]' \
       'name = "modelhub"' \
       'base_url = "https://example.invalid/v1"' \
       'wire_api = "responses"' \
@@ -2199,7 +2209,7 @@ merge_codex_config() {
       return 1
     }
     case "$header_kind" in
-      modelhub|modelhub-child)
+      modelhub|modelhub-child|legacy-modelhub|legacy-modelhub-child)
         if [[ "$in_desktop" == "1" ]]; then
           cat "$managed_desktop" >>"$filtered_source" || return 1
         fi
@@ -2337,7 +2347,7 @@ merge_codex_config() {
       $0 == "[plugins.\"computer-use@openai-bundled\"]" \
         || $0 == "[mcp_servers.computer-use]" \
         || $0 == "[mcp_servers.node_repl]" \
-        || $0 == "[model_providers.modelhub]" { emit = 1 }
+        || $0 == "[model_providers.custom]" { emit = 1 }
       emit { print }
     ' "$rendered_template" >>"$merged_file"; then
     /bin/rm -rf "$work_dir" || true
@@ -2968,9 +2978,9 @@ choose_codex_config_install_mode() {
       fi
     else
       if [[ "$requires_explicit_overwrite" == "1" ]]; then
-        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R22 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R23 标准配置完整覆盖？[y/N] ' >/dev/tty
       else
-        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R22 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R23 标准配置完整覆盖？[y/N] ' >/dev/tty
       fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
@@ -3972,7 +3982,7 @@ wait_for_golden_routing_state() {
       awk '
         BEGIN { in_root = 1; count = 0 }
         /^[[:space:]]*\[/ { in_root = 0 }
-        in_root && /^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"modelhub"[[:space:]]*(#.*)?$/ {
+        in_root && /^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"custom"[[:space:]]*(#.*)?$/ {
           count += 1
         }
         END { print count }
@@ -3988,7 +3998,7 @@ wait_for_golden_routing_state() {
     attempt=$((attempt + 1))
   done
 
-  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex selects modelhub through the local proxy'
+  die 'golden routing verification failed: Provider must use ModelHub upstream while live Codex selects custom through the local proxy'
   return 1
 }
 
@@ -4187,7 +4197,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R22 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R23 安装器、CC Switch 和配置资源'
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
@@ -4294,7 +4304,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
-  printf '\n安装完成：默认使用 ModelHub；可在 CC Switch 的 Codex 供应商列表中一键切换到 OpenAI Official，再切回 ModelHub。ModelHub 模式需要 CC Switch 保持运行；Official 模式恢复直连。切换后请重启 Codex 并新建任务。\n' >&2
+  printf '\n安装完成：默认使用 ModelHub；可在 CC Switch 的 Codex 供应商列表中一键切换到 OpenAI Official，再切回 ModelHub。ModelHub 模式需要 CC Switch 保持运行；Official 模式恢复直连。切换后请重启 Codex；历史迁移完成后可继续旧任务，若个别任务包含新模型无法解密的推理内容，再新建任务。\n' >&2
 }
 
 rollback_latest() {

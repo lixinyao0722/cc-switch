@@ -517,6 +517,20 @@ mod tests {
                     completed_at: "2026-05-20T00:01:00Z".to_string(),
                     migrated_provider_ids: vec!["legacy".to_string()],
                 }),
+                codex_third_party_history_provider_bucket_v2: Some(
+                    CodexThirdPartyHistoryProviderBucketMigration {
+                        completed_at: "2026-08-28T00:00:00Z".to_string(),
+                        target_provider_id: "custom".to_string(),
+                        source_provider_ids: vec!["modelhub".to_string()],
+                        migrated_jsonl_files: 4,
+                        migrated_state_rows: 5,
+                        scanned_history_files: true,
+                    },
+                ),
+                codex_provider_template_v2: Some(CodexProviderTemplateMigration {
+                    completed_at: "2026-08-28T00:01:00Z".to_string(),
+                    migrated_provider_ids: vec!["bytedance-modelhub-official-cli".to_string()],
+                }),
                 codex_official_history_unify_v1: Some(CodexOfficialHistoryUnifyMigration {
                     completed_at: "2026-06-12T00:00:00Z".to_string(),
                     target_provider_id: "custom".to_string(),
@@ -554,6 +568,32 @@ mod tests {
             vec!["legacy".to_string()]
         );
 
+        let migration_v2 = merged
+            .local_migrations
+            .as_ref()
+            .and_then(|migrations| {
+                migrations
+                    .codex_third_party_history_provider_bucket_v2
+                    .as_ref()
+            })
+            .expect("v2 history migration marker should be preserved");
+        assert_eq!(
+            migration_v2.source_provider_ids,
+            vec!["modelhub".to_string()]
+        );
+        assert_eq!(migration_v2.migrated_jsonl_files, 4);
+        assert_eq!(migration_v2.migrated_state_rows, 5);
+
+        let template_migration_v2 = merged
+            .local_migrations
+            .as_ref()
+            .and_then(|migrations| migrations.codex_provider_template_v2.as_ref())
+            .expect("v2 template migration marker should be preserved");
+        assert_eq!(
+            template_migration_v2.migrated_provider_ids,
+            vec!["bytedance-modelhub-official-cli".to_string()]
+        );
+
         let unify_migration = merged
             .local_migrations
             .as_ref()
@@ -570,6 +610,8 @@ mod tests {
             local_migrations: Some(LocalMigrations {
                 codex_third_party_history_provider_bucket_v1: None,
                 codex_provider_template_v1: None,
+                codex_third_party_history_provider_bucket_v2: None,
+                codex_provider_template_v2: None,
                 codex_official_history_unify_v1: Some(CodexOfficialHistoryUnifyMigration {
                     completed_at: "2026-06-12T00:00:00Z".to_string(),
                     target_provider_id: "custom".to_string(),

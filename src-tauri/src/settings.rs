@@ -294,6 +294,14 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    /// R23 补迁旧版 ModelHub 的历史记录。保留 v1 字段以兼容既有设置，
+    /// 但只用 v2 字段门控当前迁移，确保已安装 R22 的设备会再执行一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_third_party_history_provider_bucket_v2:
+        Option<CodexThirdPartyHistoryProviderBucketMigration>,
+    /// R23 补迁旧版 ModelHub Provider 模板到稳定的 custom id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider_template_v2: Option<CodexProviderTemplateMigration>,
     /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
     /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -795,12 +803,16 @@ where
 }
 
 pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
-    get_settings()
+    codex_third_party_history_provider_bucket_migrated(&get_settings())
+}
+
+fn codex_third_party_history_provider_bucket_migrated(settings: &AppSettings) -> bool {
+    settings
         .local_migrations
         .as_ref()
         .and_then(|migrations| {
             migrations
-                .codex_third_party_history_provider_bucket_v1
+                .codex_third_party_history_provider_bucket_v2
                 .as_ref()
         })
         .is_some_and(|m| m.scanned_history_files)
@@ -813,15 +825,19 @@ pub fn mark_codex_third_party_history_provider_bucket_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_third_party_history_provider_bucket_v1 = Some(migration);
+        migrations.codex_third_party_history_provider_bucket_v2 = Some(migration);
     })
 }
 
 pub fn is_codex_provider_template_migrated() -> bool {
-    get_settings()
+    codex_provider_template_migrated(&get_settings())
+}
+
+fn codex_provider_template_migrated(settings: &AppSettings) -> bool {
+    settings
         .local_migrations
         .as_ref()
-        .and_then(|migrations| migrations.codex_provider_template_v1.as_ref())
+        .and_then(|migrations| migrations.codex_provider_template_v2.as_ref())
         .is_some()
 }
 
@@ -832,7 +848,7 @@ pub fn mark_codex_provider_template_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_provider_template_v1 = Some(migration);
+        migrations.codex_provider_template_v2 = Some(migration);
     })
 }
 
@@ -1217,5 +1233,50 @@ mod tests {
             resolve_override_path(r"~\pi\agent"),
             home.join("pi").join("agent")
         );
+    }
+
+    #[test]
+    fn r22_v1_markers_do_not_block_r23_v2_migrations() {
+        let r22: AppSettings = serde_json::from_value(serde_json::json!({
+            "localMigrations": {
+                "codexThirdPartyHistoryProviderBucketV1": {
+                    "completedAt": "2026-08-28T00:00:00Z",
+                    "targetProviderId": "custom",
+                    "sourceProviderIds": [],
+                    "migratedJsonlFiles": 0,
+                    "migratedStateRows": 0,
+                    "scannedHistoryFiles": true
+                },
+                "codexProviderTemplateV1": {
+                    "completedAt": "2026-08-28T00:00:01Z",
+                    "migratedProviderIds": []
+                }
+            }
+        }))
+        .expect("deserialize R22 settings");
+
+        assert!(!codex_third_party_history_provider_bucket_migrated(&r22));
+        assert!(!codex_provider_template_migrated(&r22));
+
+        let r23: AppSettings = serde_json::from_value(serde_json::json!({
+            "localMigrations": {
+                "codexThirdPartyHistoryProviderBucketV2": {
+                    "completedAt": "2026-08-28T01:00:00Z",
+                    "targetProviderId": "custom",
+                    "sourceProviderIds": ["modelhub"],
+                    "migratedJsonlFiles": 207,
+                    "migratedStateRows": 207,
+                    "scannedHistoryFiles": true
+                },
+                "codexProviderTemplateV2": {
+                    "completedAt": "2026-08-28T01:00:01Z",
+                    "migratedProviderIds": ["bytedance-modelhub-official-cli"]
+                }
+            }
+        }))
+        .expect("deserialize R23 settings");
+
+        assert!(codex_third_party_history_provider_bucket_migrated(&r23));
+        assert!(codex_provider_template_migrated(&r23));
     }
 }

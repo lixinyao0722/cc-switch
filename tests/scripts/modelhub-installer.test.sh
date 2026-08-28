@@ -252,7 +252,8 @@ test_merge_preserves_unmanaged_sections() {
   assert_contains "$case_dir/output.toml" 'enabled = true'
   assert_contains "$case_dir/output.toml" '[desktop]'
   assert_contains "$case_dir/output.toml" 'followUpQueueMode = "queued"'
-  assert_occurrences "$case_dir/output.toml" '[model_providers.modelhub]' 1
+  assert_occurrences "$case_dir/output.toml" '[model_providers.custom]' 1
+  assert_not_contains "$case_dir/output.toml" '[model_providers.modelhub]'
   assert_not_contains "$case_dir/output.toml" 'https://old.invalid'
   assert_not_contains "$case_dir/output.toml" 'old-model'
   assert_not_contains "$case_dir/output.toml" 'old-provider'
@@ -340,7 +341,7 @@ test_managed_config_merge_preserves_unrelated_config() {
     "$MANAGED_CONFIG_TEMPLATE" \
     "$case_dir/output.toml"
 
-  assert_occurrences "$case_dir/output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/output.toml" 'model_provider = "custom"' 1
   assert_occurrences "$case_dir/output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
   assert_contains "$case_dir/output.toml" '# managed heading'
   assert_contains "$case_dir/output.toml" 'analytics_enabled = false'
@@ -371,8 +372,8 @@ test_managed_config_merge_creates_missing_and_normalizes_duplicates() {
     "$MANAGED_CONFIG_TEMPLATE" \
     "$case_dir/duplicates-output.toml"
 
-  assert_occurrences "$case_dir/missing-output.toml" 'model_provider = "modelhub"' 1
-  assert_occurrences "$case_dir/duplicates-output.toml" 'model_provider = "modelhub"' 1
+  assert_occurrences "$case_dir/missing-output.toml" 'model_provider = "custom"' 1
+  assert_occurrences "$case_dir/duplicates-output.toml" 'model_provider = "custom"' 1
   assert_occurrences "$case_dir/duplicates-output.toml" 'openai_base_url = "http://127.0.0.1:15721/v1"' 1
 }
 
@@ -479,8 +480,8 @@ test_merge_creates_config_from_empty_file() {
     "$case_dir/output.toml" \
     '/Users/Fresh User'
 
-  assert_contains "$case_dir/output.toml" 'model_provider = "modelhub"'
-  assert_contains "$case_dir/output.toml" '[model_providers.modelhub]'
+  assert_contains "$case_dir/output.toml" 'model_provider = "custom"'
+  assert_contains "$case_dir/output.toml" '[model_providers.custom]'
   assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/models-modelhub-1m.json"'
   validate_merged_codex_config "$case_dir/output.toml" '/Users/Fresh User'
 }
@@ -495,7 +496,7 @@ test_merge_creates_config_when_source_is_missing() {
     "$case_dir/output.toml" \
     '/Users/Fresh User'
 
-  assert_contains "$case_dir/output.toml" 'model_provider = "modelhub"'
+  assert_contains "$case_dir/output.toml" 'model_provider = "custom"'
   assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/models-modelhub-1m.json"'
 }
 
@@ -527,7 +528,8 @@ test_merge_replaces_only_active_modelhub_section() {
   assert_not_contains "$case_dir/output.toml" 'name = "stale"'
   assert_not_contains "$case_dir/output.toml" '[model_providers.modelhub.http_headers]'
   assert_not_contains "$case_dir/output.toml" 'x-stale-header = "remove-me"'
-  assert_occurrences "$case_dir/output.toml" '[model_providers.modelhub]' 1
+  assert_occurrences "$case_dir/output.toml" '[model_providers.custom]' 1
+  assert_not_contains "$case_dir/output.toml" '[model_providers.modelhub]'
 }
 
 test_merge_replaces_equivalent_modelhub_headers() {
@@ -1626,7 +1628,7 @@ test_preflight_rejects_golden_codex_without_r17_defaults() {
     "$case_dir/upstream-live-route.toml"
   /usr/bin/perl -0pi -e 's/enabled-reasoning-efforts = \["high", "xhigh", "max"\]/enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]/' \
     "$case_dir/wide-reasoning-menu.toml"
-  /usr/bin/perl -0pi -e 's/\n\[mcp_servers\.node_repl\][\s\S]*?\n\[model_providers\.modelhub\]/\n[model_providers.modelhub]/' \
+  /usr/bin/perl -0pi -e 's/\n\[mcp_servers\.node_repl\][\s\S]*?\n\[model_providers\.custom\]/\n[model_providers.custom]/' \
     "$case_dir/missing-node-repl.toml"
   /usr/bin/perl -0pi -e 's/\nremote_compaction_v2 = true//' \
     "$case_dir/missing-remote-compaction.toml"
@@ -1718,7 +1720,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.20.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260828-r22'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260828-r23'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1731,7 +1733,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260828-r22/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260828-r23/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1949,7 +1951,9 @@ test_settings_merge_changes_only_managed_keys() {
     '  "showInTray": false,' \
     '  "currentProviderCodex": "old-provider",' \
     '  "enableLocalProxy": false,' \
-    '  "preserveCodexOfficialAuthOnSwitch": false' \
+    '  "preserveCodexOfficialAuthOnSwitch": false,' \
+    '  "unifyCodexSessionHistory": false,' \
+    '  "unifyCodexMigrateExisting": false' \
     '}' \
     >"$settings"
 
@@ -1960,6 +1964,8 @@ test_settings_merge_changes_only_managed_keys() {
   assert_equals "$(plutil -extract currentProviderCodex raw -o - "$settings")" 'bytedance-modelhub-official-cli'
   assert_equals "$(plutil -extract enableLocalProxy raw -o - "$settings")" 'true'
   assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract unifyCodexSessionHistory raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract unifyCodexMigrateExisting raw -o - "$settings")" 'true'
 }
 
 test_settings_merge_rejects_invalid_json_without_overwrite() {
@@ -1987,6 +1993,8 @@ test_settings_merge_creates_missing_file() {
   assert_equals "$(plutil -extract currentProviderCodex raw -o - "$settings")" 'bytedance-modelhub-official-cli'
   assert_equals "$(plutil -extract enableLocalProxy raw -o - "$settings")" 'true'
   assert_equals "$(plutil -extract preserveCodexOfficialAuthOnSwitch raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract unifyCodexSessionHistory raw -o - "$settings")" 'true'
+  assert_equals "$(plutil -extract unifyCodexMigrateExisting raw -o - "$settings")" 'true'
 }
 
 test_existing_nonwritable_app_requires_privilege() {
@@ -2432,7 +2440,7 @@ test_managed_config_install_writes_forced_routes() {
 
   perform_install
 
-  assert_contains "$managed_config" 'model_provider = "modelhub"'
+  assert_contains "$managed_config" 'model_provider = "custom"'
   assert_contains "$managed_config" 'openai_base_url = "http://127.0.0.1:15721/v1"'
   assert_equals "$(/usr/bin/stat -f '%Lp' "$managed_config")" '644'
   [[ -z "$(find "$case_dir/private-var-tmp" -mindepth 1 -print -quit)" ]] \
@@ -2520,9 +2528,14 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
     || fail 'privileged staging test left a candidate directory'
 }
 
-test_r22_release_contract_and_documentation() {
-  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260828-r22'"
-  assert_contains "$INSTALLER" '下载并校验 R22 安装器、CC Switch 和配置资源'
+test_r23_release_contract_and_documentation() {
+  assert_contains "$INSTALLER" "readonly RELEASE_TAG='modelhub-installer-20260828-r23'"
+  assert_contains "$INSTALLER" '下载并校验 R23 安装器、CC Switch 和配置资源'
+  assert_contains "$GOLDEN_CODEX_CONFIG" 'model_provider = "custom"'
+  assert_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.custom]'
+  assert_not_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.modelhub]'
+  assert_equals "$(jq -r '.unifyCodexSessionHistory' "$GOLDEN_SETTINGS")" 'true'
+  assert_equals "$(jq -r '.unifyCodexMigrateExisting' "$GOLDEN_SETTINGS")" 'true'
   assert_contains "$MODELHUB_GUIDE" '/etc/codex/managed_config.toml'
   assert_contains "$MODELHUB_GUIDE" 'openai_base_url = "http://127.0.0.1:15721/v1"'
   assert_contains "$MODELHUB_GUIDE" 'model_auto_compact_token_limit = 600000'
@@ -2539,13 +2552,13 @@ test_r22_release_contract_and_documentation() {
   assert_contains "$MODELHUB_GUIDE" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
   assert_contains "$MODELHUB_GUIDE" 'review_model = "gpt-5.5-2026-04-24"'
   assert_contains "$MODELHUB_GUIDE" 'base_url = "http://127.0.0.1:15721/v1"'
-  assert_contains "$MODELHUB_GUIDE" '是否使用 R22 标准配置完整覆盖？[y/N]'
+  assert_contains "$MODELHUB_GUIDE" '是否使用 R23 标准配置完整覆盖？[y/N]'
   assert_contains "$MODELHUB_GUIDE" 'Mac 登录用户的管理员密码'
   assert_contains "$MODELHUB_GUIDE" '不是 `MODELHUB_AK`'
   assert_contains "$MODELHUB_GUIDE" '1,050,000'
   assert_contains "$MODELHUB_GUIDE" '移动端新建全新会话'
   assert_contains "$MODELHUB_GUIDE" 'CC Switch 不可用'
-  assert_contains "$CHANGELOG_FILE" 'ModelHub R22'
+  assert_contains "$CHANGELOG_FILE" 'ModelHub R23'
 }
 
 prepare_missing_chatgpt_transaction_case() {
@@ -2907,7 +2920,7 @@ test_transaction_success_and_repeat_are_idempotent() {
   export CC_SWITCH_INSTALLER_TIMESTAMP='20260727T120001Z'
   /bin/bash "$INSTALLER"
 
-  assert_contains "$case_dir/home/.codex/config.toml" 'model_provider = "modelhub"'
+  assert_contains "$case_dir/home/.codex/config.toml" 'model_provider = "custom"'
   assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
   assert_not_contains "$case_dir/home/.codex/config.toml" '[plugins."browser@openai-bundled"]'
   installed_app_sha="$(file_sha256 "$case_dir/Applications/CC Switch.app/Contents/MacOS/cc-switch")"
@@ -3249,6 +3262,12 @@ test_transaction_overwrites_golden_configuration_and_rolls_back() {
   assert_equals \
     "$(jq -r '.currentProviderCodex' "$case_dir/home/.cc-switch/settings.json")" \
     'bytedance-modelhub-official-cli'
+  assert_equals \
+    "$(jq -r '.unifyCodexSessionHistory' "$case_dir/home/.cc-switch/settings.json")" \
+    'true'
+  assert_equals \
+    "$(jq -r '.unifyCodexMigrateExisting' "$case_dir/home/.cc-switch/settings.json")" \
+    'true'
 
   rollback_latest
   after_rollback="$(managed_state_digest "$case_dir")"
@@ -3266,7 +3285,7 @@ test_transaction_default_merge_preserves_personalized_codex_config() {
   perform_install
 
   assert_contains "$config_path" '[plugins."browser@openai-bundled"]'
-  assert_occurrences "$config_path" 'model_provider = "modelhub"' 1
+  assert_occurrences "$config_path" 'model_provider = "custom"' 1
   assert_contains "$config_path" 'review_model = "gpt-5.5-2026-04-24"'
   assert_contains "$config_path" 'approval_policy = "never"'
   assert_contains "$config_path" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
@@ -3327,7 +3346,7 @@ test_golden_routing_verification_rejects_reversed_routes() {
 
   wait_for_golden_routing_state "$database" "$live_config" 1
 
-  /usr/bin/sed '/^model_provider = "modelhub"$/d' \
+  /usr/bin/sed '/^model_provider = "custom"$/d' \
     "$live_config" >"$missing_provider_config"
   assert_command_fails \
     wait_for_golden_routing_state "$database" "$missing_provider_config" 1
@@ -3516,7 +3535,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260828-r22'"
+    "readonly RELEASE_TAG='modelhub-installer-20260828-r23'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.20.0-arm64.app.zip' \
@@ -4014,7 +4033,7 @@ run_test "managed config rollback restores existing file and mode" test_managed_
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
 run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
 run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
-run_test "R22 release contract and documentation" test_r22_release_contract_and_documentation
+run_test "R23 release contract and documentation" test_r23_release_contract_and_documentation
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -4058,7 +4077,7 @@ run_test "preflight rejects golden database without R12 resilience defaults" tes
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R22 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R23 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -4111,7 +4130,7 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R22 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R23 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
 run_test "package rejects app ZIP with invalid signature" test_package_rejects_app_zip_with_invalid_signature
 run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash

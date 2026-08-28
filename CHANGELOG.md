@@ -5,6 +5,8 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+- **ModelHub R23 Shared History Bucket Fix**: Legacy ModelHub Codex sessions and saved Provider templates now migrate from the obsolete `modelhub` id into the stable `custom` history bucket. The ModelHub installer enables the existing unified-history migration so ModelHub → OpenAI Official and OpenAI Official → ModelHub switches can resume from the same history; JSONL, state DB, and Provider template backups remain in place.
+
 ## [3.19.5] - 2026-08-27
 
 - **ModelHub R19 Routing Recovery**: Codex takeover now rebuilds a missing Live backup from the current Provider source of truth instead of treating the local `127.0.0.1:15721` route as an upstream. Requests also fail fast when a Provider resolves back to the active CC Switch listener, preventing an infinite proxy loop while preserving the ModelHub API key and ChatGPT login state.
