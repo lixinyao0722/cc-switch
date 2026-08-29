@@ -46,6 +46,8 @@ pub struct VisibleApps {
     pub openclaw: bool,
     #[serde(default)]
     pub hermes: bool,
+    #[serde(default = "default_true")]
+    pub pi: bool,
 }
 
 impl Default for VisibleApps {
@@ -59,6 +61,7 @@ impl Default for VisibleApps {
             opencode: true,
             openclaw: true,
             hermes: false, // 默认不显示，需用户手动启用
+            pi: true,
         }
     }
 }
@@ -75,6 +78,7 @@ impl VisibleApps {
             AppType::OpenCode => self.opencode,
             AppType::OpenClaw => self.openclaw,
             AppType::Hermes => self.hermes,
+            AppType::Pi => self.pi,
         }
     }
 }
@@ -290,6 +294,14 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    /// R23 补迁旧版 ModelHub 的历史记录。保留 v1 字段以兼容既有设置，
+    /// 但只用 v2 字段门控当前迁移，确保已安装 R22 的设备会再执行一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_third_party_history_provider_bucket_v2:
+        Option<CodexThirdPartyHistoryProviderBucketMigration>,
+    /// R23 补迁旧版 ModelHub Provider 模板到稳定的 custom id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider_template_v2: Option<CodexProviderTemplateMigration>,
     /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
     /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +434,8 @@ pub struct AppSettings {
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hermes_config_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_config_dir: Option<String>,
 
     // ===== 当前供应商 ID（设备级）=====
     /// 当前 Claude 供应商 ID（本地存储，优先于数据库 is_current）
@@ -479,7 +493,7 @@ pub struct AppSettings {
 
     // ===== 终端设置 =====
     /// 首选终端应用（可选，默认使用系统默认终端）
-    /// - macOS: "terminal" | "iterm2" | "warp" | "alacritty" | "kitty" | "ghostty" | "wezterm" | "kaku"
+    /// - macOS: "terminal" | "iterm2" | "warp" | "alacritty" | "kitty" | "ghostty" | "otty" | "wezterm" | "kaku"
     /// - Windows: "cmd" | "powershell" | "wt" (Windows Terminal)
     /// - Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -533,6 +547,7 @@ impl Default for AppSettings {
             opencode_config_dir: None,
             openclaw_config_dir: None,
             hermes_config_dir: None,
+            pi_config_dir: None,
             current_provider_claude: None,
             current_provider_claude_desktop: None,
             current_provider_codex: None,
@@ -609,6 +624,13 @@ impl AppSettings {
 
         self.hermes_config_dir = self
             .hermes_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.pi_config_dir = self
+            .pi_config_dir
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -705,18 +727,25 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     SETTINGS_STORE.get_or_init(|| RwLock::new(AppSettings::load_from_file()))
 }
 
-fn resolve_override_path(raw: &str) -> PathBuf {
+pub(crate) fn resolve_override_path(raw: &str) -> PathBuf {
+    let join_home = |home: PathBuf, suffix: &str| {
+        suffix
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .fold(home, |path, component| path.join(component))
+    };
+
     if raw == "~" {
         if let Some(home) = dirs::home_dir() {
             return home;
         }
     } else if let Some(stripped) = raw.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
+            return join_home(home, stripped);
         }
     } else if let Some(stripped) = raw.strip_prefix("~\\") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
+            return join_home(home, stripped);
         }
     }
 
@@ -774,12 +803,16 @@ where
 }
 
 pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
-    get_settings()
+    codex_third_party_history_provider_bucket_migrated(&get_settings())
+}
+
+fn codex_third_party_history_provider_bucket_migrated(settings: &AppSettings) -> bool {
+    settings
         .local_migrations
         .as_ref()
         .and_then(|migrations| {
             migrations
-                .codex_third_party_history_provider_bucket_v1
+                .codex_third_party_history_provider_bucket_v2
                 .as_ref()
         })
         .is_some_and(|m| m.scanned_history_files)
@@ -792,15 +825,19 @@ pub fn mark_codex_third_party_history_provider_bucket_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_third_party_history_provider_bucket_v1 = Some(migration);
+        migrations.codex_third_party_history_provider_bucket_v2 = Some(migration);
     })
 }
 
 pub fn is_codex_provider_template_migrated() -> bool {
-    get_settings()
+    codex_provider_template_migrated(&get_settings())
+}
+
+fn codex_provider_template_migrated(settings: &AppSettings) -> bool {
+    settings
         .local_migrations
         .as_ref()
-        .and_then(|migrations| migrations.codex_provider_template_v1.as_ref())
+        .and_then(|migrations| migrations.codex_provider_template_v2.as_ref())
         .is_some()
 }
 
@@ -811,7 +848,7 @@ pub fn mark_codex_provider_template_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_provider_template_v1 = Some(migration);
+        migrations.codex_provider_template_v2 = Some(migration);
     })
 }
 
@@ -933,6 +970,14 @@ pub fn get_hermes_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_pi_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .pi_config_dir
+        .as_ref()
+        .map(|path| resolve_override_path(path))
+}
+
 pub fn preserve_codex_official_auth_on_switch() -> bool {
     settings_store()
         .read()
@@ -970,6 +1015,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::OpenCode => settings.current_provider_opencode.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
         AppType::Hermes => settings.current_provider_hermes.clone(),
+        AppType::Pi => None,
     }
 }
 
@@ -988,6 +1034,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::OpenCode => settings.current_provider_opencode = id_owned.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw = id_owned.clone(),
         AppType::Hermes => settings.current_provider_hermes = id_owned.clone(),
+        AppType::Pi => {}
     })
 }
 
@@ -1177,5 +1224,59 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn override_paths_expand_windows_style_tilde_separators() {
+        let home = dirs::home_dir().expect("home directory");
+        assert_eq!(
+            resolve_override_path(r"~\pi\agent"),
+            home.join("pi").join("agent")
+        );
+    }
+
+    #[test]
+    fn r22_v1_markers_do_not_block_r23_v2_migrations() {
+        let r22: AppSettings = serde_json::from_value(serde_json::json!({
+            "localMigrations": {
+                "codexThirdPartyHistoryProviderBucketV1": {
+                    "completedAt": "2026-08-28T00:00:00Z",
+                    "targetProviderId": "custom",
+                    "sourceProviderIds": [],
+                    "migratedJsonlFiles": 0,
+                    "migratedStateRows": 0,
+                    "scannedHistoryFiles": true
+                },
+                "codexProviderTemplateV1": {
+                    "completedAt": "2026-08-28T00:00:01Z",
+                    "migratedProviderIds": []
+                }
+            }
+        }))
+        .expect("deserialize R22 settings");
+
+        assert!(!codex_third_party_history_provider_bucket_migrated(&r22));
+        assert!(!codex_provider_template_migrated(&r22));
+
+        let r23: AppSettings = serde_json::from_value(serde_json::json!({
+            "localMigrations": {
+                "codexThirdPartyHistoryProviderBucketV2": {
+                    "completedAt": "2026-08-28T01:00:00Z",
+                    "targetProviderId": "custom",
+                    "sourceProviderIds": ["modelhub"],
+                    "migratedJsonlFiles": 207,
+                    "migratedStateRows": 207,
+                    "scannedHistoryFiles": true
+                },
+                "codexProviderTemplateV2": {
+                    "completedAt": "2026-08-28T01:00:01Z",
+                    "migratedProviderIds": ["bytedance-modelhub-official-cli"]
+                }
+            }
+        }))
+        .expect("deserialize R23 settings");
+
+        assert!(codex_third_party_history_provider_bucket_migrated(&r23));
+        assert!(codex_provider_template_migrated(&r23));
     }
 }

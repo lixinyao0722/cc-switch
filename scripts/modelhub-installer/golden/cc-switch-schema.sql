@@ -169,6 +169,17 @@ CREATE TABLE session_log_sync (
   last_synced_at INTEGER NOT NULL
 );
 
+CREATE TABLE session_usage_dedup (
+  data_source TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  semantic_id TEXT NOT NULL,
+  has_entry_id INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (data_source, request_id)
+);
+
+CREATE INDEX idx_session_usage_dedup_semantic
+  ON session_usage_dedup(data_source, semantic_id, has_entry_id);
+
 CREATE TABLE usage_daily_rollups (
   date TEXT NOT NULL,
   app_type TEXT NOT NULL,
@@ -236,4 +247,4 @@ CREATE INDEX idx_stream_check_logs_provider
 CREATE INDEX idx_providers_failover
   ON providers(app_type, in_failover_queue, sort_index);
 
-PRAGMA user_version = 16;
+PRAGMA user_version = 17;

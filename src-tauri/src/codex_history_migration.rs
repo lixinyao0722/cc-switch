@@ -7,7 +7,7 @@ use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
-use crate::config::{atomic_write, copy_file, get_app_config_dir};
+use crate::config::{atomic_write, atomic_write_private, copy_file, get_app_config_dir};
 use crate::database::{is_official_seed_id, Database};
 use crate::error::AppError;
 use crate::settings::{
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
-const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
+const MIGRATION_NAME: &str = "codex-history-provider-migration-v2";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
@@ -74,6 +74,7 @@ const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
     "micu",
     "minimax",
     "minimax_en",
+    "modelhub",
     "modelscope",
     "novita",
     "nvidia",
@@ -692,7 +693,7 @@ fn migrate_codex_provider_templates_to_custom(
             );
             continue;
         };
-        backup_provider_settings_config(&provider.id, &provider.settings_config, backup_root)?;
+        backup_provider_config_template(&provider.id, config_text, backup_root)?;
         obj.insert("config".to_string(), Value::String(migrated_config_text));
         db.update_provider_settings_config("codex", &provider.id, &settings)?;
         migrated_provider_ids.push(provider.id);
@@ -716,15 +717,20 @@ fn collect_source_model_provider_ids(db: &Database) -> Result<BTreeSet<String>, 
             continue;
         }
 
-        insert_known_cc_switch_legacy_source_id(&mut ids, &provider.id);
-
         let Some(config_text) = provider
             .settings_config
             .get("config")
             .and_then(|value| value.as_str())
         else {
+            insert_known_cc_switch_legacy_source_id(&mut ids, &provider.id);
             continue;
         };
+
+        if config_has_conflicting_custom_table_for_legacy_provider(config_text) {
+            continue;
+        }
+
+        insert_known_cc_switch_legacy_source_id(&mut ids, &provider.id);
 
         for provider_id in trusted_legacy_codex_model_provider_ids_from_config(config_text) {
             insert_known_cc_switch_legacy_source_id(&mut ids, &provider_id);
@@ -825,6 +831,18 @@ fn trusted_legacy_codex_model_provider_ids_from_doc(doc: &DocumentMut) -> BTreeS
     ids
 }
 
+fn config_has_conflicting_custom_table_for_legacy_provider(config_text: &str) -> bool {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        return false;
+    };
+    let active_provider_is_legacy = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .is_some_and(is_known_cc_switch_legacy_codex_model_provider_id);
+    active_provider_is_legacy
+        && config_defines_model_provider(&doc, CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+}
+
 fn insert_trusted_legacy_config_model_provider_id(
     ids: &mut BTreeSet<String>,
     doc: &DocumentMut,
@@ -875,6 +893,15 @@ fn migrate_provider_config_template_to_custom(
 
     let custom_table_exists =
         config_defines_model_provider(&doc, CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+    if custom_table_exists
+        && active_provider_id
+            .as_deref()
+            .is_some_and(|provider_id| source_provider_ids.contains(provider_id))
+    {
+        // The legacy active table and an existing custom table may represent
+        // different upstreams. Never overwrite the user's custom definition.
+        return Ok(None);
+    }
     let source_provider_id_to_move = active_provider_id
         .as_deref()
         .filter(|provider_id| source_provider_ids.contains(*provider_id))
@@ -1209,9 +1236,9 @@ fn backup_codex_state_db(
     Ok(())
 }
 
-fn backup_provider_settings_config(
+fn backup_provider_config_template(
     provider_id: &str,
-    settings_config: &Value,
+    config_text: &str,
     backup_root: &Path,
 ) -> Result<(), AppError> {
     let backup_path = backup_root
@@ -1219,15 +1246,21 @@ fn backup_provider_settings_config(
         .join(provider_settings_backup_filename(provider_id));
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|e| AppError::io(parent, e))?;
+        }
     }
 
     let payload = serde_json::json!({
         "providerId": provider_id,
-        "settingsConfig": settings_config,
+        "config": config_text,
     });
     let bytes =
         serde_json::to_vec_pretty(&payload).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(&backup_path, &bytes)
+    atomic_write_private(&backup_path, &bytes)
 }
 
 fn provider_settings_backup_filename(provider_id: &str) -> String {
@@ -1252,7 +1285,7 @@ fn provider_settings_backup_filename(provider_id: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("{hash}-{safe_id}.settings_config.json")
+    format!("{hash}-{safe_id}.config.json")
 }
 
 fn copy_existing_file(source: &Path, target: &Path) -> Result<(), AppError> {
@@ -2183,6 +2216,169 @@ base_url = "https://proxy.example/v1"
     }
 
     #[test]
+    fn migrates_modelhub_and_official_history_into_shared_bucket_for_two_way_switching() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let modelhub_backup_root = dir.path().join("modelhub-backup");
+        let official_backup_root = dir.path().join("official-backup");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+        let db = Database::memory().expect("memory db");
+        let mut modelhub = Provider::with_id(
+            "bytedance-modelhub-official-cli".to_string(),
+            "Bytedance ModelHub - 官方CLI".to_string(),
+            serde_json::json!({
+                "auth": {"OPENAI_API_KEY": "must-not-enter-backup"},
+                "config": r#"model_provider = "modelhub"
+
+[model_providers.modelhub]
+name = "modelhub"
+base_url = "https://modelhub.example/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        modelhub.category = Some("third_party".to_string());
+        db.save_provider("codex", &modelhub)
+            .expect("save ModelHub provider");
+
+        let source_provider_ids = collect_source_model_provider_ids(&db).expect("collect ids");
+        assert_eq!(source_provider_ids, source_ids(&["modelhub"]));
+
+        let session_dir = codex_dir.join("sessions/2026/08/28");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let modelhub_session = session_dir.join("modelhub.jsonl");
+        let official_session = session_dir.join("official.jsonl");
+        fs::write(
+            &modelhub_session,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"modelhub-session\",\"model_provider\":\"modelhub\"}}\n",
+        )
+        .expect("write ModelHub session");
+        fs::write(
+            &official_session,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"official-session\",\"model_provider\":\"openai\"}}\n",
+        )
+        .expect("write official session");
+
+        let state_db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );
+            INSERT INTO threads (id, model_provider) VALUES
+                ('modelhub-thread', 'modelhub'),
+                ('official-thread', 'openai');",
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        assert_eq!(
+            migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &modelhub_backup_root)
+                .expect("migrate ModelHub jsonl"),
+            1
+        );
+        assert_eq!(
+            migrate_codex_state_db_provider_bucket(
+                &state_db_path,
+                &codex_dir,
+                &source_provider_ids,
+                &modelhub_backup_root,
+            )
+            .expect("migrate ModelHub state"),
+            1
+        );
+
+        let (template_outcome, template_backup_dir) = migrate_provider_templates_for_test(&db);
+        assert_eq!(
+            template_outcome.migrated_provider_ids,
+            vec!["bytedance-modelhub-official-cli".to_string()]
+        );
+        let saved_modelhub = db
+            .get_provider_by_id("bytedance-modelhub-official-cli", "codex")
+            .expect("get provider")
+            .expect("ModelHub provider exists");
+        let saved_modelhub_config = saved_modelhub
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("ModelHub config");
+        assert!(codex_config_text_routes_custom(saved_modelhub_config));
+        let provider_backups: Vec<_> = fs::read_dir(template_backup_dir.path().join("providers"))
+            .expect("provider backup directory")
+            .flatten()
+            .collect();
+        assert_eq!(provider_backups.len(), 1);
+        let provider_backup_path = provider_backups[0].path();
+        let provider_backup =
+            fs::read_to_string(&provider_backup_path).expect("read ModelHub provider backup");
+        assert!(provider_backup.contains(r#""providerId": "bytedance-modelhub-official-cli""#));
+        assert!(provider_backup.contains(r#""config": "model_provider = \"modelhub\""#));
+        assert!(!provider_backup.contains("must-not-enter-backup"));
+        assert!(!provider_backup.contains("OPENAI_API_KEY"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&provider_backup_path)
+                    .expect("provider backup metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(
+                    provider_backup_path
+                        .parent()
+                        .expect("provider backup parent")
+                )
+                .expect("provider backup parent metadata")
+                .permissions()
+                .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+
+        let official_provider_ids = source_ids(&[OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID]);
+        assert_eq!(
+            migrate_codex_jsonl_files(&codex_dir, &official_provider_ids, &official_backup_root,)
+                .expect("migrate official jsonl"),
+            1
+        );
+        assert_eq!(
+            migrate_codex_state_db_provider_bucket(
+                &state_db_path,
+                &codex_dir,
+                &official_provider_ids,
+                &official_backup_root,
+            )
+            .expect("migrate official state"),
+            1
+        );
+
+        assert!(fs::read_to_string(&modelhub_session)
+            .expect("read ModelHub session")
+            .contains("\"model_provider\":\"custom\""));
+        assert!(fs::read_to_string(&official_session)
+            .expect("read official session")
+            .contains("\"model_provider\":\"custom\""));
+
+        let conn = Connection::open(&state_db_path).expect("reopen state db");
+        let custom_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE model_provider = 'custom'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count shared rows");
+        assert_eq!(custom_rows, 2);
+    }
+
+    #[test]
     fn skips_unknown_provider_model_provider_id_from_existing_config() {
         let db = Database::memory().expect("memory db");
         let mut provider = Provider::with_id(
@@ -2200,6 +2396,24 @@ base_url = "https://proxy.example/v1"
 
         let ids = collect_source_model_provider_ids(&db).expect("collect ids");
         assert!(!ids.contains("my-private-relay"));
+    }
+
+    #[test]
+    fn skips_legacy_provider_template_when_custom_table_already_exists() {
+        let config = r#"model_provider = "modelhub"
+
+[model_providers.modelhub]
+name = "modelhub"
+base_url = "https://modelhub.example/v1"
+
+[model_providers.custom]
+name = "User Relay"
+base_url = "https://user-relay.example/v1"
+"#;
+
+        assert!(migrate_provider_config_template_to_custom(config)
+            .expect("inspect conflicting config")
+            .is_none());
     }
 
     #[test]

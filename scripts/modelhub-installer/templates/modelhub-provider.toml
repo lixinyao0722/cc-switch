@@ -1,7 +1,7 @@
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_max_output_tokens = 128_000
-model_provider = "modelhub"
+model_provider = "custom"
 model_reasoning_effort = "high"
 model_auto_compact_token_limit = 600000
 model_context_window = 921_860
@@ -13,7 +13,7 @@ remote_compaction_v2 = true
 [desktop]
 git-branch-prefix = "feat/"
 
-[model_providers.modelhub]
+[model_providers.custom]
 name = "modelhub"
 wire_api = "responses"
 requires_openai_auth = true

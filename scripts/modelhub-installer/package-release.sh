@@ -5,7 +5,7 @@ set -euo pipefail
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 
-readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.19.5-arm64.app.zip'
+readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.20.0-arm64.app.zip'
 readonly OUTPUT_INSTALLER_NAME='install.sh'
 readonly OUTPUT_RESOURCES_NAME='modelhub-installer-resources.tar.gz'
 readonly OUTPUT_CHECKSUM_NAME='SHA256SUMS.txt'
@@ -212,6 +212,56 @@ build_reproducible_resource_archive() {
   /usr/bin/gzip -n -9 -c "$tar_path" >"$output_path"
 }
 
+validate_app_archive() {
+  local app_zip="$1"
+  local work_dir="$2"
+  local extracted_app="$work_dir/CC Switch.app"
+  local bundle_id
+  local bundle_version
+  local executable_path
+  local architectures
+
+  if ! /usr/bin/ditto -x -k "$app_zip" "$work_dir"; then
+    die 'failed to extract CC Switch app archive'
+    return 1
+  fi
+  if [[ ! -d "$extracted_app" || -L "$extracted_app" ]]; then
+    die 'CC Switch app archive has an unexpected layout'
+    return 1
+  fi
+  if find "$work_dir" -mindepth 1 -maxdepth 1 ! -name 'CC Switch.app' -print -quit | grep -q .; then
+    die 'CC Switch app archive contains unexpected top-level entries'
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$extracted_app"; then
+    die 'CC Switch app signature verification failed'
+    return 1
+  fi
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extracted_app/Contents/Info.plist" 2>/dev/null)" \
+    || { die 'CC Switch app bundle identifier is unreadable'; return 1; }
+  if [[ "$bundle_id" != 'com.ccswitch.desktop' ]]; then
+    die "CC Switch app has unexpected bundle identifier: $bundle_id"
+    return 1
+  fi
+  bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$extracted_app/Contents/Info.plist" 2>/dev/null)" \
+    || { die 'CC Switch app version is unreadable'; return 1; }
+  if [[ "$bundle_version" != '3.20.0' ]]; then
+    die "CC Switch app has unexpected version: $bundle_version"
+    return 1
+  fi
+  executable_path="$extracted_app/Contents/MacOS/cc-switch"
+  if [[ ! -f "$executable_path" || -L "$executable_path" || ! -x "$executable_path" ]]; then
+    die 'CC Switch app executable is missing or unsafe'
+    return 1
+  fi
+  architectures="$(/usr/bin/lipo -archs "$executable_path")" \
+    || { die 'CC Switch app architecture is unreadable'; return 1; }
+  if [[ "$architectures" != 'arm64' ]]; then
+    die "CC Switch app has unexpected architectures: $architectures"
+    return 1
+  fi
+}
+
 main() {
   local app_zip=''
   local output_dir=''
@@ -308,6 +358,10 @@ main() {
   package_dir="$work_dir/package"
   staged_output="$work_dir/output"
   mkdir -p "$package_dir" "$staged_output"
+  validate_app_archive "$app_zip" "$work_dir/app-validation" || {
+    rm -rf "$work_dir"
+    return 1
+  }
   copy_allowlisted_resources "$source_dir" "$package_dir"
 
   build_reproducible_resource_archive \

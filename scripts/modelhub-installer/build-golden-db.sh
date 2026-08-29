@@ -217,8 +217,10 @@ SQL
 
   integrity="$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA integrity_check;')"
   [[ "$integrity" == 'ok' ]] || { die 'golden database integrity check failed'; return 1; }
-  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA user_version;')" == '16' ]] \
-    || { die 'golden database user_version is not 16'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA user_version;')" == '17' ]] \
+    || { die 'golden database user_version is not 17'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
+    || { die 'golden database is missing session_usage_dedup'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
     || { die 'golden database must contain ModelHub and OpenAI Official'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE id='codex-official' AND app_type='codex' AND category='official' AND is_current=0 AND settings_config=json_object('auth', json('{}'), 'config', '');")" == '1' ]] \

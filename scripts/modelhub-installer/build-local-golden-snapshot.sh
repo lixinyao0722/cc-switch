@@ -110,6 +110,8 @@ main() {
      | .currentProviderCodex = $provider_id
      | .enableLocalProxy = true
      | .preserveCodexOfficialAuthOnSwitch = true
+     | .unifyCodexSessionHistory = true
+     | .unifyCodexMigrateExisting = true
      | .proxyConfirmed = true
      | .firstRunNoticeConfirmed = true' \
     "$settings" >"$portable_settings"
