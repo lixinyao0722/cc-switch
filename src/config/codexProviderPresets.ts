@@ -1796,11 +1796,13 @@ requires_openai_auth = true`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
-        // xAI Reasoning guide（docs.x.ai，2026-08）模型级枚举 low/medium/high
-        // 默认 high；"Reasoning cannot be disabled" 故无 none 档（模板默认的
-        // none 对 grok-4.5 是无效选项）；xhigh 是 grok-4.6 起才有的档位。
+        // 实测（2026-08-30，native /v1/responses 逐档探测）：grok-4.5 接受
+        // low/medium/high/xhigh，拒绝 max（HTTP 400 "Invalid reasoning
+        // effort"）；"Reasoning cannot be disabled" 故无 none 档。Codex 不按
+        // catalog clamp 越界档位（Desktop UI 选出的 max 会原样发出），此列表
+        // 必须与上游实收集合一致，勿凭文档增删。
         // ⚠️ docs.x.ai/developers/grok-4-5 页面实际渲染的是 grok-4.6 内容勿引
-        reasoningLevels: ["low", "medium", "high"],
+        reasoningLevels: ["low", "medium", "high", "xhigh"],
       },
     ]),
     category: "third_party",
@@ -1828,11 +1830,13 @@ requires_openai_auth = true`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
-        // xAI Reasoning guide（docs.x.ai，2026-08）模型级枚举 low/medium/high
-        // 默认 high；"Reasoning cannot be disabled" 故无 none 档（模板默认的
-        // none 对 grok-4.5 是无效选项）；xhigh 是 grok-4.6 起才有的档位。
+        // 实测（2026-08-30，native /v1/responses 逐档探测）：grok-4.5 接受
+        // low/medium/high/xhigh，拒绝 max（HTTP 400 "Invalid reasoning
+        // effort"）；"Reasoning cannot be disabled" 故无 none 档。Codex 不按
+        // catalog clamp 越界档位（Desktop UI 选出的 max 会原样发出），此列表
+        // 必须与上游实收集合一致，勿凭文档增删。
         // ⚠️ docs.x.ai/developers/grok-4-5 页面实际渲染的是 grok-4.6 内容勿引
-        reasoningLevels: ["low", "medium", "high"],
+        reasoningLevels: ["low", "medium", "high", "xhigh"],
       },
     ]),
     category: "third_party",
