@@ -956,7 +956,11 @@ fn whole_float_to_json_int(number: &Number) -> Option<Number> {
         return None;
     }
     if float >= 0.0 {
-        if float > u64::MAX as f64 {
+        // `u64::MAX as f64` rounds up to 2^64, so `>=` (not `>`): at exactly
+        // 2^64 the `as u64` cast below saturates to u64::MAX, which rounds back
+        // to 2^64 and slips through the round-trip check — a silent off-by-one.
+        // (The negative arm is safe: `i64::MIN as f64` is exactly -2^63.)
+        if float >= u64::MAX as f64 {
             return None;
         }
         let integer = float as u64;
@@ -1428,6 +1432,20 @@ mod tests {
         assert!(!encoded.contains("92116.0"));
         assert!(!encoded.contains("120000.0"));
         assert!(encoded.contains("1.5"));
+    }
+
+    #[test]
+    fn two_pow_64_whole_float_is_not_rewritten() {
+        // 2^64 slips past a `>` guard (`u64::MAX as f64` rounds up to 2^64) and
+        // the saturating cast would silently rewrite it to u64::MAX, off by one.
+        let mut value: Value = serde_json::from_str(r#"{"big":18446744073709551616.0}"#).unwrap();
+        assert!(!rewrite_whole_number_floats(&mut value));
+        assert_eq!(value["big"].as_f64(), Some(18_446_744_073_709_551_616.0));
+
+        // The largest representable whole float below 2^64 still converts.
+        let mut value: Value = serde_json::from_str(r#"{"big":18446744073709549568.0}"#).unwrap();
+        assert!(rewrite_whole_number_floats(&mut value));
+        assert_eq!(value["big"].as_u64(), Some(18_446_744_073_709_549_568));
     }
 
     #[test]
