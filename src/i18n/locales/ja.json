@@ -2218,6 +2218,7 @@
     }
   },
   "profiles": {
+    "switcherAriaLabel": "プロジェクト：{{name}}",
     "switcherTooltip": {
       "claude": "プロジェクト：Claude Code のプロバイダー / MCP / Skills / メモリファイルをワンクリックで切り替え",
       "claude-desktop": "プロジェクト：Claude Desktop のプロバイダーをワンクリックで切り替え",
@@ -2901,6 +2902,7 @@
     },
     "switchFailed": "切り替えに失敗しました: {{error}}",
     "takeover": {
+      "ariaLabel": "{{appLabel}} ローカルルーティング",
       "hint": "ルーティングするアプリを選択します。有効にすると、そのアプリのリクエストはローカルルーティング経由で転送されます",
       "enabled": "{{app}} ルーティング有効",
       "disabled": "{{app}} ルーティング無効",
