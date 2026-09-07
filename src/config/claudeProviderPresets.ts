@@ -1546,6 +1546,9 @@ export const providerPresets: ProviderPreset[] = [
     },
     category: "aggregator",
     endpointCandidates: ["https://api.novita.ai/anthropic"],
+    // Anthropic 兼容层在 /anthropic 子路径，OpenAI 侧却在 /openai/v1；剥后缀
+    // 后的根路径没有 /models（实测 404），通用候选够不到，故覆写
+    modelsUrl: "https://api.novita.ai/openai/v1/models",
     icon: "novita",
     iconColor: "#000000",
   },
@@ -1774,6 +1777,9 @@ export const providerPresets: ProviderPreset[] = [
     },
     category: "aggregator",
     endpointCandidates: ["https://api.jiekou.ai/anthropic"],
+    // 同 Novita：Anthropic 在 /anthropic、OpenAI 在 /openai/v1，根路径无
+    // /models（实测 404），通用候选够不到，故覆写
+    modelsUrl: "https://api.jiekou.ai/openai/v1/models",
     icon: "jiekou",
     iconColor: "#000000",
   },
