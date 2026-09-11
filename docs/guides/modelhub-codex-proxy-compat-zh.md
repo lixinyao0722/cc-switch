@@ -13,7 +13,9 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
-## 安装（ModelHub R24，2026-09-11）
+## 安装（ModelHub R24，2026-09-12 安装器修复）
+
+2026-09-12 的安装器修复版解决第 8 步把 `(never exited)`（helper 尚未退出）误判为失败的问题，安装和回滚共用此修复。请使用修复版完整资源目录，不要继续运行 2026-09-11 初版安装器。App 版本和二进制不变；细节见 [R24 本地交付说明](modelhub-r24-local-delivery-zh.md)。
 
 R24 本次为本地交付，应用版本 3.20.2。安装命令、官方选择性同步清单和验收边界见 [R24 本地交付说明](modelhub-r24-local-delivery-zh.md)。下面的 latest Release 命令仅用于已发布版本，不能用来安装尚未发布的 R24 本地包。R24 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。
 

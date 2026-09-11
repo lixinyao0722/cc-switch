@@ -3986,7 +3986,7 @@ install_launch_agent() {
   local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
   local plutil_bin="$(installer_tool_path CC_SWITCH_PLUTIL_BIN /usr/bin/plutil)"
   local sleep_bin="$(installer_tool_path CC_SWITCH_SLEEP_BIN /bin/sleep)"
-  local domain job_output last_exit attempts attempt=1
+  local domain job_output job_state last_exit attempts attempt=1
   if [[ -L "$LAUNCH_AGENT_PATH" || ! -f "$LAUNCH_AGENT_PATH" || ! -x "$ENV_HELPER_PATH" ]] \
     || ! "$plutil_bin" -lint "$LAUNCH_AGENT_PATH" >/dev/null 2>&1; then
     die 'ModelHub LaunchAgent plist or helper is invalid'
@@ -4009,16 +4009,32 @@ install_launch_agent() {
       die 'ModelHub LaunchAgent is missing after bootstrap'
       return 1
     fi
-    last_exit="$(printf '%s\n' "$job_output" | awk '$1 == "last" && $2 == "exit" && $3 == "code" && $4 == "=" { print $5; exit }')"
+    job_state="$(printf '%s\n' "$job_output" | awk '/^[[:space:]]*state = / { sub(/^[[:space:]]*state = /, ""); sub(/[[:space:]]*$/, ""); print; exit }')"
+    last_exit="$(printf '%s\n' "$job_output" | awk '/^[[:space:]]*last exit code = / { sub(/^[[:space:]]*last exit code = /, ""); sub(/[[:space:]]*$/, ""); print; exit }')"
     job_output=''
-    if [[ "$last_exit" == 0 ]]; then
-      verify_launch_agent_environment || return 1
-      return 0
-    fi
-    if [[ -n "$last_exit" ]]; then
-      die 'ModelHub LaunchAgent helper reported an unsuccessful last exit'
-      return 1
-    fi
+    # A running job can still expose the previous run's exit code. macOS also
+    # reports "(never exited)" before the first completion; neither is failure.
+    case "$job_state" in
+      running|spawning|'spawn scheduled') ;;
+      *)
+        case "$last_exit" in
+          0)
+            verify_launch_agent_environment || return 1
+            return 0
+            ;;
+          ''|'(never exited)') ;;
+          *)
+            if [[ "$last_exit" =~ ^-?[0-9]+$ ]]; then
+              die "ModelHub LaunchAgent helper failed (exit code $last_exit)"
+            else
+              # Do not echo arbitrary launchctl output: it can contain secrets.
+              die 'ModelHub LaunchAgent helper reported an unrecognized completion status'
+            fi
+            return 1
+            ;;
+        esac
+        ;;
+    esac
     if [[ "$attempt" -lt "$attempts" ]]; then "$sleep_bin" 1 || return 1; fi
     attempt=$((attempt + 1))
   done

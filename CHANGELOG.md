@@ -5,6 +5,11 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.2-ModelHub-R24-hotfix.1] - 2026-09-12
+
+- **LaunchAgent Completion Detection**: Fix the R24 installer treating macOS `last exit code = (never exited)` as helper failure during installation and rollback. Wait for the current run to complete, ignore stale exit codes while the job is running, and retain bounded timeout and environment readback. Real nonzero exits report the numeric code; unknown status is redacted.
+- **Regression Coverage**: Add seven behavior groups covering pending/running states, success, real failure, timeout, automatic/manual restore, unknown status and environment failure. Only the installer and its tests change; the R24 application binary is unchanged.
+
 ## [3.20.2-ModelHub-R24] - 2026-09-11
 
 - **Explicit Mobile Remote Sessions**: A separate, default-off “支持手机远程会话” switch is added above the ModelHub session-header adapter. Only explicit opt-in writes system managed routing. Disabling previously managed routing preserves unrelated system policy, and legacy R23 conflicts are surfaced instead of silently reporting an official direct route.

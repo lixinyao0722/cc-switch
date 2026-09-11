@@ -17,6 +17,16 @@ case "${1:-}" in
       fi
     fi
     [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] || exit 113
+    if [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]]; then
+      remaining="$(/bin/cat "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending")"
+      if [[ "$remaining" -gt 0 ]]; then
+        printf '%s' "$((remaining - 1))" >"$FAKE_LAUNCHCTL_STATE_DIR/helper-pending"
+        printf 'state = %s\nlast exit code = %s\nprivate environment = fixture-do-not-print\n' \
+          "${FAKE_LAUNCHCTL_PENDING_STATE:-running}" "${FAKE_LAUNCHCTL_PENDING_EXIT-(never exited)}"
+        exit 0
+      fi
+      rm -f "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending"
+    fi
     printf 'state = not running\nlast exit code = %s\nprivate environment = fixture-do-not-print\n' "${FAKE_LAUNCHCTL_HELPER_EXIT:-0}"
     ;;
   bootout)
@@ -40,6 +50,7 @@ case "${1:-}" in
     fi
     if [[ "${FAKE_LAUNCHCTL_BOOTSTRAP_MODE:-success}" != missing ]]; then
       : >"$FAKE_LAUNCHCTL_STATE_DIR/job"
+      printf '%s' "${FAKE_LAUNCHCTL_HELPER_DELAY_POLLS:-0}" >"$FAKE_LAUNCHCTL_STATE_DIR/helper-pending"
       /usr/bin/shasum -a 256 "$3" >"$FAKE_LAUNCHCTL_STATE_DIR/loaded-plist"
     fi
     if [[ "${FAKE_LAUNCHCTL_SIGNAL_TERM:-0}" == 1 ]]; then kill -TERM "$PPID"; fi

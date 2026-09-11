@@ -3987,6 +3987,13 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
 }
 
 source "$REPO_ROOT/tests/scripts/modelhub-installer-r24-cases.sh"
+run_test "R24 launchd completion waits for current run success" test_r24_launchd_completion_pending_then_success
+run_test "R24 launchd completion waits for the first exit" test_r24_launchd_completion_waits_for_first_exit
+run_test "R24 launchd completion real failure restores files" test_r24_launchd_completion_failure_restores_files
+run_test "R24 launchd completion timeout restores files" test_r24_launchd_completion_timeout_restores_files
+run_test "R24 launchd completion waits during both restore paths" test_r24_launchd_completion_waits_during_restore
+run_test "R24 launchd completion unknown status is redacted" test_r24_launchd_completion_unknown_status_is_redacted
+run_test "R24 launchd completion still checks environment" test_r24_launchd_completion_still_checks_environment
 run_test "R24 launchd delayed bootout waits before replacement" test_r24_launchd_delayed_bootout
 run_test "R24 launchd real bootout failure preserves unchanged files" test_r24_launchd_bootout_failure
 run_test "R24 launchd nonzero bootout accepts confirmed absent" test_r24_launchd_nonzero_absent

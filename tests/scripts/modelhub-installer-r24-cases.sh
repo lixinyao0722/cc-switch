@@ -14,6 +14,114 @@ prepare_r24_loaded_job() {
   : >"$FAKE_LAUNCHCTL_STATE_DIR/job"
 }
 
+test_r24_launchd_completion_pending_then_success() {
+  local pending_exit case_dir index=0
+  # Missing exit status and stale numeric status are not current-run completion.
+  for pending_exit in '(never exited)' '' '0' '7'; do
+    index=$((index + 1))
+    case_dir="$TEST_TMP/r24-completion-success-$index"
+    prepare_r24_loaded_job "$case_dir"
+    export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=2
+    export FAKE_LAUNCHCTL_PENDING_EXIT="$pending_exit"
+    install_launch_agent >"$case_dir/output" 2>&1
+    [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]] \
+      || fail 'installation accepted the running helper before completion'
+    [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] || fail 'completed helper lost its job'
+    assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+    assert_not_contains "$case_dir/output" 'r24-fixture-old-key'
+  done
+}
+
+test_r24_launchd_completion_waits_for_first_exit() {
+  local pending_state case_dir index=0
+  for pending_state in waiting spawning 'spawn scheduled'; do
+    index=$((index + 1))
+    case_dir="$TEST_TMP/r24-completion-first-exit-$index"
+    prepare_r24_loaded_job "$case_dir"
+    export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=2
+    export FAKE_LAUNCHCTL_PENDING_STATE="$pending_state"
+    install_launch_agent >"$case_dir/output" 2>&1
+    [[ ! -e "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]] \
+      || fail 'helper without a first exit was accepted as completed'
+    assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+  done
+}
+
+test_r24_launchd_completion_failure_restores_files() {
+  local case_dir="$TEST_TMP/r24-completion-failure"
+  local before
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=2
+  export FAKE_LAUNCHCTL_HELPER_EXIT=7
+  if perform_install >"$case_dir/output" 2>&1; then fail 'nonzero helper exit was accepted'; fi
+  assert_contains "$case_dir/output" 'exit code 7'
+  assert_equals "$(managed_state_digest "$case_dir")" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" && ! -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] \
+    || fail 'helper failure retained new credentials or job'
+  assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+  assert_not_contains "$case_dir/output" 'test-modelhub-ak-r6'
+}
+
+test_r24_launchd_completion_timeout_restores_files() {
+  local case_dir="$TEST_TMP/r24-completion-timeout"
+  local before
+  prepare_transaction_case "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=1000
+  export CC_SWITCH_INSTALLER_TEST_LAUNCHD_ATTEMPTS=3
+  if perform_install >"$case_dir/output" 2>&1; then fail 'running helper without completion was accepted'; fi
+  assert_contains "$case_dir/output" 'did not report completion'
+  assert_equals "$(managed_state_digest "$case_dir")" "$before"
+  [[ ! -e "$FAKE_KEYCHAIN_STATE" && ! -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] \
+    || fail 'timeout retained new credentials or job'
+  [[ "$(wc -l <"$FAKE_LAUNCHCTL_STATE_DIR/calls")" -le 40 ]] || fail 'helper completion wait was unbounded'
+  assert_not_contains "$case_dir/output" 'unsuccessful last exit'
+  assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+}
+
+test_r24_launchd_completion_waits_during_restore() {
+  local case_dir="$TEST_TMP/r24-completion-restore"
+  local before
+  prepare_r24_loaded_job "$case_dir"
+  before="$(managed_state_digest "$case_dir")"
+  export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=2
+  export FAKE_HEALTH_MODE=timeout
+  if perform_install >"$case_dir/output" 2>&1; then fail 'health failure was ignored'; fi
+  assert_equals "$(managed_state_digest "$case_dir")" "$before"
+  [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" && ! -e "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]] \
+    || fail 'automatic rollback did not wait for the old helper to complete'
+  assert_not_contains "$case_dir/output" 'rollback was incomplete'
+  assert_not_contains "$case_dir/output" 'LaunchAgent restore incomplete'
+  assert_not_contains "$case_dir/output" 'unsuccessful last exit'
+  export FAKE_HEALTH_MODE=healthy
+  perform_install >"$case_dir/install-output" 2>&1
+  rollback_latest >"$case_dir/rollback-output" 2>&1
+  [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" && ! -e "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]] \
+    || fail 'explicit rollback did not wait for the old helper to complete'
+  assert_not_contains "$case_dir/rollback-output" 'fixture-do-not-print'
+}
+
+test_r24_launchd_completion_unknown_status_is_redacted() {
+  local case_dir="$TEST_TMP/r24-completion-unknown"
+  prepare_r24_loaded_job "$case_dir"
+  export FAKE_LAUNCHCTL_HELPER_EXIT='unexpected-fixture-sensitive-status'
+  if install_launch_agent >"$case_dir/output" 2>&1; then fail 'unknown helper status was accepted'; fi
+  assert_contains "$case_dir/output" 'unrecognized completion status'
+  assert_not_contains "$case_dir/output" 'unexpected-fixture-sensitive-status'
+  assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+}
+
+test_r24_launchd_completion_still_checks_environment() {
+  local case_dir="$TEST_TMP/r24-completion-environment"
+  prepare_r24_loaded_job "$case_dir"
+  export FAKE_LAUNCHCTL_HELPER_DELAY_POLLS=2
+  export FAKE_LAUNCHCTL_GETENV_STATUS=5
+  if install_launch_agent >"$case_dir/output" 2>&1; then fail 'completed helper bypassed environment verification'; fi
+  assert_contains "$case_dir/output" 'environment readback failed'
+  assert_not_contains "$case_dir/output" 'fixture-do-not-print'
+}
+
 test_r24_launchd_delayed_bootout() {
   local case_dir="$TEST_TMP/r24-delayed"
   prepare_r24_loaded_job "$case_dir"
