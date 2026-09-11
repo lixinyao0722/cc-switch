@@ -12,7 +12,8 @@ import {
 import { generateUUID } from "@/utils/uuid";
 import { openclawKeys } from "@/hooks/useOpenClaw";
 import { invalidateHermesProviderCaches } from "@/hooks/useHermes";
-import { proxyKeys } from "@/lib/query/proxy";
+import { invalidateRoutingState } from "@/lib/query/proxy";
+import { useRoutingMutation } from "@/lib/query/routing";
 import { usageKeys } from "@/lib/query/usage";
 import { invalidatePiProviderCaches } from "@/lib/query/pi";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
@@ -164,7 +165,7 @@ export const useUpdateProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
-  return useMutation({
+  return useRoutingMutation({
     mutationFn: async ({
       provider,
       originalId,
@@ -218,6 +219,7 @@ export const useUpdateProviderMutation = (appId: AppId) => {
       );
     },
     onSettled: async () => {
+      await invalidateRoutingState(queryClient, appId);
       if (appId === "pi") {
         await invalidatePiProviderCaches(queryClient);
       }
@@ -305,19 +307,11 @@ export const useSwitchProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
-  return useMutation({
+  return useRoutingMutation({
     mutationFn: async (providerId: string): Promise<SwitchResult> => {
       return await providersApi.switch(providerId, appId);
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
-      if (appId === "claude-desktop") {
-        await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
-        await queryClient.invalidateQueries({
-          queryKey: ["claudeDesktopStatus"],
-        });
-      }
-
       // OpenCode/OpenClaw: also invalidate live provider IDs cache to update button state
       if (appId === "opencode") {
         await queryClient.invalidateQueries({
@@ -377,6 +371,7 @@ export const useSwitchProviderMutation = (appId: AppId) => {
       );
     },
     onSettled: async () => {
+      await invalidateRoutingState(queryClient, appId);
       if (appId === "pi") {
         await invalidatePiProviderCaches(queryClient);
       }

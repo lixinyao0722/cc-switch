@@ -4346,6 +4346,7 @@ wire_api = "responses"
                 codex_session_header_adapter: Some(
                     crate::provider::CodexSessionHeaderAdapter::Modelhub,
                 ),
+                codex_remote_sessions: Some(true),
                 ..Default::default()
             }),
             ..Default::default()
@@ -4381,8 +4382,8 @@ wire_api = "responses"
         let managed = std::fs::read_to_string(&managed_path).unwrap_or_default();
         if current == modelhub.id {
             assert!(takeover);
-            assert!(managed.contains("model_provider = \"modelhub\""));
-            assert!(managed.contains("openai_base_url = \"http://127.0.0.1:15721/v1\""));
+            assert!(managed.contains("model_provider = \"custom\""));
+            assert!(managed.contains(&state.proxy_service.build_proxy_urls().await.unwrap().1));
             assert!(db.get_live_backup("codex").await.unwrap().is_some());
         } else {
             assert_eq!(current, official.id);
@@ -4404,6 +4405,425 @@ wire_api = "responses"
             Some(value) => std::env::set_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", value),
             None => std::env::remove_var("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH"),
         }
+    }
+
+    struct R24Home {
+        dir: tempfile::TempDir,
+        old_home: Option<std::ffi::OsString>,
+        old_managed: Option<std::ffi::OsString>,
+    }
+
+    impl R24Home {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let old_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            let old_managed = std::env::var_os("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            std::env::set_var(
+                "CC_SWITCH_CODEX_MANAGED_CONFIG_PATH",
+                dir.path().join("managed.toml"),
+            );
+            crate::settings::reload_settings().unwrap();
+            Self {
+                dir,
+                old_home,
+                old_managed,
+            }
+        }
+        fn managed(&self) -> PathBuf {
+            self.dir.path().join("managed.toml")
+        }
+    }
+
+    impl Drop for R24Home {
+        fn drop(&mut self) {
+            for (key, old) in [
+                ("CC_SWITCH_TEST_HOME", &self.old_home),
+                ("CC_SWITCH_CODEX_MANAGED_CONFIG_PATH", &self.old_managed),
+            ] {
+                match old {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let _ = crate::settings::reload_settings();
+            crate::codex_managed_route::FAIL_NEXT_MANAGED_WRITE
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            crate::services::proxy::FAIL_NEXT_CODEX_ROUTE_ROLLBACK
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            FAIL_NEXT_CODEX_SWITCH_DB_COMMIT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    async fn r24_state(remote: bool) -> (R24Home, AppState, Provider, Provider) {
+        let home = R24Home::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let mut global = db.get_global_proxy_config().await.unwrap();
+        global.listen_port = 0;
+        db.update_global_proxy_config(global).await.unwrap();
+        let mut modelhub = Provider::with_id(
+            "r24-modelhub".into(),
+            "ModelHub".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "r24-fixture-key"},
+                "config": include_str!("../../../../scripts/modelhub-installer/templates/modelhub-provider.toml"),
+            }),
+            None,
+        );
+        modelhub.meta = Some(ProviderMeta {
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                codex_remote_sessions: Some(remote),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.into(),
+            "Official".into(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        db.save_provider("codex", &modelhub).unwrap();
+        db.save_provider("codex", &official).unwrap();
+        db.set_current_provider("codex", &official.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id)).unwrap();
+        crate::codex_config::write_codex_live_atomic(
+            &json!({"auth_mode": "chatgpt"}),
+            Some("model = \"gpt-5.4\"\n"),
+        )
+        .unwrap();
+        (home, state, modelhub, official)
+    }
+
+    async fn r24_snapshot(
+        state: &AppState,
+        home: &R24Home,
+    ) -> (
+        crate::codex_config::CodexLiveStateSnapshot,
+        Value,
+        Option<Vec<u8>>,
+    ) {
+        let db = &state.db;
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .unwrap()
+            .map(|b| json!({"config": b.original_config, "time": b.backed_up_at}));
+        (
+            crate::codex_config::CodexLiveStateSnapshot::capture().unwrap(),
+            json!({
+                "local": crate::settings::get_current_provider(&AppType::Codex),
+                "current": db.get_current_provider("codex").unwrap(),
+                "providers": db.get_all_providers("codex").unwrap(),
+                "snippet": db.get_config_snippet("codex").unwrap(),
+                "proxy": db.get_proxy_config_for_app("codex").await.unwrap(),
+                "global": db.get_global_proxy_config().await.unwrap(),
+                "backup": backup,
+                "running": state.proxy_service.is_running().await,
+            }),
+            std::fs::read(home.managed()).ok(),
+        )
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn r24_manual_stop_serializes_remote_opt_in_and_rechecks_ownership() {
+        use tokio::time::{timeout, Duration};
+
+        let _guard = test_guard();
+        let (_home, state, modelhub, _) = r24_state(true).await;
+        state.proxy_service.start().await.unwrap();
+        let (_, endpoint) = state.proxy_service.build_proxy_urls().await.unwrap();
+        let route_guard = state.proxy_service.lock_switch_for_app("codex").await;
+        let stop_service = state.proxy_service.clone();
+        let mut stop = tokio::spawn(async move { stop_service.stop_with_restore().await });
+        assert!(timeout(Duration::from_millis(40), &mut stop).await.is_err());
+        let running_while_route_owned = state.proxy_service.is_running().await;
+
+        // The opt-in commits while the stop request is waiting. The stop must
+        // check ownership after taking the transaction lock, not before it.
+        let mut managed =
+            crate::codex_managed_route::ManagedRouteTransaction::prepare(&modelhub, &endpoint)
+                .unwrap();
+        managed.apply().unwrap();
+        let backup = json!({"config": "model = \"fixture\"\n", "auth": {}}).to_string();
+        state.db.save_live_backup("codex", &backup).await.unwrap();
+        let mut config = state.db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
+        state.db.update_proxy_config_for_app(config).await.unwrap();
+        drop(route_guard);
+        let result = timeout(Duration::from_secs(3), stop)
+            .await
+            .unwrap()
+            .unwrap();
+        let running_after_stop = state.proxy_service.is_running().await;
+        let enabled_after_stop = state
+            .db
+            .get_proxy_config_for_app("codex")
+            .await
+            .unwrap()
+            .enabled;
+        let backup_after_stop = state.db.get_live_backup("codex").await.unwrap();
+        managed.rollback().unwrap();
+        if running_after_stop {
+            state.proxy_service.stop().await.unwrap();
+        }
+
+        assert!(
+            running_while_route_owned,
+            "stop must not change the listener during a route transaction"
+        );
+        assert!(
+            result.is_err(),
+            "mobile ownership committed while waiting must prevent manual stop"
+        );
+        assert!(running_after_stop && enabled_after_stop);
+        assert_eq!(backup_after_stop.unwrap().original_config, backup);
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn r24_repeated_routes_repair_stopped_server_and_leave_other_apps_and_policy_intact() {
+        let _guard = test_guard();
+        let (home, state, modelhub, official) = r24_state(true).await;
+        let mut claude = state.db.get_proxy_config_for_app("claude").await.unwrap();
+        claude.enabled = true;
+        claude.max_retries = 7;
+        state
+            .db
+            .update_proxy_config_for_app(claude.clone())
+            .await
+            .unwrap();
+        std::fs::write(
+            home.managed(),
+            "allow_remote_control = false\n[history]\nmodel_provider = \"keep\"\n",
+        )
+        .unwrap();
+        let native_auth = std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap();
+        for _ in 0..3 {
+            assert!(
+                ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+                    .await
+                    .unwrap()
+                    .codex_restart_required
+            );
+            assert!(state.proxy_service.is_running().await);
+            let (_, endpoint) = state.proxy_service.build_proxy_urls().await.unwrap();
+            let managed = std::fs::read_to_string(home.managed()).unwrap();
+            assert!(managed.contains(&endpoint));
+            assert!(managed.contains("model_provider = \"custom\""));
+            assert!(state
+                .proxy_service
+                .set_takeover_for_app("codex", false)
+                .await
+                .unwrap_err()
+                .contains("手机远程"));
+            state.proxy_service.stop().await.unwrap();
+            assert!(
+                state
+                    .db
+                    .get_proxy_config_for_app("codex")
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+            ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+                .await
+                .unwrap();
+            assert!(state.proxy_service.is_running().await);
+            ProviderService::switch_routed(&state, AppType::Codex, &official.id)
+                .await
+                .unwrap();
+            assert!(
+                !state
+                    .db
+                    .get_proxy_config_for_app("codex")
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+            assert!(state.proxy_service.is_running().await);
+            let managed = std::fs::read_to_string(home.managed())
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            assert!(managed.get("model_provider").is_none());
+            assert!(managed.get("openai_base_url").is_none());
+            assert_eq!(managed["allow_remote_control"].as_bool(), Some(false));
+            assert_eq!(managed["history"]["model_provider"].as_str(), Some("keep"));
+            assert_eq!(
+                serde_json::to_value(state.db.get_proxy_config_for_app("claude").await.unwrap())
+                    .unwrap(),
+                serde_json::to_value(&claude).unwrap()
+            );
+        }
+        assert_eq!(
+            std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap(),
+            native_auth
+        );
+        state.proxy_service.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn r24_active_opt_in_cancel_keeps_exact_state_and_opt_out_removes_only_owned_keys() {
+        let _guard = test_guard();
+        let (home, state, mut modelhub, official) = r24_state(false).await;
+        modelhub
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides
+            .as_mut()
+            .unwrap()
+            .codex_remote_sessions = Some(true);
+        let save_state = state.clone();
+        let save_provider = modelhub.clone();
+        tokio::task::spawn_blocking(move || {
+            ProviderService::update(&save_state, AppType::Codex, None, save_provider)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!home.managed().exists());
+        assert_eq!(
+            state.db.get_current_provider("codex").unwrap().as_deref(),
+            Some(official.id.as_str())
+        );
+        modelhub
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides
+            .as_mut()
+            .unwrap()
+            .codex_remote_sessions = Some(false);
+        state.db.save_provider("codex", &modelhub).unwrap();
+        ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+            .await
+            .unwrap();
+        assert!(!home.managed().exists());
+        let before = r24_snapshot(&state, &home).await;
+        modelhub
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides
+            .as_mut()
+            .unwrap()
+            .codex_remote_sessions = Some(true);
+        crate::codex_managed_route::FAIL_NEXT_MANAGED_WRITE
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let save_state = state.clone();
+        let save_provider = modelhub.clone();
+        let error = tokio::task::spawn_blocking(move || {
+            ProviderService::update(&save_state, AppType::Codex, None, save_provider)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("authorization cancellation"));
+        assert_eq!(r24_snapshot(&state, &home).await, before);
+        let save_state = state.clone();
+        let save_provider = modelhub.clone();
+        tokio::task::spawn_blocking(move || {
+            ProviderService::update(&save_state, AppType::Codex, None, save_provider)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let mut managed = std::fs::read_to_string(home.managed())
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        managed["allow_remote_control"] = toml_edit::value(false);
+        std::fs::write(home.managed(), managed.to_string()).unwrap();
+        modelhub
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides
+            .as_mut()
+            .unwrap()
+            .codex_remote_sessions = Some(false);
+        let save_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            ProviderService::update(&save_state, AppType::Codex, None, modelhub)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.managed()).unwrap().trim(),
+            "allow_remote_control = false"
+        );
+        assert!(
+            state
+                .db
+                .get_proxy_config_for_app("codex")
+                .await
+                .unwrap()
+                .enabled
+        );
+        state
+            .proxy_service
+            .set_takeover_for_app("codex", false)
+            .await
+            .unwrap();
+        state.proxy_service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[allow(clippy::await_holding_lock)]
+    async fn r24_database_failure_restores_full_snapshot_and_failed_rollback_blocks_backfill() {
+        let _guard = test_guard();
+        let (home, state, modelhub, official) = r24_state(true).await;
+        let before = r24_snapshot(&state, &home).await;
+        FAIL_NEXT_CODEX_SWITCH_DB_COMMIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("database failure"));
+        assert_eq!(r24_snapshot(&state, &home).await, before);
+        FAIL_NEXT_CODEX_SWITCH_DB_COMMIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::services::proxy::FAIL_NEXT_CODEX_ROUTE_ROLLBACK
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = ProviderService::switch_routed(&state, AppType::Codex, &modelhub.id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("回滚不完整"));
+        assert!(error
+            .to_string()
+            .contains("injected Codex route rollback failure"));
+        let providers_before =
+            serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap();
+        assert!(
+            ProviderService::switch_routed(&state, AppType::Codex, &official.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("回滚不完整")
+        );
+        assert!(state
+            .proxy_service
+            .set_takeover_for_app("codex", true)
+            .await
+            .unwrap_err()
+            .contains("回滚不完整"));
+        assert!(ProviderService::switch_locked(&state, AppType::Codex, &modelhub.id).is_err());
+        assert_eq!(
+            serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap(),
+            providers_before
+        );
     }
 
     #[tokio::test]
@@ -4518,6 +4938,7 @@ wire_api = "responses"
                 codex_session_header_adapter: Some(
                     crate::provider::CodexSessionHeaderAdapter::Modelhub,
                 ),
+                codex_remote_sessions: Some(true),
                 ..Default::default()
             }),
             ..Default::default()
@@ -4539,8 +4960,13 @@ wire_api = "responses"
             .set_takeover_for_app("codex", true)
             .await
             .unwrap();
-        crate::codex_managed_route::apply(crate::codex_managed_route::CodexManagedRoute::ModelHub)
-            .unwrap();
+        crate::codex_managed_route::ManagedRouteTransaction::prepare(
+            &modelhub,
+            &state.proxy_service.build_proxy_urls().await.unwrap().1,
+        )
+        .unwrap()
+        .apply()
+        .unwrap();
         let backup_before = db
             .get_live_backup("codex")
             .await
@@ -4570,7 +4996,7 @@ wire_api = "responses"
         let live = read_live_settings(AppType::Codex).unwrap();
         assert!(live["config"].as_str().unwrap().contains("127.0.0.1"));
         let managed = std::fs::read_to_string(&managed_path).unwrap();
-        assert!(managed.contains("model_provider = \"modelhub\""));
+        assert!(managed.contains("model_provider = \"custom\""));
 
         match old_home {
             Some(v) => std::env::set_var("HOME", v),
@@ -4684,10 +5110,35 @@ impl ProviderService {
             .proxy_service
             .lock_switch_for_app(AppType::Codex.as_str())
             .await;
+        let result = Self::switch_codex_routed_locked(state, id, None).await;
+        state
+            .proxy_service
+            .emit_route_state_changed(&app_type)
+            .await;
+        result
+    }
+
+    /// The same per-app lock covers provider selection, active edits and takeover.
+    async fn switch_codex_routed_locked(
+        state: &AppState,
+        id: &str,
+        edited: Option<Provider>,
+    ) -> Result<SwitchResult, AppError> {
+        let app_type = AppType::Codex;
         let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
-        let target = providers
-            .get(id)
+        let target = edited
+            .as_ref()
+            .or_else(|| providers.get(id))
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        crate::codex_managed_route::validate_provider(target)?;
+        if state
+            .db
+            .get_setting("codex_route_recovery_required")?
+            .as_deref()
+            == Some("true")
+        {
+            return Err(AppError::Message("上次路由回滚不完整，已暂停切换以保护原配置。请检查并恢复 Codex Live/系统路由后清除恢复标记".into()));
+        }
         let previous_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let previous = previous_id
             .as_deref()
@@ -4697,88 +5148,257 @@ impl ProviderService {
             return Self::switch_blocking_locked(state, app_type, id).await;
         };
 
-        let takeover_config_before = state
-            .db
-            .get_proxy_config_for_app(AppType::Codex.as_str())
-            .await?;
-        let takeover_before = takeover_config_before.enabled;
-        let backup_before = state.db.get_live_backup(AppType::Codex.as_str()).await?;
+        let target = target.clone();
+        let outgoing_account =
+            Self::outgoing_managed_codex_oauth_account_id(&app_type, previous, &target);
+        let outgoing_refresh =
+            Self::prepare_outgoing_managed_codex_live_auth(state, outgoing_account.as_deref())?;
+        // Resolve OAuth and validate the exact live projection before privileged
+        // changes. Retain the upstream rotating-auth checks and write behavior.
+        let preflighted = Self::preflight_managed_codex_live(state, &app_type, &target)?;
+        if preflighted.is_none() {
+            live::preflight_codex_live_write_for_state(state, &target)?;
+        }
+        let snapshot = state
+            .proxy_service
+            .capture_codex_routing_snapshot()
+            .await
+            .map_err(AppError::Message)?;
+        let previous_snippet = state.db.get_config_snippet("codex")?;
+        let backfill_live = if edited.is_none() && previous_id.as_deref() != Some(id) {
+            let backup = state.db.get_live_backup("codex").await?;
+            if let Some(backup) = backup {
+                Some(
+                    serde_json::from_str::<Value>(&backup.original_config)
+                        .map_err(|_| AppError::Message("原 Codex 备份损坏；未修改路由".into()))?,
+                )
+            } else if !state
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&app_type)
+            {
+                read_live_settings(app_type.clone()).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let previous_local_provider_id = crate::settings::get_current_provider(&app_type);
         let previous_db_provider_id = state.db.get_current_provider(app_type.as_str())?;
-        let managed_snapshot = crate::codex_managed_route::snapshot()?;
         let enable_modelhub = route == crate::codex_managed_route::CodexManagedRoute::ModelHub;
-
-        if enable_modelhub && !takeover_before {
-            if let Err(error) = state
-                .proxy_service
-                .set_takeover_for_app_inner(&AppType::Codex, true)
-                .await
-            {
-                Self::rollback_routed_switch(
-                    state,
-                    &app_type,
-                    previous_local_provider_id.as_deref(),
-                    previous_db_provider_id.as_deref(),
-                    &takeover_config_before,
-                    backup_before.as_ref(),
-                    &managed_snapshot,
-                )
-                .await;
-                return Err(AppError::Message(error));
-            }
-        } else if !enable_modelhub && takeover_before {
-            if let Err(error) = state
-                .proxy_service
-                .set_takeover_for_app_inner(&AppType::Codex, false)
-                .await
-            {
-                Self::rollback_routed_switch(
-                    state,
-                    &app_type,
-                    previous_local_provider_id.as_deref(),
-                    previous_db_provider_id.as_deref(),
-                    &takeover_config_before,
-                    backup_before.as_ref(),
-                    &managed_snapshot,
-                )
-                .await;
-                return Err(AppError::Message(error));
-            }
-        }
-
-        let operation = match crate::codex_managed_route::apply(route) {
-            Ok(()) => Self::switch_blocking_locked(state, app_type.clone(), id).await,
-            Err(error) => {
-                Self::rollback_routed_switch(
-                    state,
-                    &app_type,
-                    previous_local_provider_id.as_deref(),
-                    previous_db_provider_id.as_deref(),
-                    &takeover_config_before,
-                    backup_before.as_ref(),
-                    &managed_snapshot,
-                )
-                .await;
-                return Err(error);
-            }
+        // Reserve an OS-assigned endpoint without starting the proxy or touching
+        // settings/live. Release only after authorization, immediately before bind.
+        let mut planned_global = state.db.get_global_proxy_config().await?;
+        let reservation = if enable_modelhub
+            && !state.proxy_service.is_running().await
+            && planned_global.listen_port == 0
+        {
+            let listener = std::net::TcpListener::bind((planned_global.listen_address.as_str(), 0))
+                .map_err(|e| AppError::Message(format!("无法预留代理端口: {e}")))?;
+            planned_global.listen_port = listener
+                .local_addr()
+                .map_err(|e| AppError::Message(e.to_string()))?
+                .port();
+            Some(listener)
+        } else {
+            None
         };
-        match operation {
-            Ok(mut result) => {
-                result.codex_restart_required = true;
-                Ok(result)
-            }
-            Err(error) => {
-                Self::rollback_routed_switch(
+        let proxy_url = if reservation.is_some() {
+            let host = match planned_global.listen_address.as_str() {
+                "0.0.0.0" => "127.0.0.1",
+                "::" => "[::1]",
+                value => value,
+            };
+            format!("http://{host}:{}/v1", planned_global.listen_port)
+        } else if enable_modelhub {
+            state
+                .proxy_service
+                .build_proxy_urls()
+                .await
+                .map_err(AppError::Message)?
+                .1
+        } else {
+            String::new()
+        };
+        let mut managed =
+            crate::codex_managed_route::ManagedRouteTransaction::prepare(&target, &proxy_url)?;
+        // Cancellation or policy validation leaves live, current and server alone.
+        if let Err(error) = managed.apply() {
+            return match managed.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    let _ = state
+                        .db
+                        .set_setting("codex_route_recovery_required", "true");
+                    Err(AppError::Message(format!(
+                        "{error}；回滚不完整: {rollback}"
+                    )))
+                }
+            };
+        }
+        let operation = async {
+            let mut result = SwitchResult::default();
+            Self::ensure_outgoing_managed_codex_live_auth_unchanged(
+                outgoing_account.as_deref(),
+                outgoing_refresh.as_deref(),
+            )?;
+            if let (Some(previous), Some(live)) = (previous, backfill_live.as_ref()) {
+                Self::sync_common_config_snippet_from_live(
                     state,
                     &app_type,
-                    previous_local_provider_id.as_deref(),
-                    previous_db_provider_id.as_deref(),
-                    &takeover_config_before,
-                    backup_before.as_ref(),
-                    &managed_snapshot,
-                )
+                    previous,
+                    live,
+                    &mut result,
+                );
+                let mut updated = previous.clone();
+                updated.settings_config = strip_common_config_from_live_settings(
+                    state.db.as_ref(),
+                    &app_type,
+                    previous,
+                    live.clone(),
+                );
+                state.db.save_provider("codex", &updated)?;
+            }
+            if enable_modelhub {
+                if reservation.is_some() {
+                    state.db.update_global_proxy_config(planned_global).await?;
+                }
+                drop(reservation);
+                // Target-based convergence: even enabled=true may have no server.
+                state
+                    .proxy_service
+                    .start()
+                    .await
+                    .map_err(AppError::Message)?;
+                state
+                    .proxy_service
+                    .update_live_backup_from_provider_inner(
+                        "codex",
+                        &target,
+                        outgoing_account.as_deref(),
+                    )
+                    .await
+                    .map_err(AppError::Message)?;
+                state
+                    .proxy_service
+                    .sync_codex_live_from_provider_while_proxy_active_guarded(
+                        &target,
+                        outgoing_account.as_deref(),
+                        outgoing_refresh.as_deref(),
+                    )
+                    .await
+                    .map_err(AppError::Message)?;
+            } else {
+                // Write the known target directly; never refill a provider from a
+                // stale proxy placeholder or a partial restore. Auth stays native.
+                Self::write_switch_live(state, &app_type, &target, preflighted.as_ref())?;
+                if previous.is_some()
+                    && backfill_live.is_some()
+                    && crate::proxy::providers::is_codex_official_provider(&target)
+                    && Self::managed_codex_oauth_account_id(&target).is_none()
+                {
+                    crate::codex_config::clear_stale_codex_live_auth_after_official_switch(
+                        target.settings_config.get("auth").unwrap_or(&Value::Null),
+                    )?;
+                }
+                state.db.delete_live_backup("codex").await?;
+            }
+            let mut config = state.db.get_proxy_config_for_app("codex").await?;
+            config.enabled = enable_modelhub;
+            #[cfg(test)]
+            if super::proxy::FAIL_NEXT_CODEX_TAKEOVER_STATE_WRITE
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(AppError::Message(
+                    "injected Codex takeover state write failure".into(),
+                ));
+            }
+            state.db.update_proxy_config_for_app(config).await?;
+            Self::clear_outgoing_managed_codex_live_auth(
+                outgoing_account.as_deref(),
+                outgoing_refresh.as_deref(),
+            )?;
+            if edited.is_some() {
+                state.db.save_provider("codex", &target)?;
+            }
+            crate::settings::set_current_provider(&app_type, Some(id))?;
+            #[cfg(test)]
+            if FAIL_NEXT_CODEX_SWITCH_DB_COMMIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(AppError::Message(
+                    "injected Codex switch database failure".into(),
+                ));
+            }
+            state.db.set_current_provider("codex", id)?;
+            state
+                .proxy_service
+                .refresh_active_target_for_app(&app_type)
                 .await;
-                Err(error)
+            // The service may be used without app takeover; Official only
+            // removes Codex takeover and never stops a shared listener.
+            result.codex_restart_required = true;
+            if let Err(error) = McpService::sync_enabled_for_app(state, &app_type) {
+                result
+                    .warnings
+                    .push(format!("codex_mcp_sync_failed:{error}"));
+            }
+            Ok(result)
+        }
+        .await;
+        match operation {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let mut failures = Vec::new();
+                if let Err(e) = crate::settings::set_current_provider(
+                    &app_type,
+                    previous_local_provider_id.as_deref(),
+                ) {
+                    failures.push(format!("本地 current: {e}"));
+                }
+                if edited.is_some() {
+                    if let Some(original) = providers.get(id) {
+                        if let Err(e) = state.db.save_provider("codex", original) {
+                            failures.push(format!("原供应商: {e}"));
+                        }
+                    }
+                }
+                if let Some(previous) = previous {
+                    if let Err(e) = state.db.save_provider("codex", previous) {
+                        failures.push(format!("原供应商快照: {e}"));
+                    }
+                }
+                if let Err(e) = state.db.set_config_snippet("codex", previous_snippet) {
+                    failures.push(format!("公共配置: {e}"));
+                }
+                if let Err(e) = state
+                    .db
+                    .restore_current_provider("codex", previous_db_provider_id.as_deref())
+                {
+                    failures.push(format!("数据库 current: {e}"));
+                }
+                if let Err(e) = state
+                    .proxy_service
+                    .restore_codex_routing_snapshot(&snapshot)
+                    .await
+                {
+                    failures.push(e);
+                }
+                if let Err(e) = managed.rollback() {
+                    failures.push(format!("系统路由: {e}"));
+                }
+                if failures.is_empty() {
+                    Err(error)
+                } else {
+                    if let Err(e) = state
+                        .db
+                        .set_setting("codex_route_recovery_required", "true")
+                    {
+                        failures.push(format!("恢复保护标记: {e}"));
+                    }
+                    Err(AppError::Message(format!(
+                        "{error}；回滚不完整，已暂停后续切换: {}",
+                        failures.join("；")
+                    )))
+                }
             }
         }
     }
@@ -4793,44 +5413,6 @@ impl ProviderService {
         tokio::task::spawn_blocking(move || Self::switch_locked(&state, app_type, &id))
             .await
             .map_err(|error| AppError::Message(format!("供应商切换任务执行失败: {error}")))?
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn rollback_routed_switch(
-        state: &AppState,
-        app_type: &AppType,
-        previous_local_provider_id: Option<&str>,
-        previous_db_provider_id: Option<&str>,
-        takeover_config_before: &crate::proxy::types::AppProxyConfig,
-        backup_before: Option<&crate::proxy::types::LiveBackup>,
-        managed_snapshot: &crate::codex_managed_route::ManagedConfigSnapshot,
-    ) {
-        if let Err(error) =
-            crate::settings::set_current_provider(app_type, previous_local_provider_id)
-        {
-            log::error!("路由切换回滚本地当前供应商失败: {error}");
-        }
-        if let Err(error) = state
-            .db
-            .restore_current_provider(app_type.as_str(), previous_db_provider_id)
-        {
-            log::error!("路由切换回滚数据库当前供应商失败: {error}");
-        }
-        if let Err(error) = crate::codex_managed_route::restore(managed_snapshot) {
-            log::error!("路由切换回滚系统托管配置失败: {error}");
-        }
-
-        if let Err(error) = state
-            .proxy_service
-            .restore_takeover_snapshot_inner(app_type, takeover_config_before, backup_before)
-            .await
-        {
-            log::error!("路由切换回滚代理接管失败: {error}");
-        }
-        state
-            .proxy_service
-            .refresh_active_target_for_app(app_type)
-            .await;
     }
 
     fn managed_codex_oauth_account_id(provider: &Provider) -> Option<String> {
@@ -5473,6 +6055,26 @@ impl ProviderService {
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
+        if matches!(app_type, AppType::Codex)
+            && (crate::codex_managed_route::is_modelhub_provider(&provider)
+                || existing_provider
+                    .as_ref()
+                    .is_some_and(crate::codex_managed_route::is_modelhub_provider))
+        {
+            if !is_current {
+                state.db.save_provider(app_type.as_str(), &provider)?;
+                return Ok(true);
+            }
+            let provider_id = provider.id.clone();
+            let result = futures::executor::block_on(Self::switch_codex_routed_locked(
+                state,
+                &provider_id,
+                Some(provider),
+            ));
+            futures::executor::block_on(state.proxy_service.emit_route_state_changed(&app_type));
+            return result.map(|_| true);
+        }
+
         let existing_managed_codex_account_id = existing_provider
             .as_ref()
             .and_then(Self::managed_codex_oauth_account_id);
@@ -5846,6 +6448,12 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<SwitchResult, AppError> {
+        if matches!(app_type, AppType::Codex) {
+            state
+                .proxy_service
+                .ensure_codex_routing_ready()
+                .map_err(AppError::Message)?;
+        }
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers
             .get(id)
@@ -7189,6 +7797,7 @@ impl ProviderService {
                         crate::codex_config::validate_config_toml(cfg_text)?;
                     }
                 }
+                crate::codex_managed_route::validate_provider(provider)?;
             }
             AppType::Gemini => {
                 use crate::gemini_config::validate_gemini_settings;

@@ -1294,6 +1294,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header overrides format error: {{error}}",
     "localProxyBodyOverrides": "Body overrides",
     "localProxyBodyOverridesInvalidDetail": "Body overrides format error: {{error}}",
+    "codexRemoteSessions": "Support mobile remote sessions",
+    "codexRemoteSessionsHint": "Route mobile remote sessions through ModelHub; enable the session header adapter below first. Independent of Codex proxy takeover: off by default, with no system configuration changes. Enabling requires administrator authorization to write /etc/codex/managed_config.toml and a Codex restart. Disabling after opt-in only undoes routing keys managed by CC Switch.",
+    "codexRemoteSessionsRequiresAdapter": "Enable the ModelHub session header adapter before enabling mobile remote sessions.",
     "modelhubSessionHeaderAdapter": "ModelHub session header adapter",
     "modelhubSessionHeaderAdapterHint": "Convert official Codex session-id/thread-id headers into session_id/thread_id/extra for the internal ModelHub API path. Only applies during local routing takeover.",
     "codexMetadataMapping": "Codex internal metadata mapping",
@@ -2807,6 +2810,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "A routing operation is in progress. Please wait and try again.",
     "panel": {
       "serviceAddress": "Service Address",
       "addressCopied": "Address copied",

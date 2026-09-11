@@ -1294,6 +1294,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header 上書きの形式エラー: {{error}}",
     "localProxyBodyOverrides": "Body 上書き",
     "localProxyBodyOverridesInvalidDetail": "Body 上書きの形式エラー: {{error}}",
+    "codexRemoteSessions": "モバイルのリモートセッションをサポート",
+    "codexRemoteSessionsHint": "モバイルのリモートセッションで ModelHub を使います。先に下のセッションヘッダー変換を有効にしてください。Codex のプロキシ引き継ぎとは独立した設定です。既定はオフで、システム設定は変更しません。有効化には /etc/codex/managed_config.toml への書き込みに対する管理者の承認と Codex の再起動が必要です。有効化後にオフにすると、CC Switch が管理するルーティングキーのみを元に戻します。",
+    "codexRemoteSessionsRequiresAdapter": "モバイルのリモートセッションを有効にする前に、ModelHub セッションヘッダー変換を有効にしてください。",
     "modelhubSessionHeaderAdapter": "ModelHub セッションヘッダー変換",
     "modelhubSessionHeaderAdapterHint": "公式 Codex の session-id/thread-id を、社内 ModelHub API 経路が必要とする session_id/thread_id/extra に変換します。ローカルルーティングの引き継ぎ中のみ有効です。",
     "codexMetadataMapping": "Codex 内部メタデータのモデル変換",
@@ -2807,6 +2810,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "ルーティング操作を実行中です。しばらくしてから再試行してください。",
     "panel": {
       "serviceAddress": "サービスアドレス",
       "addressCopied": "アドレスをコピーしました",

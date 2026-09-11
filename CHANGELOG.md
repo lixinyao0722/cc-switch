@@ -5,6 +5,14 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.2-ModelHub-R24] - 2026-09-11
+
+- **Explicit Mobile Remote Sessions**: A separate, default-off “支持手机远程会话” switch is added above the ModelHub session-header adapter. Only explicit opt-in writes system managed routing. Disabling previously managed routing preserves unrelated system policy, and legacy R23 conflicts are surfaced instead of silently reporting an official direct route.
+- **Consistent Codex Routes and Rollback**: ModelHub uses the R23 `custom` provider id and the actual listening address. ModelHub/Official switches converge Codex takeover to the target state, refresh UI route state after both success and failure, and preserve other applications' proxy use. Partial rollback failures are reported with recovery context.
+- **Reliable LaunchAgent Replacement**: Install and restore confirm that the old GUI-domain job has disappeared before replacing its plist and bootstrapping. Plist, loaded job, helper exit and required environment checks are explicit; a mutation journal avoids restoring untouched objects and retains backup diagnostics on failure.
+- **Selective Official Synchronization**: Includes 52 stable upstream commits through v3.20.2 and five targeted unreleased fixes, while retaining native ModelHub context continuation, remote compaction, 429 admission/retry handling, cross-resource history recovery and the shared history bucket. Application and installer database templates move together to schema 18. See the [selection and verification boundaries](docs/guides/modelhub-r24-local-delivery-zh.md).
+- **Local Package Delivery**: The arm64 installer supports `--local-assets-dir` with the same archive/checksum validation. This R24 delivery is a local build and PR, not a published Release or an automatic installation.
+
 - **ModelHub R23 Shared History Bucket Fix**: Legacy ModelHub Codex sessions and saved Provider templates now migrate from the obsolete `modelhub` id into the stable `custom` history bucket. The ModelHub installer enables the existing unified-history migration so ModelHub → OpenAI Official and OpenAI Official → ModelHub switches can resume from the same history; JSONL, state DB, and Provider template backups remain in place.
 
 ## [3.19.5] - 2026-08-27

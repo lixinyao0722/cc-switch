@@ -41,6 +41,7 @@ import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { isAdditiveAppId, isProxyAppId } from "@/config/appConfig";
+import { useRoutingBusy } from "@/lib/query/routing";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -199,6 +200,7 @@ export function ProviderCard({
   onSetAsDefault,
 }: ProviderCardProps) {
   const { t } = useTranslation();
+  const isRoutingBusy = useRoutingBusy();
   const codexOfficialIdentity = resolveCodexOfficialIdentity(appId, provider);
   const managedCodexAccountId = resolveManagedAccountId(
     provider.meta,
@@ -686,6 +688,7 @@ export function ProviderCard({
               isCurrent={isCurrent}
               isInConfig={isInConfig}
               isTesting={isTesting}
+              isRoutingBusy={isRoutingBusy}
               isProxyTakeover={isProxyTakeover}
               isOfficialBlockedByProxy={isOfficialBlockedByProxy}
               isReadOnly={isHermesReadOnly}

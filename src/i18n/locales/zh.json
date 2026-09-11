@@ -1294,6 +1294,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header 覆盖格式错误：{{error}}",
     "localProxyBodyOverrides": "Body 覆盖",
     "localProxyBodyOverridesInvalidDetail": "Body 覆盖格式错误：{{error}}",
+    "codexRemoteSessions": "支持手机远程会话",
+    "codexRemoteSessionsHint": "让手机远程会话使用 ModelHub，需开启下方会话头适配。与 Codex 代理接管独立：默认关闭，不修改系统配置；开启后会申请管理员授权写入 /etc/codex/managed_config.toml，并需重启 Codex。曾开启后再关闭，只撤销 CC Switch 管理的路由键。",
+    "codexRemoteSessionsRequiresAdapter": "支持手机远程会话需要先开启 ModelHub 会话头适配。",
     "modelhubSessionHeaderAdapter": "ModelHub 会话头适配",
     "modelhubSessionHeaderAdapterHint": "把官方 Codex 的 session-id/thread-id 转换为内部 ModelHub 链路需要的 session_id/thread_id/extra。仅在本地路由接管后生效。",
     "codexMetadataMapping": "Codex 内部元数据映射",
@@ -2807,6 +2810,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "路由操作正在进行，请稍候再试。",
     "panel": {
       "serviceAddress": "服务地址",
       "addressCopied": "地址已复制",

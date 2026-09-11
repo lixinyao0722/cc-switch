@@ -179,6 +179,8 @@ export interface Retry429Config {
 export interface LocalProxyRequestOverrides {
   headers?: Record<string, string>;
   body?: Record<string, unknown>;
+  // Explicit opt-in to system managed routing for Codex mobile sessions.
+  codexRemoteSessions?: boolean;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
   contextOptimization?: {

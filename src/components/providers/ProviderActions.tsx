@@ -36,6 +36,7 @@ interface ProviderActionsProps {
   isCurrent: boolean;
   isInConfig?: boolean;
   isTesting?: boolean;
+  isRoutingBusy?: boolean;
   isProxyTakeover?: boolean;
   isOmo?: boolean;
   onSwitch: () => void;
@@ -78,6 +79,7 @@ export function ProviderActions({
   isCurrent,
   isInConfig = false,
   isTesting,
+  isRoutingBusy = false,
   isProxyTakeover = false,
   isOmo = false,
   onSwitch,
@@ -116,6 +118,7 @@ export function ProviderActions({
   const piStateChangeHint = t("pi.current.stateUnavailableHint");
 
   const handleMainButtonClick = () => {
+    if (isRoutingBusy) return;
     if (isOmo) {
       if (isCurrent) {
         onDisableOmo?.();
@@ -376,7 +379,7 @@ export function ProviderActions({
           size="sm"
           variant={buttonState.variant}
           onClick={handleMainButtonClick}
-          disabled={buttonState.disabled}
+          disabled={buttonState.disabled || isRoutingBusy}
           className={cn("w-[4.5rem] px-2.5", buttonState.className)}
         >
           {buttonState.icon}
@@ -389,7 +392,7 @@ export function ProviderActions({
           size="icon"
           variant="ghost"
           onClick={isReadOnly ? undefined : onEdit}
-          disabled={isReadOnly}
+          disabled={isReadOnly || isRoutingBusy}
           aria-label={t("common.edit")}
           title={isReadOnly ? readOnlyHint : t("common.edit")}
           className={cn(
@@ -463,7 +466,7 @@ export function ProviderActions({
           size="icon"
           variant="ghost"
           onClick={canDelete ? onDelete : undefined}
-          disabled={!canDelete}
+          disabled={!canDelete || isRoutingBusy}
           aria-label={t("common.delete")}
           title={deleteHint}
           className={cn(

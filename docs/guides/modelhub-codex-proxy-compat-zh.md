@@ -13,7 +13,9 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
-## 一键安装
+## 安装（ModelHub R24，2026-09-11）
+
+R24 本次为本地交付，应用版本 3.20.2。安装命令、官方选择性同步清单和验收边界见 [R24 本地交付说明](modelhub-r24-local-delivery-zh.md)。下面的 latest Release 命令仅用于已发布版本，不能用来安装尚未发布的 R24 本地包。R24 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
@@ -23,9 +25,9 @@ R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的�
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行上面的原始命令，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器会用 8 个中文步骤提示下载、校验、备份、配置处理、确认或输入 AK、启动和既有健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。随后安装器备份现有配置：`~/.codex/config.toml` 默认只合并 R23 管理字段并保留个性化配置，用户明确确认后才完整覆盖；`~/.cc-switch/cc-switch.db` 和 `settings.json` 使用 Golden 覆盖，并合并维护 `/etc/codex/managed_config.toml`。R23 使用清洗后的可移植配置，包括 Provider、模型 catalog 和批准的 Codex/MCP 运行时字段，但排除日志、请求/会话/用量记录、备份和凭据。
+必须以当前登录用户运行，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器用中文步骤提示资源校验、备份、配置处理、确认或输入 AK、启动和健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。`~/.codex/config.toml` 默认合并 R24 管理字段并保留个性化配置，明确确认后才完整覆盖；`settings.json` 保留用户偏好并更新必要路由字段。注意，完整安装仍会用 Golden 替换 `~/.cc-switch/cc-switch.db`，包括其中原有的自定义供应商；安装前保留完整备份。R24 的系统 managed config 默认不变；手机远程开关在 App 中单独管理。资源使用清洗后的可移植 Provider、模型 catalog 和批准的 Codex/MCP 字段，不包含日志、会话、用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问 `检测到本地 Codex 个性化配置，是否使用 R23 标准配置完整覆盖？[y/N]`。回车或 `N` 默认采用合并模式：刷新 R23 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；其中顶层 `model_provider = "custom"` 必须写入且只能出现一次，否则安装会失败并自动回滚，不会留下看似成功但实际无法联网的状态。输入 `Y` 才会完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML 语法，安装器会说明无法安全合并，默认 `N` 停止安装，必须明确输入 `Y` 才会覆盖。新安装没有现有配置时直接写入 Golden，不额外询问。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问是否使用 R24 标准配置完整覆盖。回车或 `N` 默认采用合并模式：刷新 R24 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；顶层 `model_provider = "custom"` 必须写入且只能出现一次。输入 `Y` 才完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML，无法安全合并时默认 `N` 停止安装，明确输入 `Y` 才覆盖。新安装没有现有配置时直接写入 Golden。
 
 Golden Codex 配置固定以下安装后状态：
 
@@ -65,24 +67,28 @@ Codex 已经运行时可能不会热更新这些设置或新的 catalog。安装
 安装后打开 CC Switch 的 Codex 供应商列表即可看到两个入口：
 
 - `Bytedance ModelHub - 官方CLI`：默认选中，经 CC Switch 转发到 ModelHub。
-- `OpenAI Official`：使用当前 ChatGPT Plus/Pro 登录态，经 CC Switch 转发到 OpenAI 官方 Codex。
+- `OpenAI Official`：使用当前 ChatGPT Plus/Pro 登录态，关闭 Codex 接管后直连 OpenAI 官方 Codex。
 
-点击目标供应商即可完成整套路由变更，不需要重新输入 ChatGPT 账号。切到 ModelHub 时，CC Switch 会开启 Codex 接管并把系统 managed config 的 Provider 与内置 OpenAI 地址同时指向本地路由，保证手机远程新建任务也进入 ModelHub；切到 `OpenAI Official` 时会移除这两个受管根键并关闭 Codex 接管，恢复官方直连。两种模式切换后都必须重启 Codex，界面提供“立即重启”；旧 ModelHub 与既有官方任务会迁入同一个 `custom` 桶。若个别任务包含只能由原上游解密的 reasoning 内容，目标后端仍可能拒绝该次续接，此时再新建任务。
+切到 ModelHub 后确保 Codex 接管和本地监听可用；切到 `OpenAI Official` 后关闭 Codex 接管，不停止其他应用使用的代理。卡片、开关和代理状态在成功或失败后重新读取，切换期间禁止冲突操作。
+
+“支持手机远程会话”位于供应商编辑页的“ModelHub 会话头适配”上方，默认关闭。只有明确开启才写系统 managed config：Provider 使用 `custom`，本地代理地址取实际监听配置而非固定端口。关闭已启用的手机路由或切回官方时，只撤销 CC Switch 自己管理的路由键，保留其他策略和注释。旧 R23 没有归属记录的系统强制路由不会被默认关闭开关擅自删除；若与目标路由冲突，界面需要明确提示处理，不能仅凭卡片判断已经官方直连。
+
+需要管理员权限的变更先于 Live 路由切换；后续失败恢复必要状态，回滚未完成必须反馈给界面。两种模式切换后都需要重启 Codex；旧 ModelHub 与既有官方任务仍使用 `custom` 统一历史桶。只能由原上游解密的 reasoning 内容仍可能无法跨供应商续接。
 
 如果安装器进程已继承非空 `MODELHUB_AK`，R23 会提示 `检测到当前环境已有 MODELHUB_AK，是否直接复用？[Y/n]`。回车、`Y` 或 `y` 直接复用；`N` 或 `n` 会显示 `请输入 MODELHUB_AK（向管理员获取，输入内容不会显示）`，允许无回显输入新值；其他回答会重新询问。没有环境变量时直接进入无回显输入。最终选择值是本次安装唯一凭据源：先写入 macOS Keychain 并回读，再用回读值更新 CC Switch ModelHub Provider 的 `auth.OPENAI_API_KEY`，LaunchAgent 则把同一凭据加载为当前登录会话的 `MODELHUB_AK`。launchd 环境加载后，安装器立即校验 Keychain、Provider API Key 与 `MODELHUB_AK` 均非空且完全一致；CC Switch 健康、黄金路由稳定后再校验一次。若环境值与旧 Keychain 不同，只有用户确认复用后才以环境值覆盖同步；选择新输入则以新值覆盖同步。校验不会输出密钥，任何写入或校验失败都会恢复安装前状态。
 
-写入 `/Applications` 和 `/etc/codex` 等系统位置前，安装器会说明接下来需要输入当前 Mac 登录用户的管理员密码，而不是 `MODELHUB_AK`。密码输入时终端不会显示字符，输入完成后按回车；这和后续单独输入或复用的 ModelHub AK 是两类不同凭据。
+写入 `/Applications` 需要权限时，安装器会说明接下来需要当前 Mac 登录用户的管理员密码，而不是 `MODELHUB_AK`。密码输入时终端不会显示字符，输入完成后按回车。系统手机路由的授权在 App 明确开启开关时另行处理。
 
-R23 继续对系统文件采用 `/private/var/tmp` 安全 staging：管理员进程不会直接读取 Downloads 中的候选文件。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 原子替换，只改写下列两个根键并保留其他配置、表和注释；禁止定义保留的 `[model_providers.openai]`：
+明确启用手机远程路由时，候选文件置于权限受限的暂存目录，管理员进程验证它的所有者和权限。`/etc/codex/managed_config.toml` 以 `root:wheel 0644` 替换，管理下列两个根键并保留其他配置、表和注释；不定义保留的 `[model_providers.openai]`。下面端口仅为默认值，运行时使用实际监听地址：
 
 ```toml
 model_provider = "custom"
 openai_base_url = "http://127.0.0.1:15721/v1"
 ```
 
-CC Switch 不可用时，桌面默认会话和移动端显式 `openai` 会话都会失败，这是强制路由的预期边界；重新启动 CC Switch 后可继续请求。旧的失败 openai 线程可以重试，但发布验收重点是移动端新建全新会话。
+只有启用手机远程强制路由时，CC Switch 不可用才会同时影响桌面默认会话和移动端显式 `openai` 会话；重新启动 CC Switch 后可继续请求。手机验收重点是重启 Codex 后新建全新远程会话，不以旧失败线程重试代替。
 
-整体覆盖会替换新电脑原有的 Codex/CC Switch Provider 与偏好，但安装前状态可通过下方命令恢复。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖；Release 不包含 AK/OAuth、日志、请求/会话/用量记录或备份。本机绝对路径在包内统一为 `__USER_HOME__`，安装时替换为新电脑真实用户目录。
+完整安装会替换 CC Switch 供应商数据库，安装前状态可通过备份恢复；Codex 个性化配置默认合并，CC Switch 偏好保留。`~/.codex/auth.json` 与 ChatGPT 登录态不覆盖。包内不包含 AK/OAuth、日志、会话、用量记录或备份；用户路径统一为 `__USER_HOME__`，安装时替换为真实用户目录。
 
 如果 `/Applications/ChatGPT.app` 已存在，安装器只校验其 Bundle ID、OpenAI Team ID、arm64 主程序、严格代码签名及内置 Codex，不会下载或覆盖。任一校验失败都会阻断安装，并提示用户从 OpenAI 官方页面重新安装，避免把异常 App 当成受信运行时。
 
@@ -131,6 +137,7 @@ Provider 元数据承接全部 CC Switch ModelHub 兼容策略。这些字段在
 ```json
 {
   "localProxyRequestOverrides": {
+    "codexRemoteSessions": false,
     "codexSessionHeaderAdapter": "modelhub",
     "codexActivitySummaryMode": "map",
     "codexMetadataModel": "gpt-5.6-sol",
@@ -296,7 +303,7 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 - 原 `/Applications/CC Switch.app`；
 - `~/.cc-switch/cc-switch.db` 与 `settings.json`；
 - `~/.codex/config.toml`；`~/.codex/auth.json` 从不由安装器读取、修改、备份或恢复；
-- `/etc/codex/managed_config.toml`；原文件存在则恢复原内容和权限，原本不存在则删除本次创建文件，并仅在空目录时移除安装器创建的 `/etc/codex`；
+- 系统 managed config：R24 默认安装不改变此文件，所以安装回滚不恢复未改变的对象。App 开启手机路由后，关闭开关只撤销其拥有的路由字段，不能删除用户其他配置；历史 R23 备份恢复须核对其独立清单；
 - LaunchAgent 和 `launchctl CODEX_CLI_PATH`；
 - 迁移前 Provider、代理与 takeover 状态。
 

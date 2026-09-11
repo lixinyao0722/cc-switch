@@ -20,6 +20,8 @@ interface LocalProxyRequestOverridesFieldProps {
   onHeadersJsonChange: (value: string) => void;
   onBodyJsonChange: (value: string) => void;
   showModelHubControls?: boolean;
+  codexRemoteSessions?: boolean;
+  onCodexRemoteSessionsChange?: (value: boolean) => void;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
   codexMetadataModel?: string;
@@ -51,6 +53,8 @@ export function LocalProxyRequestOverridesField({
   onHeadersJsonChange,
   onBodyJsonChange,
   showModelHubControls = false,
+  codexRemoteSessions = false,
+  onCodexRemoteSessionsChange,
   codexSessionHeaderAdapter,
   retry429,
   codexMetadataModel,
@@ -84,6 +88,33 @@ export function LocalProxyRequestOverridesField({
 
       {showModelHubControls && (
         <div className="space-y-3 rounded-md border border-border-default p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="codex-remote-sessions">
+                {t("providerForm.codexRemoteSessions", {
+                  defaultValue: "支持手机远程会话",
+                })}
+              </Label>
+              <p
+                id="codex-remote-sessions-hint"
+                className="text-xs text-muted-foreground"
+              >
+                {t("providerForm.codexRemoteSessionsHint", {
+                  defaultValue:
+                    "让手机远程会话使用 ModelHub，需开启下方会话头适配。与 Codex 代理接管独立：默认关闭，不修改系统配置；开启后会申请管理员授权写入 /etc/codex/managed_config.toml，并需重启 Codex。曾开启后再关闭，只撤销 CC Switch 管理的路由键。",
+                })}
+              </p>
+            </div>
+            <Switch
+              id="codex-remote-sessions"
+              aria-label={t("providerForm.codexRemoteSessions", {
+                defaultValue: "支持手机远程会话",
+              })}
+              aria-describedby="codex-remote-sessions-hint"
+              checked={codexRemoteSessions}
+              onCheckedChange={onCodexRemoteSessionsChange}
+            />
+          </div>
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
               <Label htmlFor="modelhub-session-header-adapter">

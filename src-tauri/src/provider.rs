@@ -479,6 +479,11 @@ pub struct LocalProxyRequestOverrides {
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_session_header_adapter: Option<CodexSessionHeaderAdapter>,
+    #[serde(
+        rename = "codexRemoteSessions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_remote_sessions: Option<bool>,
     #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
     pub retry_429: Option<Retry429Config>,
     #[serde(rename = "admissionControl", skip_serializing_if = "Option::is_none")]
@@ -512,6 +517,7 @@ impl LocalProxyRequestOverrides {
         self.headers.is_empty()
             && self.body.is_none()
             && self.codex_session_header_adapter.is_none()
+            && self.codex_remote_sessions.is_none()
             && self.retry_429.is_none()
             && self.admission_control.is_none()
             && self.context_optimization.is_none()
@@ -1211,10 +1217,21 @@ mod tests {
 
     #[test]
     fn provider_meta_roundtrips_modelhub_proxy_compat() {
+        let mobile: LocalProxyRequestOverrides =
+            serde_json::from_value(json!({"codexRemoteSessions": false})).unwrap();
+        assert!(
+            !mobile.is_empty(),
+            "explicit opt-out must survive metadata saving"
+        );
+        assert_eq!(
+            serde_json::to_value(&mobile).unwrap()["codexRemoteSessions"],
+            false
+        );
         let overrides = LocalProxyRequestOverrides {
             headers: HashMap::new(),
             body: Some(json!({ "max_output_tokens": 128000 })),
             codex_session_header_adapter: Some(CodexSessionHeaderAdapter::Modelhub),
+            codex_remote_sessions: Some(true),
             retry_429: Some(Retry429Config {
                 max_retries: 10,
                 base_delay_ms: 1_000,
@@ -1245,6 +1262,7 @@ mod tests {
             value["localProxyRequestOverrides"],
             json!({
                 "codexSessionHeaderAdapter": "modelhub",
+                "codexRemoteSessions": true,
                 "blockCodexActivitySummaries": true,
                 "codexActivitySummaryMode": "map",
                 "codexMetadataModel": "gpt-5.6-sol",
