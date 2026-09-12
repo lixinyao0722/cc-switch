@@ -903,6 +903,121 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     iconColor: "#211E1E",
   },
   {
+    // 腾讯云 Token Plan 个人版：通用 + Hy 两系列共用端点与 Key，
+    // Auto 智能路由调用 ID 为 tc-code-latest（1823/130060）
+    name: "Tencent Token Plan",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan",
+    category: "cn_official",
+    baseUrl: "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes(
+      "tc-code-latest",
+      "tc-code-latest",
+      "tc-code-latest",
+    ),
+    endpointCandidates: ["https://api.lkeap.cloud.tencent.com/plan/anthropic"],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站（新加坡）个人版（intl 1300/81315）：Auto 调用 ID 是 auto
+    name: "Tencent Token Plan (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan",
+    category: "cn_official",
+    baseUrl: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes("auto", "auto", "auto"),
+    endpointCandidates: [
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+    ],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // Token Plan 企业版专业套餐（1823/130659，广州地域）
+    name: "Tencent Token Plan Enterprise Pro",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
+    category: "cn_official",
+    baseUrl: "https://tokenhub.tencentmaas.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes("auto", "auto", "auto"),
+    // 广州地域为默认端点；国内站企业套餐另可选新加坡地域（1823/130659、
+    // 131173 双地域表：tokenhub-intl.tencentmaas.com，需开通新加坡地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub.tencentmaas.com/plan/anthropic",
+      "https://tokenhub-intl.tencentmaas.com/plan/anthropic",
+    ],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站企业版专业套餐（intl 1300/81489，新加坡地域）
+    name: "Tencent Token Plan Enterprise Pro (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
+    category: "cn_official",
+    baseUrl: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes("auto", "auto", "auto"),
+    // 新加坡地域为默认端点；国际站企业套餐另可选广州地域（1300/81489、
+    // 81490 双地域表：tokenhub.tencentcloudmaas.com，需开通广州地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+      "https://tokenhub.tencentcloudmaas.com/plan/anthropic",
+    ],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // Token Plan 企业版轻享套餐（1823/131173）：仅 Auto 模型
+    name: "Tencent Token Plan Enterprise Lite",
+    websiteUrl: "https://cloud.tencent.com/product/tokenhub",
+    apiKeyUrl: "https://console.cloud.tencent.com/tokenhub/tokenplan-e",
+    category: "cn_official",
+    baseUrl: "https://tokenhub.tencentmaas.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes("auto", "auto", "auto"),
+    // 广州地域为默认端点；国内站企业套餐另可选新加坡地域（1823/130659、
+    // 131173 双地域表：tokenhub-intl.tencentmaas.com，需开通新加坡地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub.tencentmaas.com/plan/anthropic",
+      "https://tokenhub-intl.tencentmaas.com/plan/anthropic",
+    ],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
+    // 国际站企业版轻享套餐（intl 1300/81490，新加坡地域）
+    name: "Tencent Token Plan Enterprise Lite (Intl)",
+    websiteUrl: "https://www.tencentcloud.com/products/tokenhub",
+    apiKeyUrl: "https://console.tencentcloud.com/tokenhub/tokenplan-e",
+    category: "cn_official",
+    baseUrl: "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes("auto", "auto", "auto"),
+    // 新加坡地域为默认端点；国际站企业套餐另可选广州地域（1300/81489、
+    // 81490 双地域表：tokenhub.tencentcloudmaas.com，需开通广州地域，
+    // 不支持跨地域调用，故仅作候选端点）
+    endpointCandidates: [
+      "https://tokenhub-intl.tencentcloudmaas.com/plan/anthropic",
+      "https://tokenhub.tencentcloudmaas.com/plan/anthropic",
+    ],
+    icon: "tencent",
+    iconColor: "#0052D9",
+  },
+  {
     name: "Zhipu GLM",
     websiteUrl: "https://open.bigmodel.cn",
     apiKeyUrl: "https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII",
@@ -987,6 +1102,58 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     modelRoutes: passthroughRoutes(),
     icon: "bailian",
     iconColor: "#624AFF",
+  },
+  // ===== QwenCloud（DashScope 国际站）=====
+  // 与国内百炼不同，官方文档要求把 ANTHROPIC_MODEL 显式设成 qwen 模型名，
+  // 端点不认 claude-* 别名，所以走 brandedRoutes 而不是 passthroughRoutes。
+  {
+    name: "QwenCloud",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    category: "cn_official",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes(
+      "qwen3.7-max",
+      "qwen3.7-max",
+      "qwen3.6-flash",
+      true,
+    ),
+    icon: "qwen",
+    iconColor: "#6336E7",
+  },
+  {
+    name: "QwenCloud For Coding",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    category: "cn_official",
+    baseUrl: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    modelRoutes: brandedRoutes(
+      "qwen3.7-plus",
+      "qwen3.7-plus",
+      "qwen3.7-plus",
+      true,
+    ),
+    icon: "qwen",
+    iconColor: "#6336E7",
+  },
+  {
+    name: "QwenCloud Token Plan",
+    websiteUrl: "https://www.qwencloud.com",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    category: "cn_official",
+    baseUrl:
+      "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    // 不挂 [1m]：qwen3.8 系官方窗口是 983616，不足 1M，
+    // Desktop 对模型能力校验是精确的，误标会被上游拒绝
+    modelRoutes: brandedRoutes("qwen3.8-max", "qwen3.8-max", "qwen3.6-flash"),
+    icon: "qwen",
+    iconColor: "#6336E7",
   },
   {
     name: "StepFun",

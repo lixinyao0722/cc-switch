@@ -42,7 +42,8 @@
     "deleting": "删除中...",
     "auto": "自动",
     "enabled": "已开启",
-    "notSet": "未设置"
+    "notSet": "未设置",
+    "collapse": "收起"
   },
   "firstRunNotice": {
     "title": "欢迎使用 CC Switch",
@@ -981,7 +982,8 @@
       "effectiveApiRequired": "模型 {{id}} 必须直接配置或继承一个 API",
       "effectiveBaseUrlRequired": "模型 {{id}} 必须直接配置或继承一个基础地址",
       "duplicateModel": "模型 ID {{id}} 重复",
-      "modelRequired": "请至少添加一个模型"
+      "modelRequired": "请至少添加一个模型",
+      "providerKeyDuplicate": "该供应商标识已存在"
     },
     "current": {
       "readFailed": "无法读取 Pi 供应商配置",
@@ -1292,6 +1294,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header 覆盖格式错误：{{error}}",
     "localProxyBodyOverrides": "Body 覆盖",
     "localProxyBodyOverridesInvalidDetail": "Body 覆盖格式错误：{{error}}",
+    "codexRemoteSessions": "支持手机远程会话",
+    "codexRemoteSessionsHint": "让手机远程会话使用 ModelHub，需开启下方会话头适配。与 Codex 代理接管独立：默认关闭，不修改系统配置；开启后会申请管理员授权写入 /etc/codex/managed_config.toml，并需重启 Codex。曾开启后再关闭，只撤销 CC Switch 管理的路由键。",
+    "codexRemoteSessionsRequiresAdapter": "支持手机远程会话需要先开启 ModelHub 会话头适配。",
     "modelhubSessionHeaderAdapter": "ModelHub 会话头适配",
     "modelhubSessionHeaderAdapterHint": "把官方 Codex 的 session-id/thread-id 转换为内部 ModelHub 链路需要的 session_id/thread_id/extra。仅在本地路由接管后生效。",
     "codexMetadataMapping": "Codex 内部元数据映射",
@@ -1440,6 +1445,7 @@
     "reauthLogin": "重新登录",
     "reauthSelectHint": "该账号需重新登录以启用托管绑定。",
     "reauthNow": "立即重新登录",
+    "duplicateAccount": "该 ChatGPT 账号已添加，请直接使用现有账号。",
     "loggedInAccounts": "已登录账号",
     "defaultAccount": "默认",
     "selected": "已选中",
@@ -1740,6 +1746,13 @@
       "pi": "Pi"
     },
     "rawInputLabel": "原始",
+    "sessionSync": {
+      "title": "自动扫描会话记录",
+      "description": "定期扫描各客户端的本地会话记录以统计用量；关闭后仅在手动同步时扫描",
+      "syncNow": "立即同步",
+      "syncCompleted": "同步完成：新增 {{imported}} 条，扫描 {{files}} 个文件，错误 {{errors}}",
+      "syncFailed": "会话用量同步失败：{{error}}"
+    },
     "rebuildCodex": {
       "title": "Codex 用量维护",
       "description": "从本地 rollout 日志重新构建 Codex 会话用量",
@@ -2211,6 +2224,7 @@
     }
   },
   "profiles": {
+    "switcherAriaLabel": "项目：{{name}}",
     "switcherTooltip": {
       "claude": "项目：一键切换 Claude Code 的供应商 / MCP / Skills / 记忆文件",
       "claude-desktop": "项目：一键切换 Claude Desktop 的供应商",
@@ -2796,6 +2810,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "路由操作正在进行，请稍候再试。",
     "panel": {
       "serviceAddress": "服务地址",
       "addressCopied": "地址已复制",
@@ -2894,6 +2909,7 @@
     },
     "switchFailed": "切换失败: {{error}}",
     "takeover": {
+      "ariaLabel": "{{appLabel}} 本地路由",
       "hint": "选择要路由的应用，启用后该应用的请求将通过本地路由转发",
       "enabled": "{{app}} 路由已启用",
       "disabled": "{{app}} 路由已关闭",

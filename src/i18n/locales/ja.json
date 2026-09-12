@@ -42,7 +42,8 @@
     "deleting": "削除中...",
     "auto": "自動",
     "enabled": "有効",
-    "notSet": "未設定"
+    "notSet": "未設定",
+    "collapse": "折りたたむ"
   },
   "firstRunNotice": {
     "title": "CC Switch へようこそ",
@@ -981,7 +982,8 @@
       "effectiveApiRequired": "モデル {{id}} には、直接またはプロバイダーから継承した API が必要です",
       "effectiveBaseUrlRequired": "モデル {{id}} には、直接またはプロバイダーから継承したベース URL が必要です",
       "duplicateModel": "モデル ID {{id}} が重複しています",
-      "modelRequired": "モデルを 1 つ以上追加してください"
+      "modelRequired": "モデルを 1 つ以上追加してください",
+      "providerKeyDuplicate": "このプロバイダーキーは既に存在します"
     },
     "current": {
       "readFailed": "Pi のプロバイダー設定を読み込めません",
@@ -1292,6 +1294,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header 上書きの形式エラー: {{error}}",
     "localProxyBodyOverrides": "Body 上書き",
     "localProxyBodyOverridesInvalidDetail": "Body 上書きの形式エラー: {{error}}",
+    "codexRemoteSessions": "モバイルのリモートセッションをサポート",
+    "codexRemoteSessionsHint": "モバイルのリモートセッションで ModelHub を使います。先に下のセッションヘッダー変換を有効にしてください。Codex のプロキシ引き継ぎとは独立した設定です。既定はオフで、システム設定は変更しません。有効化には /etc/codex/managed_config.toml への書き込みに対する管理者の承認と Codex の再起動が必要です。有効化後にオフにすると、CC Switch が管理するルーティングキーのみを元に戻します。",
+    "codexRemoteSessionsRequiresAdapter": "モバイルのリモートセッションを有効にする前に、ModelHub セッションヘッダー変換を有効にしてください。",
     "modelhubSessionHeaderAdapter": "ModelHub セッションヘッダー変換",
     "modelhubSessionHeaderAdapterHint": "公式 Codex の session-id/thread-id を、社内 ModelHub API 経路が必要とする session_id/thread_id/extra に変換します。ローカルルーティングの引き継ぎ中のみ有効です。",
     "codexMetadataMapping": "Codex 内部メタデータのモデル変換",
@@ -1440,6 +1445,7 @@
     "reauthLogin": "再ログイン",
     "reauthSelectHint": "このアカウントは管理バインドを有効にするため再ログインが必要です。",
     "reauthNow": "今すぐ再ログイン",
+    "duplicateAccount": "この ChatGPT アカウントは追加済みです。既存のアカウントを使用してください。",
     "loggedInAccounts": "ログイン済みアカウント",
     "defaultAccount": "デフォルト",
     "selected": "選択中",
@@ -1740,6 +1746,13 @@
       "pi": "Pi"
     },
     "rawInputLabel": "原始",
+    "sessionSync": {
+      "title": "セッションログの自動スキャン",
+      "description": "各クライアントのローカルセッションログを定期的にスキャンして使用量を集計します。オフにすると手動同期時のみスキャンします",
+      "syncNow": "今すぐ同期",
+      "syncCompleted": "同期完了：{{imported}} 件追加、{{files}} ファイルをスキャン、エラー {{errors}} 件",
+      "syncFailed": "セッション使用量の同期に失敗しました：{{error}}"
+    },
     "rebuildCodex": {
       "title": "Codex 使用量メンテナンス",
       "description": "ローカルの rollout ログから Codex セッション使用量を再構築します",
@@ -2211,6 +2224,7 @@
     }
   },
   "profiles": {
+    "switcherAriaLabel": "プロジェクト：{{name}}",
     "switcherTooltip": {
       "claude": "プロジェクト：Claude Code のプロバイダー / MCP / Skills / メモリファイルをワンクリックで切り替え",
       "claude-desktop": "プロジェクト：Claude Desktop のプロバイダーをワンクリックで切り替え",
@@ -2796,6 +2810,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "ルーティング操作を実行中です。しばらくしてから再試行してください。",
     "panel": {
       "serviceAddress": "サービスアドレス",
       "addressCopied": "アドレスをコピーしました",
@@ -2894,6 +2909,7 @@
     },
     "switchFailed": "切り替えに失敗しました: {{error}}",
     "takeover": {
+      "ariaLabel": "{{appLabel}} ローカルルーティング",
       "hint": "ルーティングするアプリを選択します。有効にすると、そのアプリのリクエストはローカルルーティング経由で転送されます",
       "enabled": "{{app}} ルーティング有効",
       "disabled": "{{app}} ルーティング無効",

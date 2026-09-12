@@ -1,7 +1,13 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useMutation,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
+import { useRoutingMutation } from "./routing";
 import type {
   GlobalProxyConfig,
   AppProxyConfig,
@@ -14,6 +20,27 @@ export const proxyKeys = {
   globalConfig: ["globalProxyConfig"] as const,
   appConfig: (appType: string) => ["appProxyConfig", appType] as const,
 };
+
+// Read all route state after a transaction, including failed or partial rollback.
+// A restored provider id alone does not prove the listener/config was restored.
+export async function invalidateRoutingState(
+  queryClient: QueryClient,
+  appType?: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: appType ? ["providers", appType] : ["providers"],
+    }),
+    queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
+    queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus }),
+    queryClient.invalidateQueries({
+      queryKey: appType ? proxyKeys.appConfig(appType) : ["appProxyConfig"],
+    }),
+    ...(!appType || appType === "claude-desktop"
+      ? [queryClient.invalidateQueries({ queryKey: ["claudeDesktopStatus"] })]
+      : []),
+  ]);
+}
 
 // ========== 代理服务器状态 Hooks ==========
 
@@ -56,12 +83,11 @@ export function useProxyTakeoverStatus(poll = true) {
 export function useSetProxyTakeoverForApp() {
   const queryClient = useQueryClient();
 
-  return useMutation({
+  return useRoutingMutation({
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       proxyApi.setProxyTakeoverForApp(appType, enabled),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
-    },
+    onSettled: (_data, _error, variables) =>
+      invalidateRoutingState(queryClient, variables.appType),
   });
 }
 

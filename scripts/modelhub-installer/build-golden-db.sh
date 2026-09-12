@@ -217,8 +217,12 @@ SQL
 
   integrity="$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA integrity_check;')"
   [[ "$integrity" == 'ok' ]] || { die 'golden database integrity check failed'; return 1; }
-  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA user_version;')" == '17' ]] \
-    || { die 'golden database user_version is not 17'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" 'PRAGMA user_version;')" == '18' ]] \
+    || { die 'golden database user_version is not 18'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM pragma_table_info('session_log_sync') WHERE name IN ('last_byte_offset','last_tail_fingerprint') AND type='INTEGER';")" == '2' ]] \
+    || { die 'golden database is missing schema 18 session cursors'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexRemoteSessions')='false';")" == '1' ]] \
+    || { die 'golden remote sessions must default to false'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
     || { die 'golden database is missing session_usage_dedup'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \

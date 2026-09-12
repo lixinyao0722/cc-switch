@@ -5,7 +5,7 @@ set -euo pipefail
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 
-readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.20.0-arm64.app.zip'
+readonly OUTPUT_APP_NAME='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly OUTPUT_INSTALLER_NAME='install.sh'
 readonly OUTPUT_RESOURCES_NAME='modelhub-installer-resources.tar.gz'
 readonly OUTPUT_CHECKSUM_NAME='SHA256SUMS.txt'
@@ -245,7 +245,7 @@ validate_app_archive() {
   fi
   bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$extracted_app/Contents/Info.plist" 2>/dev/null)" \
     || { die 'CC Switch app version is unreadable'; return 1; }
-  if [[ "$bundle_version" != '3.20.0' ]]; then
+  if [[ "$bundle_version" != '3.24.0' ]]; then
     die "CC Switch app has unexpected version: $bundle_version"
     return 1
   fi

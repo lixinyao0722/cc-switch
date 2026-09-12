@@ -156,6 +156,138 @@ vi.mock("@/lib/query", async (importOriginal) => {
   };
 });
 
+describe("ProviderForm Codex remote sessions", () => {
+  function initialData(codexRemoteSessions?: boolean) {
+    return {
+      name: "ModelHub test",
+      category: "third_party" as const,
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "test-only-key" },
+        config:
+          'model = "gpt-5.6-sol"\nmodel_provider = "custom"\n[model_providers.custom]\nname = "test"\nbase_url = "https://example.test/v1"\nwire_api = "responses"',
+      },
+      meta: {
+        localProxyRequestOverrides: {
+          codexRemoteSessions,
+          codexSessionHeaderAdapter: "modelhub" as const,
+          contextOptimization: { enabled: true, checkpointTtlSeconds: 21600 },
+          admissionControl: {
+            enabled: true,
+            largeRequestTokens: 100000,
+            concurrency: 4,
+          },
+        },
+      },
+    };
+  }
+
+  it.each([undefined, false, true])(
+    "loads and saves the remote setting (%s) with existing fork metadata",
+    async (saved) => {
+      const onSubmit = vi.fn();
+      const client = createTestQueryClient();
+      render(
+        <QueryClientProvider client={client}>
+          <ProviderForm
+            appId="codex"
+            providerId="test-provider"
+            initialData={initialData(saved)}
+            submitLabel="save-provider"
+            onSubmit={onSubmit}
+            onCancel={vi.fn()}
+          />
+        </QueryClientProvider>,
+      );
+      const remote = screen.getByRole("switch", { name: "支持手机远程会话" });
+      expect(remote).toHaveAttribute("aria-checked", String(saved ?? false));
+      fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      expect(
+        onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides,
+      ).toMatchObject({
+        codexRemoteSessions: saved ?? false,
+        codexSessionHeaderAdapter: "modelhub",
+        contextOptimization: { enabled: true, checkpointTtlSeconds: 21600 },
+        admissionControl: {
+          enabled: true,
+          largeRequestTokens: 100000,
+          concurrency: 4,
+        },
+      });
+    },
+  );
+
+  it("clears an edited opt-in when a different provider is loaded", async () => {
+    const onSubmit = vi.fn();
+    const client = createTestQueryClient();
+    const view = (saved?: boolean) => (
+      <QueryClientProvider client={client}>
+        <ProviderForm
+          appId="codex"
+          providerId={saved ? "first" : "second"}
+          initialData={initialData(saved)}
+          submitLabel="save-provider"
+          onSubmit={onSubmit}
+          onCancel={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(true));
+    expect(
+      screen.getByRole("switch", { name: "支持手机远程会话" }),
+    ).toBeChecked();
+    rerender(view());
+    expect(
+      screen.getByRole("switch", { name: "支持手机远程会话" }),
+    ).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(
+      onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides
+        .codexRemoteSessions,
+    ).toBe(false);
+  });
+
+  it("keeps opt-in visible after adapter validation fails and saves after recovery", async () => {
+    toastMocks.error.mockReset();
+    const onSubmit = vi.fn();
+    const client = createTestQueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <ProviderForm
+          appId="codex"
+          providerId="test-provider"
+          initialData={initialData(true)}
+          submitLabel="save-provider"
+          onSubmit={onSubmit}
+          onCancel={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    const adapter = screen.getByRole("switch", { name: "ModelHub 会话头适配" });
+    fireEvent.click(adapter);
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() =>
+      expect(toastMocks.error).toHaveBeenCalledWith(
+        "支持手机远程会话需要先开启 ModelHub 会话头适配。",
+      ),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("switch", { name: "支持手机远程会话" }),
+    ).toBeChecked();
+    fireEvent.click(adapter);
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(
+      onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides,
+    ).toMatchObject({
+      codexRemoteSessions: true,
+      codexSessionHeaderAdapter: "modelhub",
+    });
+  });
+});
+
 function renderCodexForm(onSubmit: (values: ProviderFormValues) => void) {
   const queryClient = createTestQueryClient();
   return render(

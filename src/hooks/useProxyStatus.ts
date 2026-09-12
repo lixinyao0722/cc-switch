@@ -2,17 +2,19 @@
  * 代理服务状态管理 Hook
  */
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { proxyApi } from "@/lib/api/proxy";
 import {
   proxyKeys,
+  invalidateRoutingState,
   useProxyStatusQuery,
   useProxyTakeoverStatus,
 } from "@/lib/query/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { getAppLabel } from "@/config/appConfig";
+import { useRoutingBusy, useRoutingMutation } from "@/lib/query/routing";
 
 /**
  * 代理服务状态管理
@@ -20,6 +22,7 @@ import { getAppLabel } from "@/config/appConfig";
 export function useProxyStatus() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const isRoutingBusy = useRoutingBusy();
 
   // 查询状态（自动轮询）
   const { data: status, isPending: isProxyStatusPending } =
@@ -30,7 +33,7 @@ export function useProxyStatus() {
     useProxyTakeoverStatus(false);
 
   // 启动服务器（总开关：仅启动服务，不接管）
-  const startProxyServerMutation = useMutation({
+  const startProxyServerMutation = useRoutingMutation({
     mutationFn: () => proxyApi.startProxyServer(),
     onSuccess: (info) => {
       toast.success(
@@ -41,7 +44,6 @@ export function useProxyStatus() {
         }),
         { closeButton: true },
       );
-      queryClient.invalidateQueries({ queryKey: proxyKeys.status });
     },
     onError: (error: Error) => {
       const detail =
@@ -54,10 +56,11 @@ export function useProxyStatus() {
         }),
       );
     },
+    onSettled: () => invalidateRoutingState(queryClient),
   });
 
   // 停止服务器（仅停止服务，不改写/恢复其它应用接管状态）
-  const stopProxyServerMutation = useMutation({
+  const stopProxyServerMutation = useRoutingMutation({
     mutationFn: () => proxyApi.stopProxyServer(),
     onSuccess: () => {
       toast.success(
@@ -66,7 +69,6 @@ export function useProxyStatus() {
         }),
         { closeButton: true },
       );
-      queryClient.invalidateQueries({ queryKey: proxyKeys.status });
     },
     onError: (error: Error) => {
       const detail =
@@ -79,10 +81,11 @@ export function useProxyStatus() {
         }),
       );
     },
+    onSettled: () => invalidateRoutingState(queryClient),
   });
 
   // 停止服务器（总开关关闭：强制恢复所有已接管的 Live 配置）
-  const stopWithRestoreMutation = useMutation({
+  const stopWithRestoreMutation = useRoutingMutation({
     mutationFn: () => proxyApi.stopProxyWithRestore(),
     onSuccess: () => {
       toast.success(
@@ -110,10 +113,11 @@ export function useProxyStatus() {
         }),
       );
     },
+    onSettled: () => invalidateRoutingState(queryClient),
   });
 
   // 按应用开启/关闭接管
-  const setTakeoverForAppMutation = useMutation({
+  const setTakeoverForAppMutation = useRoutingMutation({
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       proxyApi.setProxyTakeoverForApp(appType, enabled),
     onSuccess: (_data, variables) => {
@@ -131,8 +135,6 @@ export function useProxyStatus() {
             }),
         { closeButton: true },
       );
-      queryClient.invalidateQueries({ queryKey: proxyKeys.status });
-      queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
     },
     onError: (error: Error) => {
       const detail =
@@ -145,6 +147,8 @@ export function useProxyStatus() {
         }),
       );
     },
+    onSettled: (_data, _error, variables) =>
+      invalidateRoutingState(queryClient, variables.appType),
   });
 
   return {
@@ -165,6 +169,7 @@ export function useProxyStatus() {
     isStarting: startProxyServerMutation.isPending,
     isStoppingServer: stopProxyServerMutation.isPending,
     isPending:
+      isRoutingBusy ||
       startProxyServerMutation.isPending ||
       stopProxyServerMutation.isPending ||
       stopWithRestoreMutation.isPending ||

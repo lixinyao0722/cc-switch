@@ -22,12 +22,16 @@ fn require_proxy_app(app_type: &str) -> Result<crate::app_config::AppType, Strin
 pub async fn start_proxy_server(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProxyServerInfo, String> {
+    let _guard = state.proxy_service.lock_switch_for_app("codex").await;
+    state.proxy_service.ensure_codex_routing_ready()?;
     state.proxy_service.start().await
 }
 
 /// 停止代理服务器（仅停止服务，不恢复/清理 Live 接管状态）
 #[tauri::command]
 pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _guard = state.proxy_service.lock_switch_for_app("codex").await;
+    crate::codex_managed_route::ensure_can_disable_takeover().map_err(|e| e.to_string())?;
     let takeover = state.proxy_service.get_takeover_status().await?;
     if takeover.claude
         || takeover.codex
@@ -47,6 +51,7 @@ pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), 
 /// 停止代理服务器（恢复 Live 配置）
 #[tauri::command]
 pub async fn stop_proxy_with_restore(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // The service validates ownership under its complete stop/restore lock.
     state.proxy_service.stop_with_restore().await
 }
 
@@ -115,7 +120,17 @@ pub async fn update_global_proxy_config(
     state: tauri::State<'_, AppState>,
     config: GlobalProxyConfig,
 ) -> Result<(), String> {
+    let _guard = state.proxy_service.lock_switch_for_app("codex").await;
     let db = &state.db;
+    let previous = db
+        .get_global_proxy_config()
+        .await
+        .map_err(|e| e.to_string())?;
+    if previous.listen_address != config.listen_address
+        || previous.listen_port != config.listen_port
+    {
+        crate::codex_managed_route::ensure_can_disable_takeover().map_err(|e| e.to_string())?;
+    }
     db.update_global_proxy_config(config)
         .await
         .map_err(|e| e.to_string())
@@ -147,6 +162,14 @@ pub async fn update_proxy_config_for_app(
     let db = &state.db;
     let app_type = config.app_type.clone();
     require_proxy_app(&app_type)?;
+    let _guard = state.proxy_service.lock_switch_for_app(&app_type).await;
+    let previous = db
+        .get_proxy_config_for_app(&app_type)
+        .await
+        .map_err(|e| e.to_string())?;
+    if previous.enabled != config.enabled {
+        return Err("请使用应用接管开关修改 enabled，以同步实际 Live 路由".into());
+    }
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)

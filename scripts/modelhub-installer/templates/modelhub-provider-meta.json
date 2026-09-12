@@ -2,6 +2,7 @@
   "apiFormat": "responses",
   "endpointAutoSelect": false,
   "localProxyRequestOverrides": {
+    "codexRemoteSessions": false,
     "codexSessionHeaderAdapter": "modelhub",
     "codexActivitySummaryMode": "map",
     "codexMetadataModel": "gpt-5.6-sol",

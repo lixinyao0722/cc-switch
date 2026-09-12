@@ -7,6 +7,7 @@ import type {
 
 export interface LocalProxyPolicyOptions {
   appId: "claude" | "codex";
+  codexRemoteSessions?: boolean;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   retry429?: Retry429Config;
   codexActivitySummaryMode?: CodexActivitySummaryMode;
@@ -204,6 +205,15 @@ export function buildLocalProxyRequestOverrides(
     overrides.body = bodyResult.value;
   }
   if (options?.appId === "codex") {
+    if (options.codexRemoteSessions && !options.codexSessionHeaderAdapter) {
+      return {
+        error:
+          "Mobile remote sessions require the ModelHub session header adapter",
+      };
+    }
+    if (options.codexRemoteSessions !== undefined) {
+      overrides.codexRemoteSessions = options.codexRemoteSessions;
+    }
     if (options.codexSessionHeaderAdapter) {
       overrides.codexSessionHeaderAdapter = options.codexSessionHeaderAdapter;
       if (options.retry429) {

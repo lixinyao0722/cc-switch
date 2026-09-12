@@ -130,6 +130,69 @@ describe("requestOverrides", () => {
     });
   });
 
+  it.each([true, false])(
+    "retains an explicit remote-session choice (%s) without losing fork policies",
+    (codexRemoteSessions) => {
+      const result = buildLocalProxyRequestOverrides(
+        '{ "X-Test": "ok" }',
+        '{ "max_output_tokens": 128000 }',
+        { ...modelhubPolicy, codexRemoteSessions },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.overrides).toMatchObject({
+        codexRemoteSessions,
+        codexSessionHeaderAdapter: "modelhub",
+        headers: { "x-test": "ok" },
+        body: { max_output_tokens: 128000 },
+        contextOptimization: { enabled: true, checkpointTtlSeconds: 21600 },
+        admissionControl: {
+          enabled: true,
+          largeRequestTokens: 100000,
+          concurrency: 4,
+        },
+        codexActivitySummaryMode: "map",
+        codexMetadataModel: "gpt-5.6-sol",
+        rememberInvalidEncryptedReasoning: true,
+      });
+    },
+  );
+
+  it("does not opt legacy providers into mobile routing", () => {
+    const result = buildLocalProxyRequestOverrides("", "", modelhubPolicy);
+    expect(result.overrides?.codexRemoteSessions ?? false).toBe(false);
+  });
+
+  it("persists explicit remote opt-out even when the session adapter is off", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        appId: "codex",
+        codexRemoteSessions: false,
+      }),
+    ).toEqual({ overrides: { codexRemoteSessions: false } });
+  });
+
+  it("does not persist Codex mobile routing on Claude providers", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        ...modelhubPolicy,
+        appId: "claude",
+        codexRemoteSessions: true,
+      }),
+    ).toEqual({});
+  });
+
+  it("rejects mobile opt-in without the ModelHub session adapter", () => {
+    expect(
+      buildLocalProxyRequestOverrides("", "", {
+        appId: "codex",
+        codexRemoteSessions: true,
+      }).error,
+    ).toBe(
+      "Mobile remote sessions require the ModelHub session header adapter",
+    );
+  });
+
   it("rejects retry count above ten", () => {
     expect(
       buildLocalProxyRequestOverrides("", "", {

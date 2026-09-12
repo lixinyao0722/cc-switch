@@ -149,6 +149,8 @@ interface CodexFormFieldsProps {
   onLocalProxyHeadersOverrideChange: (value: string) => void;
   localProxyBodyOverride: string;
   onLocalProxyBodyOverrideChange: (value: string) => void;
+  codexRemoteSessions?: boolean;
+  onCodexRemoteSessionsChange?: (value: boolean) => void;
   codexSessionHeaderAdapter?: CodexSessionHeaderAdapter;
   onCodexSessionHeaderAdapterChange?: (
     value: CodexSessionHeaderAdapter | undefined,
@@ -443,6 +445,8 @@ export function CodexFormFields({
   onLocalProxyHeadersOverrideChange,
   localProxyBodyOverride,
   onLocalProxyBodyOverrideChange,
+  codexRemoteSessions,
+  onCodexRemoteSessionsChange,
   codexSessionHeaderAdapter,
   onCodexSessionHeaderAdapterChange,
   retry429,
@@ -495,6 +499,7 @@ export function CodexFormFields({
   const hasRequestOverrides = Boolean(
     localProxyHeadersOverride.trim() ||
       localProxyBodyOverride.trim() ||
+      codexRemoteSessions ||
       codexSessionHeaderAdapter ||
       retry429 ||
       codexMetadataModel ||
@@ -1403,6 +1408,8 @@ export function CodexFormFields({
                   onHeadersJsonChange={onLocalProxyHeadersOverrideChange}
                   onBodyJsonChange={onLocalProxyBodyOverrideChange}
                   showModelHubControls={appId === "codex"}
+                  codexRemoteSessions={codexRemoteSessions}
+                  onCodexRemoteSessionsChange={onCodexRemoteSessionsChange}
                   codexSessionHeaderAdapter={codexSessionHeaderAdapter}
                   retry429={retry429}
                   codexMetadataModel={codexMetadataModel}

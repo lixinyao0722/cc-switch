@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { LocalProxyRequestOverridesField } from "@/components/providers/forms/LocalProxyRequestOverridesField";
 import { Form } from "@/components/ui/form";
 import { useForm } from "react-hook-form";
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -28,6 +28,63 @@ function FieldWithForm(
 }
 
 describe("LocalProxyRequestOverridesField", () => {
+  it("defaults mobile remote sessions off and places it before the adapter", () => {
+    render(<FieldWithForm {...baseProps} showModelHubControls />);
+    const remote = screen.getByRole("switch", {
+      name: "providerForm.codexRemoteSessions",
+    });
+    const adapter = screen.getByRole("switch", {
+      name: "providerForm.modelhubSessionHeaderAdapter",
+    });
+    expect(remote).not.toBeChecked();
+    expect(
+      remote.compareDocumentPosition(adapter) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("keeps mobile opt-in independent from the adapter and allows explicit opt-out", () => {
+    function StatefulField() {
+      const [remote, setRemote] = useState(false);
+      const [adapter, setAdapter] = useState<"modelhub" | undefined>(
+        "modelhub",
+      );
+      return (
+        <FieldWithForm
+          {...baseProps}
+          showModelHubControls
+          codexRemoteSessions={remote}
+          onCodexRemoteSessionsChange={setRemote}
+          codexSessionHeaderAdapter={adapter}
+          onCodexSessionHeaderAdapterChange={setAdapter}
+        />
+      );
+    }
+    render(<StatefulField />);
+    const remote = screen.getByRole("switch", {
+      name: "providerForm.codexRemoteSessions",
+    });
+    fireEvent.click(remote);
+    expect(remote).toBeChecked();
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "providerForm.modelhubSessionHeaderAdapter",
+      }),
+    );
+    expect(remote).toBeChecked();
+    fireEvent.click(remote);
+    expect(remote).not.toBeChecked();
+  });
+
+  it("does not offer mobile remote routing outside Codex controls", () => {
+    render(<FieldWithForm {...baseProps} />);
+    expect(
+      screen.queryByRole("switch", {
+        name: "providerForm.codexRemoteSessions",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("reveals ModelHub retry controls after the Codex session adapter is enabled", () => {
     const onCodexSessionHeaderAdapterChange = vi.fn();
     const onRetry429Change = vi.fn();

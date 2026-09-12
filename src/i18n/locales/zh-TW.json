@@ -42,7 +42,8 @@
     "deleting": "刪除中...",
     "auto": "自動",
     "enabled": "已啟用",
-    "notSet": "未設定"
+    "notSet": "未設定",
+    "collapse": "收合"
   },
   "firstRunNotice": {
     "title": "歡迎使用 CC Switch",
@@ -982,7 +983,8 @@
       "effectiveApiRequired": "模型 {{id}} 必須直接設定或從供應商繼承 API",
       "effectiveBaseUrlRequired": "模型 {{id}} 必須直接設定或從供應商繼承基礎 URL",
       "duplicateModel": "模型 ID {{id}} 重複",
-      "modelRequired": "請至少新增一個模型"
+      "modelRequired": "請至少新增一個模型",
+      "providerKeyDuplicate": "該供應商標識已存在"
     },
     "current": {
       "readFailed": "無法讀取 Pi 供應商設定",
@@ -1293,6 +1295,9 @@
     "localProxyHeaderOverridesInvalidDetail": "Header 覆蓋格式錯誤：{{error}}",
     "localProxyBodyOverrides": "Body 覆蓋",
     "localProxyBodyOverridesInvalidDetail": "Body 覆蓋格式錯誤：{{error}}",
+    "codexRemoteSessions": "支援手機遠端工作階段",
+    "codexRemoteSessionsHint": "讓手機遠端工作階段使用 ModelHub，需開啟下方工作階段標頭適配。此設定與 Codex 代理接管獨立：預設關閉，不修改系統設定；開啟後會要求管理員授權寫入 /etc/codex/managed_config.toml，並需重新啟動 Codex。曾開啟後再關閉，只撤銷 CC Switch 管理的路由鍵。",
+    "codexRemoteSessionsRequiresAdapter": "支援手機遠端工作階段需要先開啟 ModelHub 工作階段標頭適配。",
     "modelhubSessionHeaderAdapter": "ModelHub 工作階段標頭適配",
     "modelhubSessionHeaderAdapterHint": "將官方 Codex 的 session-id/thread-id 轉換為內部 ModelHub 鏈路需要的 session_id/thread_id/extra。僅在本機路由接管後生效。",
     "codexMetadataMapping": "Codex 內部中繼資料映射",
@@ -1441,6 +1446,7 @@
     "reauthLogin": "重新登入",
     "reauthSelectHint": "該帳號需重新登入以啟用託管綁定。",
     "reauthNow": "立即重新登入",
+    "duplicateAccount": "該 ChatGPT 帳號已新增，請直接使用現有帳號。",
     "loggedInAccounts": "已登入帳號",
     "defaultAccount": "預設",
     "selected": "已選取",
@@ -1741,6 +1747,13 @@
       "pi": "Pi"
     },
     "rawInputLabel": "原始",
+    "sessionSync": {
+      "title": "自動掃描工作階段記錄",
+      "description": "定期掃描各用戶端的本機工作階段記錄以統計用量；關閉後僅在手動同步時掃描",
+      "syncNow": "立即同步",
+      "syncCompleted": "同步完成：新增 {{imported}} 筆，掃描 {{files}} 個檔案，錯誤 {{errors}}",
+      "syncFailed": "工作階段用量同步失敗：{{error}}"
+    },
     "rebuildCodex": {
       "title": "Codex 用量維護",
       "description": "從本機 rollout 日誌重新建構 Codex 工作階段用量",
@@ -2212,6 +2225,7 @@
     }
   },
   "profiles": {
+    "switcherAriaLabel": "專案：{{name}}",
     "switcherTooltip": {
       "claude": "專案：一鍵切換 Claude Code 的供應商 / MCP / Skills / 記憶檔案",
       "claude-desktop": "專案：一鍵切換 Claude Desktop 的供應商",
@@ -2797,6 +2811,7 @@
     }
   },
   "proxy": {
+    "routingBusy": "路由操作正在進行，請稍候再試。",
     "panel": {
       "serviceAddress": "服務位址",
       "addressCopied": "位址已複製",
@@ -2895,6 +2910,7 @@
     },
     "switchFailed": "切換失敗：{{error}}",
     "takeover": {
+      "ariaLabel": "{{appLabel}} 本地路由",
       "hint": "選擇要路由的應用程式，啟用後該應用程式的請求將透過本地路由轉發",
       "enabled": "{{app}} 路由已啟用",
       "disabled": "{{app}} 路由已關閉",

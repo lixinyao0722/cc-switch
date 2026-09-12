@@ -36,6 +36,7 @@ import {
   supportsOfficialProxyTakeover,
 } from "@/utils/providerCapabilities";
 import { isOAuthProviderType } from "@/config/constants";
+import { useRoutingBusy } from "@/lib/query/routing";
 
 /**
  * Hook for managing provider actions (add, update, delete, switch)
@@ -48,6 +49,7 @@ export function useProviderActions(
 ) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const isRoutingBusy = useRoutingBusy();
 
   const addProviderMutation = useAddProviderMutation(activeApp);
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
@@ -523,6 +525,7 @@ export function useProviderActions(
     saveUsageScript,
     setAsDefaultModel,
     isLoading:
+      isRoutingBusy ||
       addProviderMutation.isPending ||
       updateProviderMutation.isPending ||
       deleteProviderMutation.isPending ||

@@ -32,6 +32,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import { invalidateRoutingState } from "@/lib/query/proxy";
+import { setExternalRoutingBusy } from "@/lib/query/routing";
 import {
   piApi,
   providersApi,
@@ -404,9 +406,7 @@ function App() {
       try {
         const off = await providersApi.onSwitched(
           async (event: ProviderSwitchEvent) => {
-            if (event.appType === activeApp) {
-              await refetch();
-            }
+            await invalidateRoutingState(queryClient, event.appType);
             if (event.appType === "pi") {
               await invalidatePiProviderCaches(queryClient);
             }
@@ -427,7 +427,20 @@ function App() {
       active = false;
       unsubscribe?.();
     };
-  }, [activeApp, queryClient, refetch]);
+  }, [queryClient]);
+
+  // Backend transactions emit this even when switching or rollback fails,
+  // including tray actions and active-provider remote-session edits.
+  useTauriEvent<{ appType: AppId }>("route-state-changed", async (event) => {
+    await invalidateRoutingState(queryClient, event.appType);
+  });
+
+  useTauriEvent<{ appType: AppId; busy: boolean }>(
+    "route-operation-state",
+    (event) => {
+      setExternalRoutingBusy(queryClient, event.appType, event.busy);
+    },
+  );
 
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
@@ -1283,6 +1296,7 @@ function App() {
                   variant="outline"
                   size="icon"
                   disabled={managementBusy}
+                  aria-label={t("common.back")}
                   onClick={() =>
                     setCurrentView(
                       currentView === "skillsDiscovery"

@@ -436,6 +436,11 @@ function ProviderFormFull({
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
     );
+    setCodexRemoteSessions(
+      appId === "codex" &&
+        initialData?.meta?.localProxyRequestOverrides?.codexRemoteSessions ===
+          true,
+    );
     setCodexSessionHeaderAdapter(
       appId === "codex"
         ? initialData?.meta?.localProxyRequestOverrides
@@ -667,6 +672,12 @@ function ProviderFormFull({
       formatRequestOverrideObject(
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
+  );
+  const [codexRemoteSessions, setCodexRemoteSessions] = useState(
+    () =>
+      appId === "codex" &&
+      initialData?.meta?.localProxyRequestOverrides?.codexRemoteSessions ===
+        true,
   );
   const [codexSessionHeaderAdapter, setCodexSessionHeaderAdapter] = useState<
     CodexSessionHeaderAdapter | undefined
@@ -1186,6 +1197,19 @@ function ProviderFormFull({
     (appId === "claude" || appId === "codex") && category !== "official";
 
   const handleSubmit = async (values: ProviderFormData) => {
+    if (
+      shouldApplyLocalProxyRequestOverrides &&
+      appId === "codex" &&
+      codexRemoteSessions &&
+      !codexSessionHeaderAdapter
+    ) {
+      toast.error(
+        t("providerForm.codexRemoteSessionsRequiresAdapter", {
+          defaultValue: "支持手机远程会话需要先开启 ModelHub 会话头适配。",
+        }),
+      );
+      return;
+    }
     const overridesResult = shouldApplyLocalProxyRequestOverrides
       ? buildLocalProxyRequestOverrides(
           localProxyHeadersOverride,
@@ -1193,6 +1217,7 @@ function ProviderFormFull({
           appId === "codex"
             ? {
                 appId: "codex",
+                codexRemoteSessions,
                 codexSessionHeaderAdapter,
                 retry429,
                 codexActivitySummaryMode,
@@ -2599,6 +2624,8 @@ function ProviderFormFull({
               onLocalProxyHeadersOverrideChange={setLocalProxyHeadersOverride}
               localProxyBodyOverride={localProxyBodyOverride}
               onLocalProxyBodyOverrideChange={setLocalProxyBodyOverride}
+              codexRemoteSessions={codexRemoteSessions}
+              onCodexRemoteSessionsChange={setCodexRemoteSessions}
               codexSessionHeaderAdapter={codexSessionHeaderAdapter}
               onCodexSessionHeaderAdapterChange={setCodexSessionHeaderAdapter}
               retry429={retry429}

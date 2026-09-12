@@ -7,9 +7,9 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260828-r23'
+readonly RELEASE_TAG='modelhub-installer-20260912-r24'
 readonly INSTALLER_ASSET='install.sh'
-readonly APP_ASSET='CC-Switch-ModelHub-3.20.0-arm64.app.zip'
+readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'
@@ -66,6 +66,10 @@ CHATGPT_TRUSTED_HELPER_DIR=''
 CHATGPT_TRUSTED_HELPER_PATH=''
 CHATGPT_INSTALLED_BY_RUN=0
 CODEX_CONFIG_INSTALL_MODE='overwrite'
+LOCAL_ASSETS_DIR=''
+LAUNCH_AGENT_CHANGED_BY_RUN=0
+LAUNCH_AGENT_WAS_LOADED=0
+LAUNCHD_ENVIRONMENT_CHANGED_BY_RUN=0
 
 die() {
   echo "error: $*" >&2
@@ -912,7 +916,7 @@ verify_release_assets() {
   local line_count
   local count
 
-  if [[ ! -f "$checksum_file" ]]; then
+  if [[ ! -f "$checksum_file" || -L "$checksum_file" ]]; then
     die "release checksum file is missing"
     return 1
   fi
@@ -937,7 +941,7 @@ verify_release_assets() {
   fi
 
   for asset in "$INSTALLER_ASSET" "$APP_ASSET" "$RESOURCES_ASSET"; do
-    if [[ ! -f "$asset_dir/$asset" ]]; then
+    if [[ ! -f "$asset_dir/$asset" || -L "$asset_dir/$asset" ]]; then
       die "release asset is missing: $asset"
       return 1
     fi
@@ -1016,7 +1020,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R23 context-window contract'
+    die 'ModelHub model catalog does not match the R24 context-window contract'
     return 1
   fi
 }
@@ -1172,8 +1176,12 @@ validate_golden_database() {
   fi
   [[ "$(golden_sqlite_scalar "$database" 'PRAGMA integrity_check;')" == 'ok' ]] \
     || { die 'golden CC Switch database integrity check failed'; return 1; }
-  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '17' ]] \
-    || { die 'golden CC Switch database schema version is not 17'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" 'PRAGMA user_version;')" == '18' ]] \
+    || { die 'golden CC Switch database schema version is not 18'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM pragma_table_info('session_log_sync') WHERE name IN ('last_byte_offset','last_tail_fingerprint') AND type='INTEGER';")" == '2' ]] \
+    || { die 'golden CC Switch database is missing schema 18 session cursors'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexRemoteSessions')='false';")" == '1' ]] \
+    || { die 'golden CC Switch remote sessions must default to false'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
     || { die 'golden CC Switch database is missing session_usage_dedup'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
@@ -1189,7 +1197,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 600000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R23 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R24 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1199,7 +1207,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.checkpointTtlSeconds')=21600 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.largeRequestTokens')=100000 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.concurrency')=4;")" == '1' ]] \
-    || { die 'golden CC Switch provider R23 context policy is invalid'; return 1; }
+    || { die 'golden CC Switch provider R24 context policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -2385,6 +2393,29 @@ xml_escape() {
   printf '%s' "$value"
 }
 
+validate_existing_codex_directory() {
+  local configured_dir='' configured_type=''
+  [[ -e "$CC_SWITCH_SETTINGS_PATH" || -L "$CC_SWITCH_SETTINGS_PATH" ]] || return 0
+  if [[ -L "$CC_SWITCH_SETTINGS_PATH" || ! -f "$CC_SWITCH_SETTINGS_PATH" ]] \
+    || ! /usr/bin/plutil -convert json -o /dev/null "$CC_SWITCH_SETTINGS_PATH" >/dev/null 2>&1; then
+    die 'existing CC Switch settings are invalid or unsafe; no installation changes made'
+    return 1
+  fi
+  if ! configured_type="$(/usr/bin/plutil -type codexConfigDir "$CC_SWITCH_SETTINGS_PATH" 2>/dev/null)"; then
+    return 0
+  fi
+  [[ "$configured_type" == '(any)' ]] && return 0
+  if ! configured_dir="$(/usr/bin/plutil -extract codexConfigDir raw -expect string -o - "$CC_SWITCH_SETTINGS_PATH" 2>/dev/null)"; then
+    die 'codexConfigDir must be empty or the default Codex directory; use an App-only update'
+    return 1
+  fi
+  while [[ "$configured_dir" == */ && "$configured_dir" != / ]]; do configured_dir="${configured_dir%/}"; done
+  case "$configured_dir" in
+    ''|'~/.codex'|"$INSTALL_USER_HOME/.codex") return 0 ;;
+  esac
+  die 'custom codexConfigDir is not covered by installer backup; use an App-only update. No configuration was reset.'
+}
+
 configure_install_paths() {
   if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     INSTALL_USER_HOME="${CC_SWITCH_INSTALLER_TEST_HOME:?test home is required}"
@@ -2424,7 +2455,9 @@ configure_install_paths() {
 managed_targets() {
   printf '%s\t%s\n' "$CC_SWITCH_APP_PATH" 'cc-switch-app'
   printf '%s\t%s\n' "$CODEX_CONFIG_PATH" 'codex-config.toml'
-  printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
+  if [[ "${1:-all}" == all ]]; then
+    printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
+  fi
   printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'models-modelhub-1m.json'
   printf '%s\t%s\n' "$CC_SWITCH_DATABASE_PATH" 'cc-switch.db'
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
@@ -2575,15 +2608,8 @@ create_backup() {
     die "failed to create backup manifest: $manifest"
     return 1
   fi
-  if path_is_symlink "$CODEX_MANAGED_CONFIG_DIR"; then
-    die "Codex managed config directory must not be a symlink: $CODEX_MANAGED_CONFIG_DIR"
-    return 1
-  fi
-  if path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
-    printf '1\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
-  else
-    printf '0\n' >"$backup_dir/codex-managed-config-parent-existed" || return 1
-  fi
+  # R24 never reads or snapshots system routing by default. The App owns opt-in.
+  : >"$backup_dir/changed-targets.tsv" || return 1
 
   while IFS=$'\t' read -r target relative; do
     if [[ "$target" == "$CODEX_MANAGED_CONFIG_PATH" ]]; then
@@ -2634,17 +2660,91 @@ create_backup() {
         return 1
       fi
     fi
-  done < <(managed_targets)
+  done < <(managed_targets user)
 
   validate_backup_manifest "$backup_dir" || return 1
   printf '%s' "$backup_dir"
 }
 
-unload_launch_agent() {
-  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
+record_changed_target() {
+  local target="$1"
+  [[ -n "$ACTIVE_BACKUP_DIR" && -f "$ACTIVE_BACKUP_DIR/changed-targets.tsv" ]] || return 0
+  is_managed_target "$target" || return 1
+  if ! /usr/bin/grep -Fxq -- "$target" "$ACTIVE_BACKUP_DIR/changed-targets.tsv"; then
+    printf '%s\n' "$target" >>"$ACTIVE_BACKUP_DIR/changed-targets.tsv" || return 1
+  fi
+}
+
+backup_target_was_changed() {
+  local backup_dir="$1"
+  local target="$2"
+  # Older backups have no journal and retain their explicit full-restore contract.
+  [[ ! -f "$backup_dir/changed-targets.tsv" ]] \
+    || /usr/bin/grep -Fxq -- "$target" "$backup_dir/changed-targets.tsv"
+}
+
+launch_agent_domain() {
+  local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
   local user_id
-  user_id="$(/usr/bin/id -u)"
-  "$launchctl_bin" bootout "gui/$user_id/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  user_id="$(/usr/bin/id -u)" || return 1
+  validate_non_root "$user_id" || return 1
+  if ! "$launchctl_bin" print "gui/$user_id" >/dev/null 2>&1; then
+    die 'ModelHub LaunchAgent requires the current logged-in GUI user'
+    return 1
+  fi
+  printf 'gui/%s' "$user_id"
+}
+
+# Return 0 only for a loaded job, 1 only for ESRCH, 2 for an inspection error.
+# Never print launchctl output: it can contain the login environment and secrets.
+launch_agent_state() {
+  local target="$1"
+  local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
+  local status
+  if "$launchctl_bin" print "$target" >/dev/null 2>&1; then return 0; else status=$?; fi
+  [[ "$status" == 113 ]] && return 1
+  die "unable to inspect ModelHub LaunchAgent (launchctl status $status)"
+  return 2
+}
+
+launch_agent_poll_attempts() {
+  local attempts=30
+  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == 1 ]]; then
+    attempts="${CC_SWITCH_INSTALLER_TEST_LAUNCHD_ATTEMPTS:-30}"
+  fi
+  case "$attempts" in ''|*[!0-9]*) return 1 ;; esac
+  [[ "$attempts" -ge 1 && "$attempts" -le 30 ]] || return 1
+  printf '%s' "$attempts"
+}
+
+unload_launch_agent() {
+  local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
+  local sleep_bin="$(installer_tool_path CC_SWITCH_SLEEP_BIN /bin/sleep)"
+  local domain target state bootout_status attempts attempt=1
+  domain="$(launch_agent_domain)" || return 1
+  target="$domain/$LAUNCH_AGENT_LABEL"
+  if launch_agent_state "$target"; then state=0; else state=$?; fi
+  [[ "$state" == 1 ]] && return 0
+  [[ "$state" == 0 ]] || return 1
+  if "$launchctl_bin" bootout "$target" >/dev/null 2>&1; then
+    bootout_status=0
+    LAUNCH_AGENT_CHANGED_BY_RUN=1
+  else
+    bootout_status=$?
+  fi
+  attempts="$(launch_agent_poll_attempts)" || return 1
+  while [[ "$attempt" -le "$attempts" ]]; do
+    if launch_agent_state "$target"; then state=0; else state=$?; fi
+    if [[ "$state" == 1 ]]; then LAUNCH_AGENT_CHANGED_BY_RUN=1; return 0; fi
+    [[ "$state" == 0 ]] || return 1
+    if [[ "$bootout_status" != 0 ]]; then
+      die "failed to unload ModelHub LaunchAgent (launchctl status $bootout_status; job still loaded)"
+      return 1
+    fi
+    if [[ "$attempt" -lt "$attempts" ]]; then "$sleep_bin" 1 || return 1; fi
+    attempt=$((attempt + 1))
+  done
+  die 'ModelHub LaunchAgent did not disappear within the bounded 30-second wait'
 }
 
 validate_backup_manifest() {
@@ -2665,7 +2765,8 @@ validate_backup_manifest() {
     die "backup manifest has an invalid row"
     return 1
   fi
-  if [[ "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "0" \
+  if /usr/bin/grep -Fq -- "$CODEX_MANAGED_CONFIG_PATH" "$manifest" \
+    && [[ "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "0" \
     && "$(/bin/cat "$backup_dir/codex-managed-config-parent-existed" 2>/dev/null || true)" != "1" ]]; then
     die 'backup manifest has invalid Codex managed config parent state'
     return 1
@@ -2677,7 +2778,15 @@ validate_backup_manifest() {
       die "backup manifest must contain exactly one entry for: $target"
       return 1
     fi
-  done < <(managed_targets)
+  done < <(managed_targets user)
+
+  if [[ -f "$backup_dir/changed-targets.tsv" ]]; then
+    while IFS= read -r target; do
+      is_managed_target "$target" || { die 'backup mutation journal contains an unmanaged target'; return 1; }
+      [[ "$(awk -F '\t' -v target="$target" '$1 == target { n++ } END { print n+0 }' "$manifest")" == 1 ]] \
+        || { die 'backup mutation journal does not match manifest'; return 1; }
+    done <"$backup_dir/changed-targets.tsv"
+  fi
 
   while IFS=$'\t' read -r target existed relative; do
     if ! expected_relative="$(managed_relative_for_target "$target")"; then
@@ -2725,23 +2834,18 @@ validate_backup_manifest() {
 
 clear_runtime_environment() {
   local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
-  "$launchctl_bin" unsetenv MODELHUB_AK >/dev/null 2>&1 || true
-  "$launchctl_bin" unsetenv CODEX_CLI_PATH >/dev/null 2>&1 || true
+  local status=0
+  # Clearing during an early rollback is itself a mutation, even when bootstrap
+  # never ran and the previous environment existed without a loaded job.
+  LAUNCHD_ENVIRONMENT_CHANGED_BY_RUN=1
+  "$launchctl_bin" unsetenv MODELHUB_AK >/dev/null 2>&1 || status=1
+  "$launchctl_bin" unsetenv CODEX_CLI_PATH >/dev/null 2>&1 || status=1
+  [[ "$status" == 0 ]] || { die 'failed to clear ModelHub launchd environment'; return 1; }
 }
 
 reload_restored_launch_agent() {
-  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
-  local user_id
-
   [[ -f "$LAUNCH_AGENT_PATH" ]] || return 0
-  user_id="$(/usr/bin/id -u)"
-  if ! "$launchctl_bin" bootstrap "gui/$user_id" "$LAUNCH_AGENT_PATH" >/dev/null 2>&1; then
-    die "failed to restore the previous LaunchAgent"
-    return 1
-  fi
-  if [[ -x "$ENV_HELPER_PATH" ]]; then
-    "$ENV_HELPER_PATH" || true
-  fi
+  install_launch_agent
 }
 
 restore_backup() {
@@ -2754,12 +2858,19 @@ restore_backup() {
   local ditto_bin="$(installer_tool_path CC_SWITCH_DITTO_BIN /usr/bin/ditto)"
   local managed_parent_existed
   local managed_temp=''
+  local restore_agent=0
+  local restore_status=0
 
   validate_backup_manifest "$backup_dir" || return 1
 
-  unload_launch_agent
-  clear_runtime_environment
+  if backup_launch_agent_needs_restore "$backup_dir"; then
+    restore_agent=1
+    # Never replace a plist/helper while an old job can still execute it.
+    unload_launch_agent || return 1
+    clear_runtime_environment || restore_status=1
+  fi
   while IFS=$'\t' read -r target existed relative; do
+    backup_target_was_changed "$backup_dir" "$target" || continue
     if ! is_managed_target "$target"; then
       die "backup manifest contains unmanaged target: $target"
       return 1
@@ -2817,12 +2928,17 @@ restore_backup() {
     fi
   done <"$manifest"
 
-  managed_parent_existed="$(/bin/cat "$backup_dir/codex-managed-config-parent-existed")" || return 1
-  if [[ "$managed_parent_existed" == "0" ]] && path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
-    run_with_privilege /bin/rmdir "$CODEX_MANAGED_CONFIG_DIR" 2>/dev/null || true
+  if [[ -f "$backup_dir/codex-managed-config-parent-existed" ]]; then
+    managed_parent_existed="$(/bin/cat "$backup_dir/codex-managed-config-parent-existed")" || return 1
+    if [[ "$managed_parent_existed" == "0" ]] && path_is_directory "$CODEX_MANAGED_CONFIG_DIR"; then
+      run_with_privilege /bin/rmdir "$CODEX_MANAGED_CONFIG_DIR" 2>/dev/null || true
+    fi
   fi
 
-  reload_restored_launch_agent || return 1
+  if [[ "$restore_agent" == 1 && "$(/bin/cat "$backup_dir/launch-agent-was-loaded" 2>/dev/null || printf 1)" == 1 ]]; then
+    reload_restored_launch_agent || restore_status=1
+  fi
+  [[ "$restore_status" == 0 ]] || { die "LaunchAgent restore incomplete; backup retained at $backup_dir"; return 1; }
 }
 
 install_app() {
@@ -2854,6 +2970,7 @@ install_app() {
     return 1
   fi
 
+  record_changed_target "$CC_SWITCH_APP_PATH" || return 1
   remove_managed_target "$CC_SWITCH_APP_PATH" || {
     /bin/rm -rf "$work_dir"
     return 1
@@ -2978,9 +3095,9 @@ choose_codex_config_install_mode() {
       fi
     else
       if [[ "$requires_explicit_overwrite" == "1" ]]; then
-        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R23 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R24 标准配置完整覆盖？[y/N] ' >/dev/tty
       else
-        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R23 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R24 标准配置完整覆盖？[y/N] ' >/dev/tty
       fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
@@ -3185,12 +3302,25 @@ install_golden_settings() {
     return 1
   fi
   staged_settings="$work_dir/settings.json"
-  if ! render_template \
+  if [[ -f "$target_settings" ]]; then
+    # Retain language, tray, theme and other user preferences; update only
+    # required Codex routing/history fields through the existing merge helper.
+    if ! /bin/cp -p "$target_settings" "$staged_settings" \
+      || ! update_settings_json "$staged_settings" "$MODELHUB_PROVIDER_ID" \
+      || ! plutil_set_value /usr/bin/plutil "$staged_settings" firstRunNoticeConfirmed -bool true \
+      || ! plutil_set_value /usr/bin/plutil "$staged_settings" proxyConfirmed -bool true; then
+      /bin/rm -rf "$work_dir" || true
+      return 1
+    fi
+  elif ! render_template \
     "$golden_settings" \
     "$staged_settings" \
     '__USER_HOME__' \
-    "$user_home" \
-    || ! /bin/chmod 0600 "$staged_settings" \
+    "$user_home"; then
+    /bin/rm -rf "$work_dir" || true
+    return 1
+  fi
+  if ! /bin/chmod 0600 "$staged_settings" \
     || ! validate_golden_settings "$staged_settings"; then
     /bin/rm -rf "$work_dir" || true
     return 1
@@ -3225,6 +3355,7 @@ install_runtime_files() {
     return 1
   fi
 
+  record_changed_target "$MODEL_CATALOG_PATH" || return 1
   if ! /usr/bin/install -m 600 \
     "$resources_dir/assets/models-modelhub-1m.json" \
     "$MODEL_CATALOG_PATH"; then
@@ -3232,6 +3363,7 @@ install_runtime_files() {
     return 1
   fi
 
+  record_changed_target "$CODEX_CONFIG_PATH" || return 1
   case "$CODEX_CONFIG_INSTALL_MODE" in
     merge)
       install_merged_golden_codex_config \
@@ -3252,20 +3384,21 @@ install_runtime_files() {
       return 1
       ;;
   esac
-  install_codex_managed_config \
-    "$resources_dir/templates/codex-managed-config.toml" \
-    || return 1
+  # Remote/mobile system routing is explicitly opt-in through CC Switch, not installation.
+  record_changed_target "$CC_SWITCH_DATABASE_PATH" || return 1
   install_golden_database \
     "$resources_dir/golden/cc-switch.db" \
     "$CC_SWITCH_DATABASE_PATH" \
     "$INSTALL_USER_HOME" \
     || return 1
+  record_changed_target "$CC_SWITCH_SETTINGS_PATH" || return 1
   install_golden_settings \
     "$resources_dir/golden/settings.json" \
     "$CC_SWITCH_SETTINGS_PATH" \
     "$INSTALL_USER_HOME" \
     || return 1
 
+  record_changed_target "$ENV_HELPER_PATH" || return 1
   if ! /usr/bin/install -m 700 \
     "$resources_dir/templates/load-modelhub-env.sh" \
     "$ENV_HELPER_PATH"; then
@@ -3291,6 +3424,7 @@ install_runtime_files() {
     die "rendered LaunchAgent is invalid"
     return 1
   fi
+  record_changed_target "$LAUNCH_AGENT_PATH" || return 1
   if ! /usr/bin/install -m 600 "$plist_work_file" "$LAUNCH_AGENT_PATH"; then
     /bin/rm -rf "$plist_work_dir" || true
     die "failed to install the ModelHub LaunchAgent"
@@ -3700,7 +3834,7 @@ restore_keychain_after_failed_install() {
 restore_launchd_environment_after_failed_install() {
   local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
 
-  if [[ "$LAUNCHD_ENVIRONMENT_SNAPSHOT_READY" != "1" ]]; then
+  if [[ "$LAUNCHD_ENVIRONMENT_SNAPSHOT_READY" != "1" || "$LAUNCHD_ENVIRONMENT_CHANGED_BY_RUN" != 1 ]]; then
     return 0
   fi
   if [[ "$LAUNCHD_MODELHUB_AK_EXISTED_BEFORE_RUN" == "1" ]]; then
@@ -3781,6 +3915,15 @@ configure_keychain() {
   if ! modelhub_ak="$(read_modelhub_ak)"; then
     return 1
   fi
+  local keychain_value_changed=0
+  if [[ "$find_status" == 0 && "$KEYCHAIN_PREVIOUS_AK" != "$modelhub_ak" ]]; then
+    keychain_value_changed=1
+  fi
+  if ! printf '%s\n' "$keychain_value_changed" >"$ACTIVE_BACKUP_DIR/keychain-value-changed"; then
+    modelhub_ak=''
+    die 'failed to record nonsecret Keychain change metadata'
+    return 1
+  fi
   MODELHUB_EXPECTED_AK="$modelhub_ak"
   KEYCHAIN_UPDATED_BY_RUN=1
   if ! "$security_bin" add-generic-password \
@@ -3840,19 +3983,77 @@ delete_keychain_item() {
 }
 
 install_launch_agent() {
-  local launchctl_bin="${CC_SWITCH_LAUNCHCTL_BIN:-/bin/launchctl}"
-  local user_id
-  user_id="$(/usr/bin/id -u)"
-
-  unload_launch_agent
-  if ! "$launchctl_bin" bootstrap "gui/$user_id" "$LAUNCH_AGENT_PATH" >/dev/null; then
+  local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
+  local plutil_bin="$(installer_tool_path CC_SWITCH_PLUTIL_BIN /usr/bin/plutil)"
+  local sleep_bin="$(installer_tool_path CC_SWITCH_SLEEP_BIN /bin/sleep)"
+  local domain job_output job_state last_exit attempts attempt=1
+  if [[ -L "$LAUNCH_AGENT_PATH" || ! -f "$LAUNCH_AGENT_PATH" || ! -x "$ENV_HELPER_PATH" ]] \
+    || ! "$plutil_bin" -lint "$LAUNCH_AGENT_PATH" >/dev/null 2>&1; then
+    die 'ModelHub LaunchAgent plist or helper is invalid'
+    return 1
+  fi
+  domain="$(launch_agent_domain)" || return 1
+  unload_launch_agent || return 1
+  LAUNCHD_ENVIRONMENT_CHANGED_BY_RUN=1
+  if ! "$launchctl_bin" bootstrap "$domain" "$LAUNCH_AGENT_PATH" >/dev/null 2>&1; then
     die "failed to bootstrap ModelHub environment LaunchAgent"
     return 1
   fi
-  if ! "$ENV_HELPER_PATH"; then
+  if ! "$ENV_HELPER_PATH" >/dev/null 2>&1; then
     die "failed to load ModelHub environment for the current login session"
     return 1
   fi
+  attempts="$(launch_agent_poll_attempts)" || return 1
+  while [[ "$attempt" -le "$attempts" ]]; do
+    if ! job_output="$("$launchctl_bin" print "$domain/$LAUNCH_AGENT_LABEL" 2>/dev/null)"; then
+      die 'ModelHub LaunchAgent is missing after bootstrap'
+      return 1
+    fi
+    job_state="$(printf '%s\n' "$job_output" | awk '/^[[:space:]]*state = / { sub(/^[[:space:]]*state = /, ""); sub(/[[:space:]]*$/, ""); print; exit }')"
+    last_exit="$(printf '%s\n' "$job_output" | awk '/^[[:space:]]*last exit code = / { sub(/^[[:space:]]*last exit code = /, ""); sub(/[[:space:]]*$/, ""); print; exit }')"
+    job_output=''
+    # A running job can still expose the previous run's exit code. macOS also
+    # reports "(never exited)" before the first completion; neither is failure.
+    case "$job_state" in
+      running|spawning|'spawn scheduled') ;;
+      *)
+        case "$last_exit" in
+          0)
+            verify_launch_agent_environment || return 1
+            return 0
+            ;;
+          ''|'(never exited)') ;;
+          *)
+            if [[ "$last_exit" =~ ^-?[0-9]+$ ]]; then
+              die "ModelHub LaunchAgent helper failed (exit code $last_exit)"
+            else
+              # Do not echo arbitrary launchctl output: it can contain secrets.
+              die 'ModelHub LaunchAgent helper reported an unrecognized completion status'
+            fi
+            return 1
+            ;;
+        esac
+        ;;
+    esac
+    if [[ "$attempt" -lt "$attempts" ]]; then "$sleep_bin" 1 || return 1; fi
+    attempt=$((attempt + 1))
+  done
+  die 'ModelHub LaunchAgent helper did not report completion within 30 seconds'
+}
+
+verify_launch_agent_environment() {
+  local security_bin="$(installer_tool_path CC_SWITCH_SECURITY_BIN /usr/bin/security)"
+  local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
+  local keychain_ak='' launchd_ak='' codex_cli=''
+  if ! keychain_ak="$("$security_bin" find-generic-password -a "$(keychain_account_name)" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)" \
+    || ! launchd_ak="$("$launchctl_bin" getenv MODELHUB_AK 2>/dev/null)" \
+    || ! codex_cli="$("$launchctl_bin" getenv CODEX_CLI_PATH 2>/dev/null)" \
+    || [[ -z "$keychain_ak" || "$keychain_ak" != "$launchd_ak" || "$codex_cli" != '/Applications/ChatGPT.app/Contents/Resources/codex' ]]; then
+    keychain_ak='' launchd_ak='' codex_cli=''
+    die 'ModelHub LaunchAgent environment readback failed'
+    return 1
+  fi
+  keychain_ak='' launchd_ak='' codex_cli=''
 }
 
 quit_apps() {
@@ -4030,7 +4231,7 @@ explain_administrator_password() {
   printf '%s\n' \
     '接下来 macOS 会请求管理员权限。' \
     '请输入当前 Mac 登录用户的管理员密码（不是 MODELHUB_AK）。输入时终端不会显示字符，输完按回车。' \
-    '该权限用于检查或写入 /Applications 和 /etc/codex 等系统位置。' \
+    '该权限用于检查或写入 /Applications。R24 安装不访问系统 Codex 远程路由配置。' \
     >&2
 }
 
@@ -4040,7 +4241,6 @@ prepare_application_permissions() {
   NEEDS_SUDO=0
   /bin/mkdir -p "$INSTALL_APPLICATIONS_DIR" 2>/dev/null || true
   if [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]] \
-    || path_creation_requires_privilege "$CODEX_MANAGED_CONFIG_DIR" \
     || path_tree_requires_privilege "$CC_SWITCH_APP_PATH" \
     || { [[ ! -d "$INSTALL_APPLICATIONS_DIR/ChatGPT.app" ]] \
       && [[ ! -w "$INSTALL_APPLICATIONS_DIR" ]]; }; then
@@ -4049,6 +4249,30 @@ prepare_application_permissions() {
     explain_administrator_password
     if ! "$sudo_bin" -v; then
       die "administrator permission is required to install CC Switch"
+      return 1
+    fi
+  fi
+}
+
+prepare_backup_restore_permissions() {
+  local backup_dir="$1"
+  local sudo_bin
+  validate_backup_manifest "$backup_dir" || return 1
+  prepare_application_permissions || return 1
+  # Only an explicit legacy/journalled system restore may inspect /etc/codex.
+  # Default R24 installation and its backups never enter this branch.
+  if ! /usr/bin/awk -F '\t' -v target="$CODEX_MANAGED_CONFIG_PATH" \
+    '$1 == target { found=1 } END { exit(found ? 0 : 1) }' "$backup_dir/manifest.tsv" \
+    || ! backup_target_was_changed "$backup_dir" "$CODEX_MANAGED_CONFIG_PATH"; then
+    return 0
+  fi
+  if [[ "$NEEDS_SUDO" != 1 ]] && { path_creation_requires_privilege "$CODEX_MANAGED_CONFIG_DIR" \
+    || path_tree_requires_privilege "$CODEX_MANAGED_CONFIG_PATH"; }; then
+    NEEDS_SUDO=1
+    sudo_bin="$(sudo_command)"
+    printf '此旧版备份包含系统 Codex 路由；恢复 /etc/codex 需要当前 Mac 登录用户的管理员密码，不是 MODELHUB_AK。授权成功前不会退出应用或恢复文件。\n' >&2
+    if ! "$sudo_bin" -v; then
+      die 'administrator permission is required to restore the legacy system Codex routing backup'
       return 1
     fi
   fi
@@ -4063,6 +4287,14 @@ extract_verified_resources() {
   fi
 }
 
+backup_launch_agent_needs_restore() {
+  local backup_dir="$1"
+  if [[ "$TRANSACTION_GUARD_ACTIVE" == 1 && "$LAUNCH_AGENT_CHANGED_BY_RUN" == 0 ]]; then
+    return 1
+  fi
+  [[ ! -f "$backup_dir/changed-targets.tsv" || -f "$backup_dir/launch-agent-changed" ]]
+}
+
 rollback_failed_install() {
   local rollback_status=0
   local restore_allowed=1
@@ -4075,8 +4307,13 @@ rollback_failed_install() {
     rollback_status=1
     restore_allowed=0
   fi
-  unload_launch_agent
-  clear_runtime_environment
+  if [[ -n "$ACTIVE_BACKUP_DIR" ]] && backup_launch_agent_needs_restore "$ACTIVE_BACKUP_DIR"; then
+    if ! unload_launch_agent; then
+      TRANSACTION_ROLLBACK_RUNNING=0
+      die "automatic rollback cannot safely unload LaunchAgent; no credentials or runtime files restored; backup retained at $ACTIVE_BACKUP_DIR"
+      return 1
+    fi
+  fi
   restore_keychain_after_failed_install || rollback_status=1
   if [[ -n "$ACTIVE_BACKUP_DIR" && "$restore_allowed" == "1" ]]; then
     restore_backup "$ACTIVE_BACKUP_DIR" || rollback_status=1
@@ -4087,6 +4324,9 @@ rollback_failed_install() {
   fi
   clear_modelhub_credential_transaction_state
   TRANSACTION_ROLLBACK_RUNNING=0
+  if [[ "$rollback_status" != 0 ]]; then
+    die "automatic rollback incomplete; backup retained at $ACTIVE_BACKUP_DIR"
+  fi
   return "$rollback_status"
 }
 
@@ -4139,6 +4379,16 @@ run_install_transaction() {
   local health_timeout="${CC_SWITCH_INSTALLER_HEALTH_TIMEOUT:-30}"
   local routing_timeout="${CC_SWITCH_INSTALLER_ROUTING_TIMEOUT:-30}"
 
+  # Stop the old job before replacing any of its files or changing the default provider.
+  # Persist rollback intent first; failed intent writes must not mutate launchd.
+  : >"$ACTIVE_BACKUP_DIR/launch-agent-changed" || return 1
+  if ! unload_launch_agent; then
+    if [[ "$LAUNCH_AGENT_CHANGED_BY_RUN" == 0 ]]; then
+      /bin/rm -f "$ACTIVE_BACKUP_DIR/launch-agent-changed" || return 1
+    fi
+    return 1
+  fi
+  LAUNCH_AGENT_CHANGED_BY_RUN=1
   progress 6 8 '安装 CC Switch，并写入已确认的配置策略'
   install_app "$asset_dir/$APP_ASSET" || return 1
   install_runtime_files "$resources_dir" || return 1
@@ -4174,8 +4424,11 @@ perform_install() {
     || return 1
   LAUNCHER_FAILURE_SNAPSHOT_READY=0
   LAUNCHER_REPLACED_BY_RUN=0
+  LAUNCH_AGENT_CHANGED_BY_RUN=0
+  LAUNCHD_ENVIRONMENT_CHANGED_BY_RUN=0
 
   configure_install_paths || return 1
+  validate_existing_codex_directory || return 1
   operating_system="${CC_SWITCH_INSTALLER_TEST_OS:-$(/usr/bin/uname -s)}"
   architecture="${CC_SWITCH_INSTALLER_TEST_ARCH:-$(/usr/bin/uname -m)}"
   major_version="${CC_SWITCH_INSTALLER_TEST_MACOS_MAJOR:-$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)}"
@@ -4197,8 +4450,29 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R23 安装器、CC Switch 和配置资源'
-  if [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+  progress 3 8 '下载并校验 R24 安装器、CC Switch 和配置资源'
+  if [[ -n "$LOCAL_ASSETS_DIR" ]]; then
+    if [[ ! -d "$LOCAL_ASSETS_DIR" || -L "$LOCAL_ASSETS_DIR" ]]; then
+      cleanup_transaction_stage || true
+      die 'local assets directory is missing or unsafe; no remote fallback was attempted'
+      return 1
+    fi
+    local local_asset
+    asset_dir="$stage_dir/assets"
+    /bin/mkdir -m 700 "$asset_dir" || { cleanup_transaction_stage || true; return 1; }
+    for local_asset in install.sh "$APP_ASSET" "$RESOURCES_ASSET" "$CHECKSUM_ASSET"; do
+      if [[ ! -f "$LOCAL_ASSETS_DIR/$local_asset" || -L "$LOCAL_ASSETS_DIR/$local_asset" ]]; then
+        cleanup_transaction_stage || true
+        die "local asset is missing, non-regular or a symlink: $local_asset"
+        return 1
+      fi
+      # Validate the private snapshot that will actually be installed, not a
+      # mutable caller directory. Preserve symlinks during copy so verification
+      # rejects a source swapped to a symlink between inspection and copying.
+      /bin/cp -P "$LOCAL_ASSETS_DIR/$local_asset" "$asset_dir/$local_asset" \
+        || { cleanup_transaction_stage || true; return 1; }
+    done
+  elif [[ "${CC_SWITCH_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
     asset_dir="${CC_SWITCH_INSTALLER_ASSET_DIR:?test asset directory is required}"
   else
     asset_dir="$stage_dir/assets"
@@ -4255,6 +4529,16 @@ perform_install() {
     cleanup_transaction_stage || true
     return 1
   }
+  printf '本次安装备份：%s\n' "$ACTIVE_BACKUP_DIR" >&2
+  local launch_domain launch_state
+  launch_domain="$(launch_agent_domain)" || { cleanup_transaction_stage || true; return 1; }
+  if launch_agent_state "$launch_domain/$LAUNCH_AGENT_LABEL"; then launch_state=0; else launch_state=$?; fi
+  case "$launch_state" in
+    0) LAUNCH_AGENT_WAS_LOADED=1 ;;
+    1) LAUNCH_AGENT_WAS_LOADED=0 ;;
+    *) cleanup_transaction_stage || true; return 1 ;;
+  esac
+  printf '%s\n' "$LAUNCH_AGENT_WAS_LOADED" >"$ACTIVE_BACKUP_DIR/launch-agent-was-loaded" || return 1
   prepare_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || {
     cleanup_transaction_stage || true
     return 1
@@ -4304,6 +4588,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
+  printf '\nR24 默认关闭移动端远程会话，不读取或修改 /etc/codex/managed_config.toml。若升级前 R23 或其他工具曾写入系统路由，该旧策略可能仍然生效；请在 CC Switch 中检查远程会话开关，旧策略不会被安装器自动移除。\n' >&2
   printf '\n安装完成：默认使用 ModelHub；可在 CC Switch 的 Codex 供应商列表中一键切换到 OpenAI Official，再切回 ModelHub。ModelHub 模式需要 CC Switch 保持运行；Official 模式恢复直连。切换后请重启 Codex；历史迁移完成后可继续旧任务，若个别任务包含新模型无法解密的推理内容，再新建任务。\n' >&2
 }
 
@@ -4327,23 +4612,33 @@ rollback_latest() {
     return 1
   fi
 
-  prepare_application_permissions || return 1
+  prepare_backup_restore_permissions "$latest_backup" || return 1
   quit_apps || return 1
-  unload_launch_agent
-  clear_runtime_environment
+  printf '恢复安装备份：%s\n' "$latest_backup" >&2
+  if backup_launch_agent_needs_restore "$latest_backup"; then
+    unload_launch_agent || { die "rollback cannot safely unload LaunchAgent; backup retained at $latest_backup"; return 1; }
+  fi
   keychain_existed="$(/bin/cat "$latest_backup/keychain-existed" 2>/dev/null || printf '1')"
   if [[ "$keychain_existed" == "0" ]]; then
     delete_keychain_item || return 1
   fi
-  restore_backup "$latest_backup" || return 1
+  restore_backup "$latest_backup" || { die "rollback incomplete; backup retained at $latest_backup"; return 1; }
+  if [[ "$keychain_existed" == 1 \
+    && "$(/bin/cat "$latest_backup/keychain-value-changed" 2>/dev/null || printf 0)" == 1 ]]; then
+    printf '文件和 LaunchAgent 已按备份恢复，但旧 MODELHUB_AK 无法从文件备份恢复；已保留当前 Keychain 凭据。如需旧 AK，请重新输入。凭据并未完整回滚。备份：%s\n' "$latest_backup" >&2
+  fi
 }
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--help | --rollback latest]
+Usage: install.sh [--local-assets-dir PATH | --help | --rollback latest]
 
 Install the CC Switch ModelHub integration, or restore the most recent
 completed installer backup.
+Use --local-assets-dir with the directory containing install.sh, the arm64 app
+ZIP, modelhub-installer-resources.tar.gz and SHA256SUMS.txt. Local assets undergo
+the same checksum, archive, schema and signature validation; no download fallback.
+Remote/mobile system routing is disabled by default and is configured in CC Switch.
 EOF
 }
 
@@ -4365,6 +4660,14 @@ main() {
         return 1
       fi
       rollback_latest
+      ;;
+    --local-assets-dir)
+      if [[ $# -ne 2 || -z "$2" ]]; then
+        die 'usage: install.sh --local-assets-dir PATH'
+        return 1
+      fi
+      LOCAL_ASSETS_DIR="$2"
+      perform_install
       ;;
     *)
       die "unknown argument: $1"

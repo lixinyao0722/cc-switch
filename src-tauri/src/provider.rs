@@ -87,6 +87,16 @@ impl Provider {
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
+    /// Third-party managed OAuth (xai_oauth, github_copilot, …): the real
+    /// credential is injected per-request by the local proxy, so the card is
+    /// keyless by design and its stored config is only an upstream snapshot.
+    /// `codex_oauth` is deliberately excluded — the official ChatGPT login
+    /// in auth.json IS its credential, so the `requires_openai_auth = true`
+    /// fallback is its correct shape, never a legacy leftover.
+    pub fn uses_proxy_injected_oauth(&self) -> bool {
+        self.is_xai_oauth() || self.is_github_copilot()
+    }
+
     /// Whether the provider form's "auth field" was explicitly set to
     /// ANTHROPIC_API_KEY. The form only persists `meta.apiKeyField` for the
     /// non-default choice, so `None` means the default ANTHROPIC_AUTH_TOKEN.
@@ -469,6 +479,11 @@ pub struct LocalProxyRequestOverrides {
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_session_header_adapter: Option<CodexSessionHeaderAdapter>,
+    #[serde(
+        rename = "codexRemoteSessions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_remote_sessions: Option<bool>,
     #[serde(rename = "retry429", skip_serializing_if = "Option::is_none")]
     pub retry_429: Option<Retry429Config>,
     #[serde(rename = "admissionControl", skip_serializing_if = "Option::is_none")]
@@ -502,6 +517,7 @@ impl LocalProxyRequestOverrides {
         self.headers.is_empty()
             && self.body.is_none()
             && self.codex_session_header_adapter.is_none()
+            && self.codex_remote_sessions.is_none()
             && self.retry_429.is_none()
             && self.admission_control.is_none()
             && self.context_optimization.is_none()
@@ -1098,6 +1114,30 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn proxy_injected_oauth_excludes_codex_oauth() {
+        let mut provider = Provider::with_id("p".to_string(), "P".to_string(), json!({}), None);
+        assert!(!provider.uses_proxy_injected_oauth());
+
+        for (provider_type, expected) in [
+            ("xai_oauth", true),
+            ("github_copilot", true),
+            // the official ChatGPT login IS this card's credential — its
+            // auth.json fallback shape must never be neutralized
+            ("codex_oauth", false),
+        ] {
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some(provider_type.to_string()),
+                ..ProviderMeta::default()
+            });
+            assert_eq!(
+                provider.uses_proxy_injected_oauth(),
+                expected,
+                "{provider_type}"
+            );
+        }
+    }
+
+    #[test]
     fn provider_meta_serializes_pricing_model_source() {
         let meta = ProviderMeta {
             pricing_model_source: Some("response".to_string()),
@@ -1177,10 +1217,21 @@ mod tests {
 
     #[test]
     fn provider_meta_roundtrips_modelhub_proxy_compat() {
+        let mobile: LocalProxyRequestOverrides =
+            serde_json::from_value(json!({"codexRemoteSessions": false})).unwrap();
+        assert!(
+            !mobile.is_empty(),
+            "explicit opt-out must survive metadata saving"
+        );
+        assert_eq!(
+            serde_json::to_value(&mobile).unwrap()["codexRemoteSessions"],
+            false
+        );
         let overrides = LocalProxyRequestOverrides {
             headers: HashMap::new(),
             body: Some(json!({ "max_output_tokens": 128000 })),
             codex_session_header_adapter: Some(CodexSessionHeaderAdapter::Modelhub),
+            codex_remote_sessions: Some(true),
             retry_429: Some(Retry429Config {
                 max_retries: 10,
                 base_delay_ms: 1_000,
@@ -1211,6 +1262,7 @@ mod tests {
             value["localProxyRequestOverrides"],
             json!({
                 "codexSessionHeaderAdapter": "modelhub",
+                "codexRemoteSessions": true,
                 "blockCodexActivitySummaries": true,
                 "codexActivitySummaryMode": "map",
                 "codexMetadataModel": "gpt-5.6-sol",
