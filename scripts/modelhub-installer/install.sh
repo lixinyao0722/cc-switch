@@ -7,9 +7,9 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260911-r24'
+readonly RELEASE_TAG='modelhub-installer-20260912-r24'
 readonly INSTALLER_ASSET='install.sh'
-readonly APP_ASSET='CC-Switch-ModelHub-3.20.2-arm64.app.zip'
+readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
 readonly CHECKSUM_ASSET='SHA256SUMS.txt'
 readonly EXPECTED_CODEX_TEAM_ID='2DC432GLL2'

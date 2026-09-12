@@ -13,11 +13,11 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
-## 安装（ModelHub R24，2026-09-12 安装器修复）
+## 安装（ModelHub R24 正式版，2026-09-12）
 
-2026-09-12 的安装器修复版解决第 8 步把 `(never exited)`（helper 尚未退出）误判为失败的问题，安装和回滚共用此修复。请使用修复版完整资源目录，不要继续运行 2026-09-11 初版安装器。App 版本和二进制不变；细节见 [R24 本地交付说明](modelhub-r24-local-delivery-zh.md)。
+R24 正式版包含第 8 步 `(never exited)`（helper 尚未退出）的安装与回滚修复，请勿继续运行 2026-09-11 初版安装器。应用版本统一提高为 `3.24.0`，消除与当前官方 `3.20.3` 比较产生的升级提示；功能范围不因此扩大。细节见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
 
-R24 本次为本地交付，应用版本 3.20.2。安装命令、官方选择性同步清单和验收边界见 [R24 本地交付说明](modelhub-r24-local-delivery-zh.md)。下面的 latest Release 命令仅用于已发布版本，不能用来安装尚未发布的 R24 本地包。R24 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。
+正式发布标签为 `modelhub-installer-20260912-r24`，资源由本 fork 的 GitHub Release 提供。R24 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 

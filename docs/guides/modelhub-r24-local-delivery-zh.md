@@ -1,8 +1,10 @@
-# ModelHub R24 本地交付与验收
+# ModelHub R24 正式发布与验收
 
 ## 交付范围
 
-R24 基于 CC Switch 3.20.2，分支为 `feat/modelhub-r24`。本次只构建本地 Apple Silicon 安装包并提 PR，不创建 GitHub Release、不自动安装、不合入 main。R24-001（切换一致性）、R24-002（LaunchAgent 替换和回滚）、R24-004（手机远程会话开关）为本次实现范围；R24-003 按下面的清单选择性同步。
+R24 的功能基线为 CC Switch 3.20.2 加选择性补丁；正式包的应用版本为 `3.24.0`，用于消除低于当前官方 3.20.3 的升级提示。此版本号是定制版发布编号，不意味着完整合入官方 3.20.3 或未来的 3.24 功能。更新渠道保持不变，官方将来超过 3.24.0 时仍可能提示。
+
+按用户 2026-09-12 的正式发布指令，`feat/modelhub-r24` 通过 PR #23 合入实际主分支 `main`（仓库不存在 `master`），发布 Apple Silicon arm64 包。固定标签为 `modelhub-installer-20260912-r24`。R24-001（切换一致性）、R24-002（LaunchAgent 替换和回滚）、R24-004（手机远程会话开关）及下述 R24-003 选择性同步全部保留；发布过程不自动安装到用户机器。
 
 ### 官方同步范围
 
@@ -30,13 +32,21 @@ R24 基于 CC Switch 3.20.2，分支为 `feat/modelhub-r24`。本次只构建本
 
 初版 R24 在第 8 步把 macOS 的 `last exit code = (never exited)` 当成非零退出码，可能同时误报安装失败和恢复旧 LaunchAgent 失败。修复版等待当前 helper 真正退出：运行中不使用上次退出码，尚未退出继续限时轮询，完成后核对退出码及环境。真实失败、超时和无法识别的状态仍然失败退出，不输出原始 launchd 环境。
 
-本次只更新安装器、测试和说明，App 二进制沿用已验证的 R24 构建（源码 `690e88c56de04fadb78640009dd34179dc440c89`）。必须使用修复版目录中配套的安装器、资源包和 SHA256SUMS.txt，不要与初版文件混用。
+早前本地 fix1 仅更新安装器、测试和说明，沿用源码 `690e88c56de04fadb78640009dd34179dc440c89` 的 3.20.2 App。正式 3.24.0 包则从合入后的主分支重新构建。必须使用各目录内配套的安装器、App、资源包和 SHA256SUMS.txt，不要混用。
 
 修复后完整安装器回归 150/150 通过（新增 7 组用例），包含真实脚本的隔离安装、重复安装、自动回滚和手动恢复。Bash 3.2 语法及差异检查通过，独立只读审查无阻断项。未重新运行用户机器上的实际安装或 ModelHub LaunchAgent，仍需安装后验证真实环境。
 
-## 本地安装方式
+## 安装（2026-09-12）
 
-完整安装需要同一目录中的 `install.sh`、`CC-Switch-ModelHub-3.20.2-arm64.app.zip`、`modelhub-installer-resources.tar.gz` 和 `SHA256SUMS.txt`。
+正式版固定入口：
+
+```zsh
+curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/download/modelhub-installer-20260912-r24/install.sh | /bin/bash -s
+```
+
+也可以从该 Release 下载完整资源后离线使用本地资产：
+
+完整安装需要同一目录中的 `install.sh`、`CC-Switch-ModelHub-3.24.0-arm64.app.zip`、`modelhub-installer-resources.tar.gz` 和 `SHA256SUMS.txt`。
 
 先退出 CC Switch 和 ChatGPT，校验包后以当前 GUI 登录用户执行（不要用 `sudo bash`）：
 
@@ -46,7 +56,7 @@ shasum -a 256 -c SHA256SUMS.txt
 /bin/bash ./install.sh --local-assets-dir "$PWD"
 ```
 
-`--local-assets-dir` 从本地读取完整安装资源，不从 latest Release 取旧包。App 是本地 ad-hoc 签名版本，不宣称经过 Apple 公证；如 macOS 拦截，按系统提示在“隐私与安全性”中确认来源。不要全局关闭 Gatekeeper。安装器在需要写系统位置时申请管理员权限；AK 通过安装器无回显输入，不写进命令行。
+`--local-assets-dir` 从本地读取完整安装资源，不从 latest Release 取包。App 使用 ad-hoc 签名，不宣称经过 Apple 公证；如 macOS 拦截，按系统提示在“隐私与安全性”中确认来源。不要全局关闭 Gatekeeper。安装器在需要写系统位置时申请管理员权限；AK 通过安装器无回显输入，不写进命令行。
 
 注意：这是包含 Golden 配置的完整安装包，会替换 CC Switch 供应商数据库（包括已有自定义供应商），并在安装前备份。Codex 个性化配置默认合并；CC Switch 界面偏好保留。仅希望升级 App、保留全部现有供应商时，不要直接执行此完整安装命令。
 

@@ -1491,13 +1491,13 @@ test_preflight_verifies_all_release_checksums() {
   local case_dir="$TEST_TMP/preflight-checksums"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.20.2-arm64.app.zip \
+      CC-Switch-ModelHub-3.24.0-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1513,14 +1513,14 @@ test_preflight_rejects_unexpected_checksum_entries() {
   local case_dir="$TEST_TMP/preflight-extra-checksum"
   mkdir -p "$case_dir"
   printf 'installer\n' >"$case_dir/install.sh"
-  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip"
+  printf 'app\n' >"$case_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$case_dir/modelhub-installer-resources.tar.gz"
   printf 'extra\n' >"$case_dir/not-allowed.txt"
   (
     cd "$case_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.20.2-arm64.app.zip \
+      CC-Switch-ModelHub-3.24.0-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -1717,10 +1717,10 @@ test_preflight_downloads_from_immutable_release_tag() {
   local curl_stub="$case_dir/curl"
   mkdir -p "$remote_dir" "$output_dir"
   printf 'installer\n' >"$remote_dir/install.sh"
-  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip"
+  printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260911-r24'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260912-r24'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1733,7 +1733,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260911-r24/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260912-r24/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -1742,7 +1742,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     download_release_assets "$output_dir"
 
   assert_contains "$output_dir/install.sh" 'installer'
-  assert_contains "$output_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip" 'app'
+  assert_contains "$output_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip" 'app'
   assert_contains "$output_dir/modelhub-installer-resources.tar.gz" 'resources'
   assert_contains "$output_dir/SHA256SUMS.txt" 'checksums'
 }
@@ -2262,7 +2262,7 @@ create_fake_app_zip() {
   local case_dir="$1"
   create_packager_app_zip \
     "$case_dir" \
-    "$case_dir/assets/CC-Switch-ModelHub-3.20.2-arm64.app.zip"
+    "$case_dir/assets/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
 }
 
 create_transaction_assets() {
@@ -2300,7 +2300,7 @@ create_transaction_assets() {
     cd "$asset_dir"
     shasum -a 256 \
       install.sh \
-      CC-Switch-ModelHub-3.20.2-arm64.app.zip \
+      CC-Switch-ModelHub-3.24.0-arm64.app.zip \
       modelhub-installer-resources.tar.gz \
       >SHA256SUMS.txt
   )
@@ -2514,8 +2514,8 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
 }
 
 test_r24_release_contract() {
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260911-r24'
-  assert_equals "$APP_ASSET" 'CC-Switch-ModelHub-3.20.2-arm64.app.zip'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260912-r24'
+  assert_equals "$APP_ASSET" 'CC-Switch-ModelHub-3.24.0-arm64.app.zip'
   assert_contains "$GOLDEN_CODEX_CONFIG" 'model_provider = "custom"'
   assert_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.custom]'
   assert_not_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.modelhub]'
@@ -3464,9 +3464,9 @@ create_packager_app_zip() {
     '  <key>CFBundlePackageType</key>' \
     '  <string>APPL</string>' \
     '  <key>CFBundleShortVersionString</key>' \
-    '  <string>3.20.2</string>' \
+    '  <string>3.24.0</string>' \
     '  <key>CFBundleVersion</key>' \
-    '  <string>3.20.2</string>' \
+    '  <string>3.24.0</string>' \
     '</dict>' \
     '</plist>' \
     >"$app_dir/Contents/Info.plist"
@@ -3500,10 +3500,10 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260911-r24'"
+    "readonly RELEASE_TAG='modelhub-installer-20260912-r24'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
-    'CC-Switch-ModelHub-3.20.2-arm64.app.zip' \
+    'CC-Switch-ModelHub-3.24.0-arm64.app.zip' \
     'SHA256SUMS.txt' \
     'install.sh' \
     'modelhub-installer-resources.tar.gz' \
@@ -3570,7 +3570,7 @@ test_package_rejects_app_zip_with_invalid_signature() {
   [[ "$status" -ne 0 ]] || fail 'invalid app signature unexpectedly passed packaging'
   [[ "$output" == *'app signature verification failed'* ]] \
     || fail "packager did not report the invalid app signature: $output"
-  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip" ]] \
+  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip" ]] \
     || fail 'invalid app signature still produced a publishable app archive'
 }
 
@@ -3734,7 +3734,7 @@ test_package_rejects_nonempty_output_directory() {
 
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
   assert_contains "$output_dir/CC-Switch-ModelHub-3.19.1-arm64.app.zip" 'old-app'
-  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.20.2-arm64.app.zip" ]] \
+  [[ ! -e "$output_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip" ]] \
     || fail 'failed package run wrote new assets into a non-empty output directory'
 }
 
@@ -3938,7 +3938,7 @@ test_release_smoke_installs_repeats_and_rolls_back_packaged_assets() {
     asset_dir="$case_dir/publish"
     run_packager \
       "$REPO_ROOT/scripts/modelhub-installer" \
-      "$case_dir/assets/CC-Switch-ModelHub-3.20.2-arm64.app.zip" \
+      "$case_dir/assets/CC-Switch-ModelHub-3.24.0-arm64.app.zip" \
       "$asset_dir"
   fi
 

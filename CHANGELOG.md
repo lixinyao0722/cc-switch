@@ -5,6 +5,12 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.24.0-ModelHub-R24] - 2026-09-12
+
+- **正式发布 R24**：包含默认关闭的“支持手机远程会话”、ModelHub/官方切换一致性及失败恢复、LaunchAgent 幂等安装与回滚，以及尚未退出状态的安装器修复。
+- **定制版版本号调整**：应用版本统一为 3.24.0，高于当前官方 3.20.3，消除当前升级提示。功能仍以原 R24 选择性同步范围为准，不代表完整合入官方 3.20.3 或未来 3.24；更新渠道不变，未来官方版本更高时仍可能提示。
+- **安装包**：Apple Silicon arm64，固定发布标签 `modelhub-installer-20260912-r24`；安装器、App 和资源包使用配套 SHA256 校验。App 保持 ad-hoc 签名，不宣称 Apple 公证。
+
 ## [3.20.2-ModelHub-R24-hotfix.1] - 2026-09-12
 
 - **LaunchAgent Completion Detection**: Fix the R24 installer treating macOS `last exit code = (never exited)` as helper failure during installation and rollback. Wait for the current run to complete, ignore stale exit codes while the job is running, and retain bounded timeout and environment readback. Real nonzero exits report the numeric code; unknown status is redacted.
