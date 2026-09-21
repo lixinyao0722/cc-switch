@@ -3,6 +3,7 @@
 //! 通过 OpenAI 兼容的 GET /v1/models 端点获取供应商可用模型列表。
 //! 主要面向第三方聚合站（硅基流动、OpenRouter 等），以及把 Anthropic
 //! 协议挂在兼容子路径上的官方供应商（DeepSeek、Kimi、智谱 GLM 等）。
+//! ModelHub 使用自己的治理查询接口，成功响应会在这里转换成统一模型列表。
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::StatusCode;
@@ -30,10 +31,28 @@ struct ModelEntry {
     owned_by: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelHubModelsResponse {
+    code: i64,
+    message: Option<String>,
+    data: Option<Vec<ModelHubModelEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelHubModelEntry {
+    model_name: String,
+    model_vendor: Option<String>,
+}
+
 const FETCH_TIMEOUT_SECS: u64 = 15;
 const MAX_REQUEST_HEADERS: usize = 64;
 const MAX_HEADER_NAME_BYTES: usize = 256;
 const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MODELHUB_HOST: &str = "aidp.bytedance.net";
+const MODELHUB_ONLINE_PATH: &str = "/api/modelhub/online";
+const MODELHUB_MODELS_PATH: &str = "/api/modelhub/online/query/security_level";
+const MODELHUB_MODELS_URL: &str =
+    "https://aidp.bytedance.net/api/modelhub/online/query/security_level";
 
 /// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
 const ERROR_BODY_MAX_CHARS: usize = 512;
@@ -65,8 +84,12 @@ pub async fn fetch_models(
     request_headers: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<FetchedModel>, String> {
     let candidates = build_models_url_candidates(base_url, is_full_url, models_url_override)?;
-    let headers =
-        build_model_fetch_headers(api_key, api_format, user_agent.as_ref(), request_headers)?;
+    let is_modelhub_catalog = candidates.len() == 1 && is_modelhub_models_url(&candidates[0]);
+    let headers = if is_modelhub_catalog {
+        build_modelhub_fetch_headers(user_agent.as_ref())
+    } else {
+        build_model_fetch_headers(api_key, api_format, user_agent.as_ref(), request_headers)?
+    };
     let client = crate::proxy::http_client::get();
     let mut last_err: Option<String> = None;
     let mut known_secrets = vec![api_key.to_string()];
@@ -93,23 +116,15 @@ pub async fn fetch_models(
         let status = response.status();
 
         if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
+            let body = response
+                .text()
                 .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-            let mut models: Vec<FetchedModel> = resp
-                .data
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| FetchedModel {
-                    id: m.id,
-                    owned_by: m.owned_by,
-                })
-                .collect();
-
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            return Ok(models);
+                .map_err(|e| format!("Failed to read response: {e}"))?;
+            return if is_modelhub_models_url(url) {
+                parse_modelhub_models_response(&body)
+            } else {
+                parse_openai_models_response(&body)
+            };
         }
 
         if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
@@ -132,6 +147,52 @@ pub async fn fetch_models(
         "All candidates failed: {}",
         last_err.unwrap_or_else(|| "no candidates".to_string())
     ))
+}
+
+fn parse_openai_models_response(body: &str) -> Result<Vec<FetchedModel>, String> {
+    let resp: ModelsResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse response: {e}"))?;
+    let mut models: Vec<FetchedModel> = resp
+        .data
+        .unwrap_or_default()
+        .into_iter()
+        .map(|model| FetchedModel {
+            id: model.id,
+            owned_by: model.owned_by,
+        })
+        .collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
+fn parse_modelhub_models_response(body: &str) -> Result<Vec<FetchedModel>, String> {
+    let resp: ModelHubModelsResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse response: {e}"))?;
+    if resp.code != 0 {
+        return Err(format!(
+            "ModelHub API error {}: {}",
+            resp.code,
+            resp.message.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+
+    let mut models = BTreeMap::<String, Option<String>>::new();
+    for entry in resp.data.unwrap_or_default() {
+        let model_name = entry.model_name.trim();
+        if model_name.is_empty() {
+            continue;
+        }
+        let model_vendor = entry
+            .model_vendor
+            .map(|vendor| vendor.trim().to_string())
+            .filter(|vendor| !vendor.is_empty());
+        models.entry(model_name.to_string()).or_insert(model_vendor);
+    }
+
+    Ok(models
+        .into_iter()
+        .map(|(id, owned_by)| FetchedModel { id, owned_by })
+        .collect())
 }
 
 fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
@@ -200,6 +261,14 @@ fn build_model_fetch_headers(
     Ok(headers)
 }
 
+fn build_modelhub_fetch_headers(user_agent: Option<&HeaderValue>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(user_agent) = user_agent {
+        headers.insert(USER_AGENT, user_agent.clone());
+    }
+    headers
+}
+
 /// 构造「模型列表端点」的候选 URL 列表
 ///
 /// 候选顺序：
@@ -225,6 +294,9 @@ pub fn build_models_url_candidates(
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is empty".to_string());
+    }
+    if let Some(modelhub_url) = modelhub_models_url(trimmed) {
+        return Ok(vec![modelhub_url]);
     }
 
     let mut candidates: Vec<String> = Vec::new();
@@ -274,6 +346,24 @@ pub fn build_models_url_candidates(
     }
 
     Ok(unique)
+}
+
+fn modelhub_models_url(base_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(base_url).ok()?;
+    let path = parsed.path();
+    if parsed.host_str() != Some(MODELHUB_HOST)
+        || !(path == MODELHUB_ONLINE_PATH || path.starts_with(&format!("{MODELHUB_ONLINE_PATH}/")))
+    {
+        return None;
+    }
+    Some(MODELHUB_MODELS_URL.to_string())
+}
+
+fn is_modelhub_models_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| {
+        parsed.host_str() == Some(MODELHUB_HOST)
+            && parsed.path().trim_end_matches('/') == MODELHUB_MODELS_PATH
+    })
 }
 
 /// 截断响应体到 [`ERROR_BODY_MAX_CHARS`] 字符，避免 HTML 404 页占用错误串。
@@ -363,6 +453,15 @@ mod tests {
     }
 
     #[test]
+    fn modelhub_fetch_headers_do_not_forward_provider_credentials() {
+        let user_agent = HeaderValue::from_static("cc-switch-test");
+        let headers = build_modelhub_fetch_headers(Some(&user_agent));
+        assert_eq!(headers[USER_AGENT], "cc-switch-test");
+        assert!(!headers.contains_key(AUTHORIZATION));
+        assert!(!headers.contains_key("x-api-key"));
+    }
+
+    #[test]
     fn model_fetch_error_body_redacts_known_header_credentials() {
         let secrets = vec![
             "short".to_string(),
@@ -379,6 +478,80 @@ mod tests {
     fn test_candidates_plain_root() {
         let c = build_models_url_candidates("https://api.siliconflow.cn", false, None).unwrap();
         assert_eq!(c, vec!["https://api.siliconflow.cn/v1/models"]);
+    }
+
+    #[test]
+    fn test_candidates_modelhub_online_uses_governance_endpoint() {
+        let c = build_models_url_candidates(
+            "https://aidp.bytedance.net/api/modelhub/online",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            vec!["https://aidp.bytedance.net/api/modelhub/online/query/security_level"]
+        );
+    }
+
+    #[test]
+    fn test_candidates_modelhub_full_url_uses_governance_endpoint() {
+        let c = build_models_url_candidates(
+            "https://aidp.bytedance.net/api/modelhub/online/responses",
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            vec!["https://aidp.bytedance.net/api/modelhub/online/query/security_level"]
+        );
+    }
+
+    #[test]
+    fn test_candidates_modelhub_override_still_wins() {
+        let c = build_models_url_candidates(
+            "https://aidp.bytedance.net/api/modelhub/online",
+            false,
+            Some("https://catalog.example/models"),
+        )
+        .unwrap();
+        assert_eq!(c, vec!["https://catalog.example/models"]);
+    }
+
+    #[test]
+    fn test_modelhub_catalog_url_recognizes_trailing_slash_and_query() {
+        assert!(is_modelhub_models_url(
+            "https://aidp.bytedance.net/api/modelhub/online/query/security_level/"
+        ));
+        assert!(is_modelhub_models_url(
+            "https://aidp.bytedance.net/api/modelhub/online/query/security_level?model=gpt-5.4"
+        ));
+    }
+
+    #[test]
+    fn test_candidates_do_not_match_modelhub_lookalikes() {
+        let wrong_host = build_models_url_candidates(
+            "https://aidp.bytedance.net.example/api/modelhub/online",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_host,
+            vec!["https://aidp.bytedance.net.example/api/modelhub/online/v1/models"]
+        );
+
+        let wrong_path = build_models_url_candidates(
+            "https://aidp.bytedance.net/api/modelhub/online-preview",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_path,
+            vec!["https://aidp.bytedance.net/api/modelhub/online-preview/v1/models"]
+        );
     }
 
     #[test]
@@ -613,5 +786,37 @@ mod tests {
         let json = r#"{"object":"list","data":[]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         assert!(resp.data.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_modelhub_response_deduplicates_and_sorts_model_names() {
+        let json = r#"{
+            "code": 0,
+            "message": "success",
+            "data": [
+                {"product_name":"azure54","model_name":"gpt-5.4","model_vendor":"azure"},
+                {"product_name":"azure54-backup","model_name":"gpt-5.4","model_vendor":"azure"},
+                {"product_name":"ark-seed","model_name":"seed-2.1-pro","model_vendor":"seed"},
+                {"product_name":"empty","model_name":"  ","model_vendor":"ignored"}
+            ]
+        }"#;
+
+        let models = parse_modelhub_models_response(json).unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| (model.id.as_str(), model.owned_by.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("gpt-5.4", Some("azure")), ("seed-2.1-pro", Some("seed"))]
+        );
+    }
+
+    #[test]
+    fn test_parse_modelhub_response_rejects_api_error() {
+        let json = r#"{"code":1001,"message":"query failed","data":[]}"#;
+        assert_eq!(
+            parse_modelhub_models_response(json).unwrap_err(),
+            "ModelHub API error 1001: query failed"
+        );
     }
 }

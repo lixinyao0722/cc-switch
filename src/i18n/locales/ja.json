@@ -1376,6 +1376,7 @@
     "fetchModelsNotSupported": "このプロバイダーはモデル一覧の取得に対応していません",
     "fetchModelsEndpointNotFound": "利用可能なモデル一覧エンドポイントが見つかりません。Base URL を確認するか、プロバイダーが該当 API を公開しているかご確認ください",
     "fetchModelsTimeout": "リクエストがタイムアウトしました。ネットワーク接続を確認してください",
+    "modelHubModelCatalogHint": "ModelHub は全モデルのガバナンスカタログを返します。この AK に許可されたモデル一覧ではありません。マッピングへ追加する前に利用申請済みか確認してください。",
     "requiredFields": "プロバイダー名、API エンドポイント、API Key、モデルを入力してください"
   },
   "copilot": {

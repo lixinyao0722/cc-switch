@@ -12,11 +12,25 @@ export interface ModelFetchOptions {
   requestHeaders?: Record<string, string>;
 }
 
+export function isModelHubModelCatalogEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.hostname === "aidp.bytedance.net" &&
+      (url.pathname === "/api/modelhub/online" ||
+        url.pathname.startsWith("/api/modelhub/online/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 从供应商获取可用模型列表
  *
  * 使用 OpenAI 兼容的 GET /v1/models 端点。优先用 `modelsUrl` 精确覆写；
  * 否则后端会对 baseURL 生成候选列表并按序尝试（含"剥离 /anthropic 等兼容子路径"兜底）。
+ * ModelHub 地址由后端切换到专用治理查询接口并转换响应。
  */
 export async function fetchModelsForConfig(
   baseUrl: string,

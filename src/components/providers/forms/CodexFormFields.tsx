@@ -47,6 +47,7 @@ import { XaiOAuthSection } from "./XaiOAuthSection";
 import {
   fetchModelsForConfig,
   fetchXaiOauthModels,
+  isModelHubModelCatalogEndpoint,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -487,6 +488,10 @@ export function CodexFormFields({
   // api_backend 声明、请求体也不是 Codex 发出的）——提示文案按 appId 分流，
   // 对应词条在 grokBuild.* 下。
   const isGrokBuild = appId === "grokbuild";
+  const isModelHubEndpoint = useMemo(
+    () => isModelHubModelCatalogEndpoint(codexBaseUrl),
+    [codexBaseUrl],
+  );
   const canEditCatalog = Boolean(onCatalogModelsChange);
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
   const supportsThinking =
@@ -624,9 +629,9 @@ export function CodexFormFields({
       return;
     }
 
-    if (!codexBaseUrl || !codexApiKey) {
+    if (!codexBaseUrl || (!codexApiKey && !isModelHubEndpoint)) {
       showFetchModelsError(null, t, {
-        hasApiKey: !!codexApiKey,
+        hasApiKey: !!codexApiKey || isModelHubEndpoint,
         hasBaseUrl: !!codexBaseUrl,
       });
       return;
@@ -660,6 +665,7 @@ export function CodexFormFields({
   }, [
     codexBaseUrl,
     codexApiKey,
+    isModelHubEndpoint,
     isFullUrl,
     customUserAgent,
     isXaiOauthPreset,
@@ -887,6 +893,11 @@ export function CodexFormFields({
                     "Codex 默认请求的模型，随时可改，无需等待预设更新。留空且配置了模型映射时，默认使用映射第一行。",
                 })}
           </p>
+          {isModelHubEndpoint && (
+            <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+              {t("providerForm.modelHubModelCatalogHint")}
+            </p>
+          )}
           {isDefaultModelOutsideCatalog && (
             <p className="flex flex-wrap items-center gap-x-2 text-xs leading-relaxed text-muted-foreground">
               {t("codexConfig.defaultModelNotInCatalog", {
