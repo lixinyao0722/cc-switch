@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.0-ModelHub-R26] - 2026-09-23
+
 - **ModelHub Catalog 统一**：安装器和 CC Switch 运行时统一使用 `~/.codex/cc-switch-model-catalog.json`。ModelHub 用户新增模型时，会在 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.2 等内置目录基础上合并，不再生成新文件却让 Codex 继续读取旧 `models-modelhub-1m.json`。旧安装器目录只在确认是 ModelHub Provider 时迁移，其他用户自定义目录保持不变。
 - **Low / Medium 推理等级**：ModelHub 桌面配置重新开放 `low`、`medium`，并保留各模型 catalog 中声明的推理等级。
+- **安装包**：Apple Silicon arm64，固定发布标签 `modelhub-installer-20260923-r26`；安装器、App 和资源包使用配套 SHA256 校验。App 版本继续为 3.24.0，保持 ad-hoc 签名，不宣称 Apple 公证。
 
 ## [3.24.0-ModelHub-R25] - 2026-09-23
 

@@ -1749,7 +1749,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r25'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r26'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1762,7 +1762,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260923-r25/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20260923-r26/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2542,8 +2542,8 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
     || fail 'privileged staging test left a candidate directory'
 }
 
-test_r25_release_contract() {
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r25'
+test_r26_release_contract() {
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r26'
   assert_equals "$APP_ASSET" 'CC-Switch-ModelHub-3.24.0-arm64.app.zip'
   assert_contains "$GOLDEN_CODEX_CONFIG" 'model_provider = "custom"'
   assert_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.custom]'
@@ -3529,7 +3529,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260923-r25'"
+    "readonly RELEASE_TAG='modelhub-installer-20260923-r26'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.24.0-arm64.app.zip' \
@@ -4063,7 +4063,7 @@ run_test "managed config rollback restores existing file and mode" test_managed_
 run_test "managed config rollback removes new file and empty directory" test_managed_config_rollback_removes_new_file_and_empty_directory
 run_test "managed config rollback keeps pre-existing empty directory" test_managed_config_rollback_keeps_preexisting_empty_directory
 run_test "managed config install uses private var staging for privileged copy" test_managed_config_install_uses_private_var_staging_for_privileged_copy
-run_test "R25 release contract" test_r25_release_contract
+run_test "R26 release contract" test_r26_release_contract
 run_test "helper exclusive rename preserves exact collision" test_helper_exclusive_rename_preserves_exact_collision
 run_test "merge creates config from empty file" test_merge_creates_config_from_empty_file
 run_test "merge creates config when source is missing" test_merge_creates_config_when_source_is_missing
@@ -4107,7 +4107,7 @@ run_test "preflight rejects golden database without R12 resilience defaults" tes
 run_test "preflight rejects archive symlink and extra file" test_preflight_rejects_archive_symlink_and_extra_file
 run_test "preflight rejects archive special file types" test_preflight_rejects_archive_special_file_types
 run_test "preflight rejects unsafe archive entry names" test_preflight_rejects_unsafe_archive_entry_names
-run_test "R25 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
+run_test "R26 preflight downloads from immutable release tag" test_preflight_downloads_from_immutable_release_tag
 run_test "database merge is idempotent and preserves unrelated rows" test_database_merge_is_idempotent_and_preserves_unrelated_rows
 run_test "database merge reuses existing ModelHub provider ID" test_database_merge_reuses_existing_modelhub_provider_id
 run_test "database merge rejects fixed ID conflict without mutation" test_database_merge_rejects_fixed_id_conflict_without_mutation
@@ -4160,7 +4160,7 @@ run_test "transaction rollback latest restores and removes files" test_transacti
 run_test "transaction rollback without backup reports clear error" test_transaction_rollback_without_backup_reports_clear_error
 run_test "transaction CLI help and argument validation" test_transaction_cli_help_and_argument_validation
 run_test "transaction corrupt backup fails before restore writes" test_transaction_corrupt_backup_fails_before_restore_writes
-run_test "R25 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
+run_test "R26 package builds exact allowlisted release assets" test_package_builds_exact_allowlisted_release_assets
 run_test "package rejects app ZIP with invalid signature" test_package_rejects_app_zip_with_invalid_signature
 run_test "package rejects invalid model catalog" test_package_rejects_invalid_model_catalog
 run_test "package reproducibly renders pinned helper hash" test_package_reproducibly_renders_pinned_helper_hash
