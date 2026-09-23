@@ -319,6 +319,12 @@ test_r17_defaults_include_native_compaction_and_context_controls() {
     "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-sol") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
     $'1050000\t1050000\t100'
   assert_equals \
+    "$(/usr/bin/jq -r '[.models[] | select(.slug == "gpt-6-astra")] | length' "$MODEL_CATALOG")" \
+    '1'
+  assert_equals \
+    "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-6-astra") | [.context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
+    $'1050000\t1050000\t100'
+  assert_equals \
     "$(/usr/bin/jq -r '.models[] | select(.slug == "gpt-5.6-terra" or .slug == "gpt-5.6-luna") | [.slug, .context_window, .max_context_window, .effective_context_window_percent] | @tsv' "$MODEL_CATALOG")" \
     $'gpt-5.6-terra\t272000\t272000\t95\ngpt-5.6-luna\t272000\t272000\t95'
 }
@@ -1554,11 +1560,19 @@ test_model_catalog_validation_rejects_malformed_stale_and_missing_models() {
   /usr/bin/jq \
     '.models |= map(select(.slug != "gpt-5.6-terra"))' \
     "$MODEL_CATALOG" >"$case_dir/missing-terra.json"
+  /usr/bin/jq \
+    '(.models[] | select(.slug == "gpt-6-astra") | .context_window) = 272000' \
+    "$MODEL_CATALOG" >"$case_dir/stale-astra.json"
+  /usr/bin/jq \
+    '.models |= map(select(.slug != "gpt-6-astra"))' \
+    "$MODEL_CATALOG" >"$case_dir/missing-astra.json"
 
   validate_model_catalog "$case_dir/valid.json"
   assert_command_fails validate_model_catalog "$case_dir/malformed.json"
   assert_command_fails validate_model_catalog "$case_dir/stale-gpt55.json"
   assert_command_fails validate_model_catalog "$case_dir/missing-terra.json"
+  assert_command_fails validate_model_catalog "$case_dir/stale-astra.json"
+  assert_command_fails validate_model_catalog "$case_dir/missing-astra.json"
 }
 
 test_resource_archive_rejects_invalid_model_catalog() {

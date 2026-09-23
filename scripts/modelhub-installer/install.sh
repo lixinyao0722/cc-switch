@@ -1013,6 +1013,7 @@ validate_model_catalog() {
           and .[0].effective_context_window_percent == $percent);
     try (
       (.models | type == "array")
+      and exact("gpt-6-astra"; 1050000; 1050000; 100)
       and exact("gpt-5.6-sol"; 1050000; 1050000; 100)
       and exact("gpt-5.6-terra"; 272000; 272000; 95)
       and exact("gpt-5.6-luna"; 272000; 272000; 95)
