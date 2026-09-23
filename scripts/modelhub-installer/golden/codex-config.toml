@@ -5,7 +5,7 @@ model_provider = "custom"
 model_reasoning_effort = "high"
 model_auto_compact_token_limit = 600000
 model_context_window = 921_860
-model_catalog_json = "__USER_HOME__/.codex/models-modelhub-1m.json"
+model_catalog_json = "__USER_HOME__/.codex/cc-switch-model-catalog.json"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
@@ -16,7 +16,7 @@ remote_compaction_v2 = true
 git-branch-prefix = "feat/"
 show-context-window-usage = true
 preventSleepWhileRunning = true
-enabled-reasoning-efforts = ["high", "xhigh", "max"]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [plugins."computer-use@openai-bundled"]
 enabled = true

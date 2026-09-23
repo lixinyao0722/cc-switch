@@ -14,7 +14,7 @@ LOCAL_GOLDEN_SNAPSHOT_BUILDER="$REPO_ROOT/scripts/modelhub-installer/build-local
 GOLDEN_DB_SCHEMA="$REPO_ROOT/scripts/modelhub-installer/golden/cc-switch-schema.sql"
 GOLDEN_CODEX_CONFIG="$REPO_ROOT/scripts/modelhub-installer/golden/codex-config.toml"
 GOLDEN_SETTINGS="$REPO_ROOT/scripts/modelhub-installer/golden/settings.json"
-MODEL_CATALOG="$REPO_ROOT/scripts/modelhub-installer/assets/models-modelhub-1m.json"
+MODEL_CATALOG="$REPO_ROOT/scripts/modelhub-installer/assets/cc-switch-model-catalog.json"
 GPT55_TEMPLATE="$REPO_ROOT/src-tauri/src/resources/gpt5_5_template.json"
 MODELHUB_GUIDE="$REPO_ROOT/docs/guides/modelhub-codex-proxy-compat-zh.md"
 CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
@@ -246,7 +246,7 @@ test_merge_preserves_unmanaged_sections() {
   assert_contains "$case_dir/output.toml" 'request_max_retries = 2'
   assert_contains "$case_dir/output.toml" 'stream_max_retries = 3'
   assert_not_contains "$case_dir/output.toml" 'retry_429'
-  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Test User/.codex/models-modelhub-1m.json"'
+  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Test User/.codex/cc-switch-model-catalog.json"'
   assert_contains "$case_dir/output.toml" '# user heading'
   assert_contains "$case_dir/output.toml" '[plugins."browser@openai-bundled"]'
   assert_contains "$case_dir/output.toml" 'enabled = true'
@@ -295,7 +295,7 @@ test_r17_defaults_include_native_compaction_and_context_controls() {
   assert_occurrences "$GOLDEN_CODEX_CONFIG" 'review_model = "gpt-5.5-2026-04-24"' 1
   assert_occurrences \
     "$GOLDEN_CODEX_CONFIG" \
-    'enabled-reasoning-efforts = ["high", "xhigh", "max"]' \
+    'enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]' \
     1
   assert_occurrences "$GOLDEN_CODEX_CONFIG" '[plugins."computer-use@openai-bundled"]' 1
   assert_occurrences "$GOLDEN_CODEX_CONFIG" 'enabled = true' 2
@@ -491,7 +491,7 @@ test_merge_creates_config_from_empty_file() {
 
   assert_contains "$case_dir/output.toml" 'model_provider = "custom"'
   assert_contains "$case_dir/output.toml" '[model_providers.custom]'
-  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/models-modelhub-1m.json"'
+  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/cc-switch-model-catalog.json"'
   validate_merged_codex_config "$case_dir/output.toml" '/Users/Fresh User'
 }
 
@@ -506,7 +506,7 @@ test_merge_creates_config_when_source_is_missing() {
     '/Users/Fresh User'
 
   assert_contains "$case_dir/output.toml" 'model_provider = "custom"'
-  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/models-modelhub-1m.json"'
+  assert_contains "$case_dir/output.toml" 'model_catalog_json = "/Users/Fresh User/.codex/cc-switch-model-catalog.json"'
 }
 
 test_merge_replaces_only_active_modelhub_section() {
@@ -547,8 +547,8 @@ test_merge_replaces_equivalent_modelhub_headers() {
   local user_home="$case_dir/user home"
   local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
   mkdir -p "$case_dir" "$parser_home" "$user_home/.codex"
-  cp "$REPO_ROOT/scripts/modelhub-installer/assets/models-modelhub-1m.json" \
-    "$user_home/.codex/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" \
+    "$user_home/.codex/cc-switch-model-catalog.json"
   [[ -x "$codex_bin" ]] || fail "Codex parser is unavailable: $codex_bin"
   printf '%s\n' \
     'approval_policy = "on-request"' \
@@ -1480,7 +1480,7 @@ create_expected_resource_tree() {
   local root="$1/modelhub-installer"
   mkdir -p "$root/assets" "$root/golden" "$root/helpers" "$root/templates"
   ensure_test_rename_helper
-  cp "$MODEL_CATALOG" "$root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$root/assets/cc-switch-model-catalog.json"
   cp "$GOLDEN_CODEX_CONFIG" "$root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -1596,7 +1596,7 @@ test_resource_archive_rejects_invalid_model_catalog() {
   create_expected_resource_tree "$case_dir/tree"
   /usr/bin/jq \
     '(.models[] | select(.slug == "gpt-5.6-luna") | .effective_context_window_percent) = 100' \
-    "$MODEL_CATALOG" >"$case_dir/tree/modelhub-installer/assets/models-modelhub-1m.json"
+    "$MODEL_CATALOG" >"$case_dir/tree/modelhub-installer/assets/cc-switch-model-catalog.json"
   COPYFILE_DISABLE=1 tar -czf "$case_dir/resources.tar.gz" -C "$case_dir/tree" modelhub-installer
 
   assert_command_fails validate_resource_archive "$case_dir/resources.tar.gz"
@@ -1655,7 +1655,7 @@ test_preflight_rejects_golden_codex_without_r17_defaults() {
     "$case_dir/stale-review-model.toml"
   /usr/bin/perl -0pi -e 's#base_url = "http://127.0.0.1:15721/v1"#base_url = "https://aidp.bytedance.net/api/modelhub/online"#' \
     "$case_dir/upstream-live-route.toml"
-  /usr/bin/perl -0pi -e 's/enabled-reasoning-efforts = \["high", "xhigh", "max"\]/enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]/' \
+  /usr/bin/perl -0pi -e 's/enabled-reasoning-efforts = \["low", "medium", "high", "xhigh", "max"\]/enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]/' \
     "$case_dir/wide-reasoning-menu.toml"
   /usr/bin/perl -0pi -e 's/\n\[mcp_servers\.node_repl\][\s\S]*?\n\[model_providers\.custom\]/\n[model_providers.custom]/' \
     "$case_dir/missing-node-repl.toml"
@@ -2307,7 +2307,7 @@ create_transaction_assets() {
   ensure_test_rename_helper
   cp "$INSTALLER" "$asset_dir/install.sh"
   create_fake_app_zip "$case_dir"
-  cp "$MODEL_CATALOG" "$resource_root/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$resource_root/assets/cc-switch-model-catalog.json"
   cp "$GOLDEN_CODEX_CONFIG" "$resource_root/golden/codex-config.toml"
   cp "$GOLDEN_SETTINGS" "$resource_root/golden/settings.json"
   /bin/bash "$GOLDEN_DB_BUILDER" \
@@ -2376,7 +2376,7 @@ managed_state_manifest() {
     "$applications_dir/CC Switch.app"
     "$user_home/.codex/config.toml"
     "$user_home/.codex/auth.json"
-    "$user_home/.codex/models-modelhub-1m.json"
+    "$user_home/.codex/cc-switch-model-catalog.json"
     "$user_home/.cc-switch/cc-switch.db"
     "$user_home/.cc-switch/settings.json"
     "$user_home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
@@ -3236,7 +3236,7 @@ test_transaction_overwrites_golden_configuration_and_rolls_back() {
   assert_contains "$case_dir/home/.codex/config.toml" 'approval_policy = "never"'
   assert_contains \
     "$case_dir/home/.codex/config.toml" \
-    "model_catalog_json = \"$case_dir/home/.codex/models-modelhub-1m.json\""
+    "model_catalog_json = \"$case_dir/home/.codex/cc-switch-model-catalog.json\""
   assert_equals "$(shasum -a 256 "$auth_path" | awk '{ print $1 }')" "$auth_before"
   assert_sql "$case_dir/home/.cc-switch/cc-switch.db" \
     "SELECT count(*) FROM providers WHERE app_type='codex'" \
@@ -3282,7 +3282,7 @@ test_transaction_default_merge_preserves_personalized_codex_config() {
   assert_occurrences "$config_path" 'model_provider = "custom"' 1
   assert_contains "$config_path" 'review_model = "gpt-5.5-2026-04-24"'
   assert_contains "$config_path" 'approval_policy = "never"'
-  assert_contains "$config_path" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]'
+  assert_contains "$config_path" 'enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]'
   assert_contains "$config_path" '[mcp_servers.computer-use]'
   assert_contains "$config_path" '[mcp_servers.node_repl]'
   assert_contains "$config_path" 'base_url = "http://127.0.0.1:15721/v1"'
@@ -3387,7 +3387,7 @@ test_transaction_rollback_latest_restores_and_removes_files() {
 
   after="$(managed_state_digest "$case_dir")"
   assert_equals "$after" "$before"
-  [[ ! -e "$case_dir/home/.codex/models-modelhub-1m.json" ]] || fail 'rollback kept a newly created model catalog'
+  [[ ! -e "$case_dir/home/.codex/cc-switch-model-catalog.json" ]] || fail 'rollback kept a newly created model catalog'
   [[ ! -e "$case_dir/home/Library/LaunchAgents/com.ccswitch.modelhub-env.plist" ]] || fail 'rollback kept a newly created LaunchAgent'
   [[ -x "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" ]] || fail 'rollback removed the durable launcher'
   assert_not_contains "$case_dir/home/.local/share/cc-switch-modelhub/install.sh" 'old-local-installer'
@@ -3461,7 +3461,7 @@ create_packager_source() {
   cp "$REPO_ROOT/scripts/modelhub-installer/templates/load-modelhub-env.sh" \
     "$source_dir/templates/load-modelhub-env.sh"
   cp "$RENAME_HELPER_SOURCE" "$source_dir/helpers/rename-exclusive.c"
-  cp "$MODEL_CATALOG" "$source_dir/assets/models-modelhub-1m.json"
+  cp "$MODEL_CATALOG" "$source_dir/assets/cc-switch-model-catalog.json"
 }
 
 run_packager() {
@@ -3612,7 +3612,7 @@ test_package_rejects_invalid_model_catalog() {
   create_packager_app_zip "$case_dir" "$case_dir/app.zip"
   /usr/bin/jq \
     '(.models[] | select(.slug == "gpt-5.6-sol") | .max_context_window) = 272000' \
-    "$MODEL_CATALOG" >"$source_dir/assets/models-modelhub-1m.json"
+    "$MODEL_CATALOG" >"$source_dir/assets/cc-switch-model-catalog.json"
 
   assert_command_fails run_packager "$source_dir" "$case_dir/app.zip" "$output_dir"
   [[ ! -e "$output_dir/modelhub-installer-resources.tar.gz" ]] \
@@ -3885,6 +3885,15 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
     "SELECT json_array_length(json_extract(settings_config, '$.auth')) FROM providers WHERE id='bytedance-modelhub-official-cli'" \
     '0'
   assert_sql "$first_db" \
+    "SELECT json_array_length(json_extract(settings_config, '$.modelCatalog.models')) FROM providers WHERE id='bytedance-modelhub-official-cli'" \
+    '9'
+  assert_sql "$first_db" \
+    "SELECT json_extract(meta, '$.apiFormat') FROM providers WHERE id='bytedance-modelhub-official-cli'" \
+    'openai_responses'
+  assert_sql "$first_db" \
+    "SELECT group_concat(json_extract(value, '$.model'), ',') FROM json_each((SELECT json_extract(settings_config, '$.modelCatalog.models') FROM providers WHERE id='bytedance-modelhub-official-cli'))" \
+    'gpt-6-astra,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5-2026-04-24,gpt-5.4,gpt-5.4-mini,gpt-5.2,codex-auto-review'
+  assert_sql "$first_db" \
     "SELECT instr(json_extract(settings_config, '$.config'), 'https://aidp.bytedance.net/api/modelhub/online') > 0 FROM providers WHERE id='bytedance-modelhub-official-cli'" \
     '1'
   assert_sql "$first_db" \
@@ -3929,7 +3938,7 @@ test_golden_db_builder_creates_minimal_public_snapshot() {
   assert_sql "$first_db" 'SELECT count(*) FROM provider_endpoints' '0'
 
   config_text="$(/bin/cat "$GOLDEN_CODEX_CONFIG")"
-  [[ "$config_text" == *'__USER_HOME__/.codex/models-modelhub-1m.json'* ]] \
+  [[ "$config_text" == *'__USER_HOME__/.codex/cc-switch-model-catalog.json'* ]] \
     || fail 'golden Codex config omits the portable home placeholder'
   [[ "$config_text" == *'base_url = "http://127.0.0.1:15721/v1"'* ]] \
     || fail 'golden Codex config omits the ModelHub local proxy route'

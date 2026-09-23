@@ -2057,6 +2057,119 @@ requires_openai_auth = true
             .expect("stop proxy service");
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn update_current_modelhub_provider_during_takeover_keeps_full_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let mut modelhub = Provider::with_id(
+            "modelhub".into(),
+            "ModelHub".into(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "modelhub-key" },
+                "config": r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+model_catalog_json = "/Users/test/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+name = "modelhub"
+base_url = "https://aidp.bytedance.net/api/modelhub/online"
+wire_api = "responses"
+"#,
+                "modelCatalog": {
+                    "models": [{
+                        "model": "deepseek-v4.1-flash-t-20260918052446",
+                        "displayName": "DeepSeek V4.1 Flash"
+                    }]
+                }
+            }),
+            None,
+        );
+        modelhub.category = Some("third_party".into());
+        modelhub.meta = Some(ProviderMeta {
+            api_format: Some("responses".into()),
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        db.save_provider("codex", &modelhub).expect("save provider");
+        db.set_current_provider("codex", &modelhub.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&modelhub.id))
+            .expect("set local current provider");
+
+        let mut global_proxy_config = db.get_global_proxy_config().await.unwrap();
+        global_proxy_config.listen_port = 0;
+        db.update_global_proxy_config(global_proxy_config)
+            .await
+            .unwrap();
+        let mut proxy_config = db.get_proxy_config_for_app("codex").await.unwrap();
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config).await.unwrap();
+        state.proxy_service.start().await.expect("start proxy");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&modelhub.settings_config).unwrap(),
+        )
+        .await
+        .expect("seed backup");
+        state
+            .proxy_service
+            .sync_codex_live_from_provider_while_proxy_active(&modelhub)
+            .await
+            .expect("seed takeover live config");
+        // Prove that the following assertions are caused by ProviderService::update,
+        // not by the helper used above to seed the takeover state.
+        let live_config_path = crate::codex_config::get_codex_config_path();
+        let stale_live = std::fs::read_to_string(&live_config_path)
+            .expect("read seeded takeover config")
+            .replace(
+                crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME,
+                "models-modelhub-1m.json",
+            );
+        std::fs::write(&live_config_path, stale_live).expect("restore legacy catalog pointer");
+        std::fs::write(
+            crate::codex_config::get_codex_model_catalog_path(),
+            r#"{"sentinel":"stale"}"#,
+        )
+        .expect("replace generated catalog with sentinel");
+
+        ProviderService::update(&state, AppType::Codex, None, modelhub)
+            .expect("save current ModelHub provider during takeover");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read ModelHub live config");
+        let parsed: toml::Value = toml::from_str(&live_config).expect("parse live config");
+        assert_eq!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        );
+
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read generated catalog");
+        let models = catalog["models"].as_array().expect("catalog models");
+        assert!(models
+            .iter()
+            .any(|entry| { entry["slug"] == "deepseek-v4.1-flash-t-20260918052446" }));
+        let gpt_54 = models
+            .iter()
+            .find(|entry| entry["slug"] == "gpt-5.4")
+            .expect("gpt-5.4 entry");
+        assert_eq!(gpt_54["visibility"], "hide");
+        assert_eq!(gpt_54["priority"], 16);
+
+        state.proxy_service.stop().await.expect("stop proxy");
+    }
+
     #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
@@ -5640,6 +5753,25 @@ impl ProviderService {
         }
     }
 
+    fn normalize_modelhub_catalog(app_type: &AppType, provider: &mut Provider) {
+        if !matches!(app_type, AppType::Codex) {
+            return;
+        }
+        let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if crate::codex_managed_route::is_modelhub_provider(provider)
+            || crate::codex_config::is_modelhub_native_responses_config(config, profile)
+        {
+            crate::codex_config::merge_modelhub_bundled_model_catalog(
+                &mut provider.settings_config,
+            );
+        }
+    }
+
     /// Check whether a provider exists in live config, tolerating parse errors
     /// only for providers that are explicitly marked as DB-only.
     fn check_live_config_exists(
@@ -5775,6 +5907,7 @@ impl ProviderService {
         let mut provider = provider;
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
+        Self::normalize_modelhub_catalog(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
@@ -5911,6 +6044,7 @@ impl ProviderService {
             .get_provider_by_id(&original_id, app_type.as_str())?;
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
+        Self::normalize_modelhub_catalog(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {

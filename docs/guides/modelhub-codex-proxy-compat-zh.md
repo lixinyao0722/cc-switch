@@ -21,7 +21,7 @@ R25 在 R24 安装与回滚修复基础上，加入 ModelHub 治理目录模型�
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的历史会话兼容：旧 `modelhub` 会话和 Provider 模板会在启动时备份并一次性迁移到稳定的 `custom` 桶，安装器同时开启“统一 Codex 会话历史”并请求迁入既有官方会话，因此两个方向切换后都从同一个历史桶恢复。R23 保留 R22 的连续兼容恢复：当请求先因其他 Azure OpenAI 资源生成的 Responses item ID 失败、删除顶层 ID 后又暴露 `invalid_encrypted_content` 时，CC Switch 会继续删除失效的 reasoning 密文并进行最后一次重试，同时保留内容和 `call_id` 工具关系。每种兼容修复最多执行一次，普通 400 不会重试。R23 继续使用 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口和 `600,000` token 自动压缩阈值；原生远程压缩、严格增量续接和 429 准入治理保持不变。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
+R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的历史会话兼容：旧 `modelhub` 会话和 Provider 模板会在启动时备份并一次性迁移到稳定的 `custom` 桶，安装器同时开启“统一 Codex 会话历史”并请求迁入既有官方会话，因此两个方向切换后都从同一个历史桶恢复。R23 保留 R22 的连续兼容恢复：当请求先因其他 Azure OpenAI 资源生成的 Responses item ID 失败、删除顶层 ID 后又暴露 `invalid_encrypted_content` 时，CC Switch 会继续删除失效的 reasoning 密文并进行最后一次重试，同时保留内容和 `call_id` 工具关系。每种兼容修复最多执行一次，普通 400 不会重试。R23 继续使用 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口和 `600,000` token 自动压缩阈值；原生远程压缩、严格增量续接和 429 准入治理保持不变。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，桌面菜单开放 low、medium、high、xhigh、max 五档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
@@ -40,7 +40,7 @@ review_model = "gpt-5.5-2026-04-24"
 git-branch-prefix = "feat/"
 show-context-window-usage = true
 preventSleepWhileRunning = true
-enabled-reasoning-efforts = ["high", "xhigh", "max"]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [plugins."computer-use@openai-bundled"]
 enabled = true
@@ -114,14 +114,14 @@ model_provider = "custom"
 model_reasoning_effort = "high"
 model_auto_compact_token_limit = 600000
 model_context_window = 921_860
-model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
+model_catalog_json = "/Users/<current-user>/.codex/cc-switch-model-catalog.json"
 
 [features]
 remote_compaction_v2 = true
 
 [desktop]
 git-branch-prefix = "feat/"
-enabled-reasoning-efforts = ["high", "xhigh", "max"]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [model_providers.custom]
 name = "modelhub"
@@ -293,6 +293,8 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 3. 同 Provider 429 retry loop；
 4. 活动摘要模式、去重与未分类 Luna 观测；
 5. Provider UI 与四语文案。
+
+从旧 ModelHub 安装器升级到包含 catalog 统一修复的版本后，打开当前 ModelHub Provider 并保存一次。CC Switch 会把历史 `models-modelhub-1m.json` 指针迁移为 `cc-switch-model-catalog.json`，保留内置默认模型并合并表格中的新增模型；其他自定义 catalog 文件不会被接管。随后完整退出并重开 Codex，使其重新加载目录。
 
 在重新验证完成前，不使用上游 updater 覆盖定制 App。
 

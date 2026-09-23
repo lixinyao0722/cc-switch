@@ -7,7 +7,7 @@ export PATH
 
 usage() {
   cat <<'EOF'
-Usage: build-golden-db.sh --schema PATH --provider-config PATH --provider-meta PATH --output PATH
+Usage: build-golden-db.sh --schema PATH --provider-config PATH --provider-meta PATH [--model-catalog PATH] --output PATH
 EOF
 }
 
@@ -42,6 +42,7 @@ main() {
   local schema=''
   local provider_config=''
   local provider_meta=''
+  local model_catalog=''
   local output=''
   local work_dir
   local staged_db
@@ -51,6 +52,8 @@ main() {
   local output_temp=''
   local config_sql
   local meta_sql
+  local model_catalog_sql
+  local simplified_catalog
   local integrity
   local raw_strings
 
@@ -71,6 +74,11 @@ main() {
         provider_meta="$2"
         shift 2
         ;;
+      --model-catalog)
+        [[ $# -ge 2 ]] || { die '--model-catalog requires a path'; return 1; }
+        model_catalog="$2"
+        shift 2
+        ;;
       --output)
         [[ $# -ge 2 ]] || { die '--output requires a path'; return 1; }
         output="$2"
@@ -87,14 +95,18 @@ main() {
     esac
   done
 
-  [[ -n "$schema" && -n "$provider_config" && -n "$provider_meta" && -n "$output" ]] \
+  if [[ -z "$model_catalog" ]]; then
+    model_catalog="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets/cc-switch-model-catalog.json"
+  fi
+  [[ -n "$schema" && -n "$provider_config" && -n "$provider_meta" && -n "$model_catalog" && -n "$output" ]] \
     || { die 'schema, provider config, provider meta, and output are required'; return 1; }
   validate_input_file "$schema" 'golden schema' || return 1
   validate_input_file "$provider_config" 'golden provider config' || return 1
   validate_input_file "$provider_meta" 'golden provider metadata' || return 1
+  validate_input_file "$model_catalog" 'golden model catalog' || return 1
   /usr/bin/jq empty "$provider_meta" || { die 'golden provider metadata is invalid'; return 1; }
 
-  if ! /usr/bin/grep -Fq -- '__USER_HOME__/.codex/models-modelhub-1m.json' "$provider_config" \
+  if ! /usr/bin/grep -Fq -- '__USER_HOME__/.codex/cc-switch-model-catalog.json' "$provider_config" \
     || [[ "$(/usr/bin/grep -Fxc -- 'base_url = "http://127.0.0.1:15721/v1"' "$provider_config")" != '1' ]]; then
     die 'golden provider config is missing required portable ModelHub fields'
     return 1
@@ -123,6 +135,7 @@ main() {
   work_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cc-switch-golden-db.XXXXXX")"
   staged_db="$work_dir/cc-switch.db"
   provider_config_for_db="$work_dir/provider-config.toml"
+  simplified_catalog="$work_dir/model-catalog.json"
   trap '/bin/rm -rf -- "$work_dir"; if [[ -n "$output_temp" ]]; then /bin/rm -f -- "$output_temp"; fi' EXIT INT TERM
 
   if ! /usr/bin/awk '
@@ -141,6 +154,11 @@ main() {
   /usr/bin/sqlite3 "$staged_db" <"$schema"
   config_sql="$(sql_quote "$provider_config_for_db")"
   meta_sql="$(sql_quote "$provider_meta")"
+  if ! /usr/bin/jq '{models: [.models[] | {model: .slug, displayName: .display_name, contextWindow: .context_window, supportsParallelToolCalls: .supports_parallel_tool_calls, inputModalities: .input_modalities, reasoningLevels: [.supported_reasoning_levels[].effort], defaultReasoningLevel: .default_reasoning_level} | with_entries(select(.value != null))]}' "$model_catalog" >"$simplified_catalog"; then
+    die 'failed to build the editable ModelHub model mapping'
+    return 1
+  fi
+  model_catalog_sql="$(sql_quote "$simplified_catalog")"
 
   /usr/bin/sqlite3 "$staged_db" <<SQL
 PRAGMA foreign_keys = ON;
@@ -152,7 +170,11 @@ INSERT INTO providers (
   'bytedance-modelhub-official-cli',
   'codex',
   'Bytedance ModelHub - 官方CLI',
-  json_object('auth', json('{}'), 'config', CAST(readfile($config_sql) AS TEXT)),
+  json_object(
+    'auth', json('{}'),
+    'config', CAST(readfile($config_sql) AS TEXT),
+    'modelCatalog', json(CAST(readfile($model_catalog_sql) AS TEXT))
+  ),
   'https://aidp.bytedance.net',
   'third_party',
   0,
@@ -223,6 +245,8 @@ SQL
     || { die 'golden database is missing schema 18 session cursors'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexRemoteSessions')='false';")" == '1' ]] \
     || { die 'golden remote sessions must default to false'; return 1; }
+  [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.apiFormat')='openai_responses';")" == '1' ]] \
+    || { die 'golden ModelHub provider must use the native Responses apiFormat'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
     || { die 'golden database is missing session_usage_dedup'; return 1; }
   [[ "$(/usr/bin/sqlite3 -readonly "$staged_db" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \

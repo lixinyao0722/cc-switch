@@ -1,5 +1,5 @@
 {
-  "apiFormat": "responses",
+  "apiFormat": "openai_responses",
   "endpointAutoSelect": false,
   "localProxyRequestOverrides": {
     "codexRemoteSessions": false,

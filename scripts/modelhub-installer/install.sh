@@ -980,7 +980,7 @@ expected_resource_archive_entries() {
   cat <<'EOF'
 modelhub-installer/
 modelhub-installer/assets/
-modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/assets/cc-switch-model-catalog.json
 modelhub-installer/golden/
 modelhub-installer/golden/cc-switch.db
 modelhub-installer/golden/codex-config.toml
@@ -1122,7 +1122,7 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
     || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
-    || [[ "$(golden_config_exact_line_count "$file" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]')" != '1' ]] \
     || ! golden_computer_use_plugin_is_enabled "$file" \
     || ! golden_computer_use_mcp_is_enabled "$file" \
     || [[ "$(golden_config_exact_line_count "$file" '[mcp_servers.computer-use]')" != '1' ]] \
@@ -1193,6 +1193,8 @@ validate_golden_database() {
     || { die 'golden CC Switch database is missing schema 18 session cursors'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexRemoteSessions')='false';")" == '1' ]] \
     || { die 'golden CC Switch remote sessions must default to false'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.apiFormat')='openai_responses';")" == '1' ]] \
+    || { die 'golden CC Switch ModelHub provider apiFormat is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
     || { die 'golden CC Switch database is missing session_usage_dedup'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
@@ -1298,7 +1300,7 @@ validate_resource_archive() {
     "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
     || { rm -rf "$work_dir"; return 1; }
   validate_model_catalog \
-    "$extracted_dir/modelhub-installer/assets/models-modelhub-1m.json" \
+    "$extracted_dir/modelhub-installer/assets/cc-switch-model-catalog.json" \
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_settings \
     "$extracted_dir/modelhub-installer/golden/settings.json" \
@@ -2088,7 +2090,7 @@ validate_merged_codex_config() {
     die "unresolved __USER_HOME__ placeholder in merged Codex config"
     return 1
   fi
-  if ! grep -Fq -- "model_catalog_json = \"$escaped_home/.codex/models-modelhub-1m.json\"" "$file"; then
+  if ! grep -Fq -- "model_catalog_json = \"$escaped_home/.codex/cc-switch-model-catalog.json\"" "$file"; then
     die "merged Codex config does not reference the target user's model catalog"
     return 1
   fi
@@ -2454,7 +2456,7 @@ configure_install_paths() {
   CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   CODEX_MANAGED_CONFIG_PATH="$CODEX_MANAGED_CONFIG_DIR/managed_config.toml"
-  MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
+  MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/cc-switch-model-catalog.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
   CC_SWITCH_SETTINGS_PATH="$INSTALL_USER_HOME/.cc-switch/settings.json"
   LAUNCH_AGENT_PATH="$INSTALL_USER_HOME/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
@@ -2469,7 +2471,7 @@ managed_targets() {
   if [[ "${1:-all}" == all ]]; then
     printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
   fi
-  printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'models-modelhub-1m.json'
+  printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'cc-switch-model-catalog.json'
   printf '%s\t%s\n' "$CC_SWITCH_DATABASE_PATH" 'cc-switch.db'
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
   printf '%s\t%s\n' "$LAUNCH_AGENT_PATH" 'com.ccswitch.modelhub-env.plist'
@@ -3368,7 +3370,7 @@ install_runtime_files() {
 
   record_changed_target "$MODEL_CATALOG_PATH" || return 1
   if ! /usr/bin/install -m 600 \
-    "$resources_dir/assets/models-modelhub-1m.json" \
+    "$resources_dir/assets/cc-switch-model-catalog.json" \
     "$MODEL_CATALOG_PATH"; then
     die "failed to install the ModelHub model catalog"
     return 1

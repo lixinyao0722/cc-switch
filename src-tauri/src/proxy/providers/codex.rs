@@ -393,6 +393,13 @@ pub fn resolve_codex_catalog_tool_profile(
     if provider.is_xai_oauth() {
         return CodexCatalogToolProfile::NativeResponses;
     }
+    // ModelHub's Golden Provider historically stored the non-canonical
+    // `responses` apiFormat. The upstream still speaks native Responses, so
+    // recognize the stable ModelHub marker as NativeResponses while existing
+    // databases age out that legacy metadata.
+    if crate::codex_managed_route::is_modelhub_provider(provider) {
+        return CodexCatalogToolProfile::NativeResponses;
+    }
     if codex_provider_uses_anthropic(provider) {
         return CodexCatalogToolProfile::Anthropic;
     }
@@ -1665,6 +1672,24 @@ wire_api = "anthropic"
         });
         assert_eq!(
             resolve_codex_catalog_tool_profile(&native),
+            CodexCatalogToolProfile::NativeResponses
+        );
+
+        // Compatibility: pre-fix Golden databases used `responses`, but the
+        // ModelHub session-header marker still identifies the native upstream.
+        let mut legacy_modelhub = create_provider(json!({}));
+        legacy_modelhub.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("responses".to_string()),
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_codex_catalog_tool_profile(&legacy_modelhub),
             CodexCatalogToolProfile::NativeResponses
         );
 
