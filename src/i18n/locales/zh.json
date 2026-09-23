@@ -1376,6 +1376,7 @@
     "fetchModelsNotSupported": "该供应商不支持获取模型列表",
     "fetchModelsEndpointNotFound": "未找到可用的模型列表端点，请检查 Base URL 或确认供应商是否开放该接口",
     "fetchModelsTimeout": "请求超时，请检查网络连接",
+    "modelHubModelCatalogHint": "ModelHub 返回全量模型治理目录，不代表当前 AK 已获得调用权限；加入映射前请确认模型已申请。",
     "requiredFields": "请填写供应商名称、API 地址、API Key 和模型"
   },
   "copilot": {

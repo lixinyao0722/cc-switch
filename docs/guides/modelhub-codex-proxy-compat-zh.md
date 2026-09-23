@@ -13,11 +13,11 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
-## 安装（ModelHub R24 正式版，2026-09-12）
+## 安装（ModelHub R25 正式版，2026-09-23）
 
-R24 正式版包含第 8 步 `(never exited)`（helper 尚未退出）的安装与回滚修复，请勿继续运行 2026-09-11 初版安装器。应用版本统一提高为 `3.24.0`，消除与当前官方 `3.20.3` 比较产生的升级提示；功能范围不因此扩大。细节见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
+R25 在 R24 安装与回滚修复基础上，加入 ModelHub 治理目录模型获取，并在安装器目录中内置 GPT-6 Astra。`gpt-6-astra` 使用 `1,050,000` 上下文窗口和 `100%` 有效比例，默认模型仍为 `gpt-5.6-sol`。应用版本继续为 `3.24.0`；历史基线和安装边界见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
 
-正式发布标签为 `modelhub-installer-20260912-r24`，资源由本 fork 的 GitHub Release 提供。R24 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
+正式发布标签为 `modelhub-installer-20260923-r25`，资源由本 fork 的 GitHub Release 提供。R25 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
@@ -27,9 +27,9 @@ R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的�
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器用中文步骤提示资源校验、备份、配置处理、确认或输入 AK、启动和健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。`~/.codex/config.toml` 默认合并 R24 管理字段并保留个性化配置，明确确认后才完整覆盖；`settings.json` 保留用户偏好并更新必要路由字段。注意，完整安装仍会用 Golden 替换 `~/.cc-switch/cc-switch.db`，包括其中原有的自定义供应商；安装前保留完整备份。R24 的系统 managed config 默认不变；手机远程开关在 App 中单独管理。资源使用清洗后的可移植 Provider、模型 catalog 和批准的 Codex/MCP 字段，不包含日志、会话、用量记录、备份和凭据。
+必须以当前登录用户运行，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器用中文步骤提示资源校验、备份、配置处理、确认或输入 AK、启动和健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。`~/.codex/config.toml` 默认合并 R25 管理字段并保留个性化配置，明确确认后才完整覆盖；`settings.json` 保留用户偏好并更新必要路由字段。注意，完整安装仍会用 Golden 替换 `~/.cc-switch/cc-switch.db`，包括其中原有的自定义供应商；安装前保留完整备份。R25 的系统 managed config 默认不变；手机远程开关在 App 中单独管理。资源使用清洗后的可移植 Provider、模型 catalog 和批准的 Codex/MCP 字段，不包含日志、会话、用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问是否使用 R24 标准配置完整覆盖。回车或 `N` 默认采用合并模式：刷新 R24 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；顶层 `model_provider = "custom"` 必须写入且只能出现一次。输入 `Y` 才完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML，无法安全合并时默认 `N` 停止安装，明确输入 `Y` 才覆盖。新安装没有现有配置时直接写入 Golden。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问是否使用 R25 标准配置完整覆盖。回车或 `N` 默认采用合并模式：刷新 R25 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；顶层 `model_provider = "custom"` 必须写入且只能出现一次。输入 `Y` 才完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML，无法安全合并时默认 `N` 停止安装，明确输入 `Y` 才覆盖。新安装没有现有配置时直接写入 Golden。
 
 Golden Codex 配置固定以下安装后状态：
 
@@ -305,7 +305,7 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 - 原 `/Applications/CC Switch.app`；
 - `~/.cc-switch/cc-switch.db` 与 `settings.json`；
 - `~/.codex/config.toml`；`~/.codex/auth.json` 从不由安装器读取、修改、备份或恢复；
-- 系统 managed config：R24 默认安装不改变此文件，所以安装回滚不恢复未改变的对象。App 开启手机路由后，关闭开关只撤销其拥有的路由字段，不能删除用户其他配置；历史 R23 备份恢复须核对其独立清单；
+- 系统 managed config：R25 默认安装不改变此文件，所以安装回滚不恢复未改变的对象。App 开启手机路由后，关闭开关只撤销其拥有的路由字段，不能删除用户其他配置；历史 R23 备份恢复须核对其独立清单；
 - LaunchAgent 和 `launchctl CODEX_CLI_PATH`；
 - 迁移前 Provider、代理与 takeover 状态。
 
