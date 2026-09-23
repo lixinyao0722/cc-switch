@@ -5,6 +5,12 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.24.0-ModelHub-R25] - 2026-09-23
+
+- **ModelHub 模型获取**：ModelHub 供应商改用治理目录接口 `query/security_level` 获取候选模型，按实际请求字段 `model_name` 去重，不再错误访问推理地址下不存在的 `/v1/models`；该列表是平台全量目录，不代表当前 AK 已获调用权限。
+- **GPT-6 Astra 内置目录**：安装器内置 `gpt-6-astra`（ModelHub 产品 `azure-gpt-6-astra`），上下文窗口与最大上下文均为 `1,050,000`，有效比例 `100%`，支持文本和图片输入，以及 `low`、`medium`、`high`、`xhigh`、`max`、`ultra` 推理等级。默认模型继续保持 `gpt-5.6-sol`。
+- **安装包**：Apple Silicon arm64，固定发布标签 `modelhub-installer-20260923-r25`；安装器、App 和资源包使用配套 SHA256 校验。App 版本继续为 3.24.0，保持 ad-hoc 签名，不宣称 Apple 公证。
+
 ## [3.24.0-ModelHub-R24] - 2026-09-12
 
 - **正式发布 R24**：包含默认关闭的“支持手机远程会话”、ModelHub/官方切换一致性及失败恢复、LaunchAgent 幂等安装与回滚，以及尚未退出状态的安装器修复。

@@ -272,11 +272,12 @@ fn build_modelhub_fetch_headers(user_agent: Option<&HeaderValue>) -> HeaderMap {
 /// 构造「模型列表端点」的候选 URL 列表
 ///
 /// 候选顺序：
-/// 1. `models_url_override` 非空 → 只返回它
-/// 2. baseURL 拼 `/v1/models`；若已以版本段 `/v{N}` 结尾（`/v1`、智谱
+/// 1. ModelHub 在线推理地址固定使用不带供应商凭据的治理目录接口
+/// 2. 其他供应商的 `models_url_override` 非空 → 只返回它
+/// 3. baseURL 拼 `/v1/models`；若已以版本段 `/v{N}` 结尾（`/v1`、智谱
 ///    `/api/coding/paas/v4` 等），版本号已在路径里，改拼 `/models`
-/// 3. 版本段非 `/v1`（如 `/v4`）时再追加 `/v1/models` 作为兜底次候选
-/// 4. 若 baseURL 命中 [`KNOWN_COMPAT_SUFFIXES`]，剥离后缀再拼 `/v1/models`、`/models`
+/// 4. 版本段非 `/v1`（如 `/v4`）时再追加 `/v1/models` 作为兜底次候选
+/// 5. 若 baseURL 命中 [`KNOWN_COMPAT_SUFFIXES`]，剥离后缀再拼 `/v1/models`、`/models`
 ///
 /// 结果已去重且保持首次出现顺序。
 pub fn build_models_url_candidates(
@@ -284,19 +285,19 @@ pub fn build_models_url_candidates(
     is_full_url: bool,
     models_url_override: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    if let Some(raw) = models_url_override {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return Ok(vec![trimmed.to_string()]);
-        }
-    }
-
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is empty".to_string());
     }
     if let Some(modelhub_url) = modelhub_models_url(trimmed) {
         return Ok(vec![modelhub_url]);
+    }
+
+    if let Some(raw) = models_url_override {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(vec![trimmed.to_string()]);
+        }
     }
 
     let mut candidates: Vec<String> = Vec::new();
@@ -509,14 +510,17 @@ mod tests {
     }
 
     #[test]
-    fn test_candidates_modelhub_override_still_wins() {
+    fn test_candidates_modelhub_ignores_override_and_uses_governance_endpoint() {
         let c = build_models_url_candidates(
             "https://aidp.bytedance.net/api/modelhub/online",
             false,
             Some("https://catalog.example/models"),
         )
         .unwrap();
-        assert_eq!(c, vec!["https://catalog.example/models"]);
+        assert_eq!(
+            c,
+            vec!["https://aidp.bytedance.net/api/modelhub/online/query/security_level"]
+        );
     }
 
     #[test]
