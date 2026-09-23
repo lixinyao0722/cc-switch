@@ -32,7 +32,7 @@ scan_source_tree() {
     'install.sh'
     'build-golden-db.sh'
     'build-local-golden-snapshot.sh'
-    'assets/models-modelhub-1m.json'
+    'assets/cc-switch-model-catalog.json'
     'golden/cc-switch-schema.sql'
     'golden/codex-config.toml'
     'golden/settings.json'
@@ -173,13 +173,14 @@ copy_allowlisted_resources() {
     "$package_root/golden" \
     "$package_root/helpers" \
     "$package_root/templates"
-  cp "$source_dir/assets/models-modelhub-1m.json" "$package_root/assets/models-modelhub-1m.json"
+  cp "$source_dir/assets/cc-switch-model-catalog.json" "$package_root/assets/cc-switch-model-catalog.json"
   cp "$source_dir/golden/codex-config.toml" "$package_root/golden/codex-config.toml"
   cp "$source_dir/golden/settings.json" "$package_root/golden/settings.json"
   /bin/bash "$source_dir/build-golden-db.sh" \
     --schema "$source_dir/golden/cc-switch-schema.sql" \
     --provider-config "$source_dir/golden/codex-config.toml" \
     --provider-meta "$source_dir/templates/modelhub-provider-meta.json" \
+    --model-catalog "$source_dir/assets/cc-switch-model-catalog.json" \
     --output "$package_root/golden/cc-switch.db"
   cp "$source_dir/templates/modelhub-provider.toml" "$package_root/templates/modelhub-provider.toml"
   cp "$source_dir/templates/modelhub-provider-meta.json" "$package_root/templates/modelhub-provider-meta.json"
@@ -190,7 +191,7 @@ copy_allowlisted_resources() {
     "$source_dir/helpers/rename-exclusive.c" \
     "$package_root/helpers/rename-exclusive"
   chmod 644 \
-    "$package_root/assets/models-modelhub-1m.json" \
+    "$package_root/assets/cc-switch-model-catalog.json" \
     "$package_root/golden/codex-config.toml" \
     "$package_root/golden/settings.json" \
     "$package_root/golden/cc-switch.db" \

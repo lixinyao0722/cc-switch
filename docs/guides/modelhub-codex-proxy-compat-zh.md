@@ -13,23 +13,23 @@ ChatGPT App
 
 官方 CLI 负责 ChatGPT App 的受信进程身份和标准 Responses 协议。CC Switch 只在目标 ModelHub Provider 上转换内部 API 链路字段，不修改 Codex 二进制。
 
-## 安装（ModelHub R25 正式版，2026-09-23）
+## 安装（ModelHub R26 正式版，2026-09-23）
 
-R25 在 R24 安装与回滚修复基础上，加入 ModelHub 治理目录模型获取，并在安装器目录中内置 GPT-6 Astra。`gpt-6-astra` 使用 `1,050,000` 上下文窗口和 `100%` 有效比例，默认模型仍为 `gpt-5.6-sol`。应用版本继续为 `3.24.0`；历史基线和安装边界见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
+R26 在 R25 的 ModelHub 治理目录和 GPT-6 Astra 基础上，统一安装器与 CC Switch 运行时使用的 Codex 模型目录。保存 ModelHub 供应商时，会把用户新增映射合并进 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.2 等默认模型，并恢复 `low`、`medium` 推理等级。默认模型仍为 `gpt-5.6-sol`，应用版本继续为 `3.24.0`；历史基线和安装边界见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
 
-正式发布标签为 `modelhub-installer-20260923-r25`，资源由本 fork 的 GitHub Release 提供。R25 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
+正式发布标签为 `modelhub-installer-20260923-r26`，资源由本 fork 的 GitHub Release 提供。R26 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
-R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的历史会话兼容：旧 `modelhub` 会话和 Provider 模板会在启动时备份并一次性迁移到稳定的 `custom` 桶，安装器同时开启“统一 Codex 会话历史”并请求迁入既有官方会话，因此两个方向切换后都从同一个历史桶恢复。R23 保留 R22 的连续兼容恢复：当请求先因其他 Azure OpenAI 资源生成的 Responses item ID 失败、删除顶层 ID 后又暴露 `invalid_encrypted_content` 时，CC Switch 会继续删除失效的 reasoning 密文并进行最后一次重试，同时保留内容和 `call_id` 工具关系。每种兼容修复最多执行一次，普通 400 不会重试。R23 继续使用 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口和 `600,000` token 自动压缩阈值；原生远程压缩、严格增量续接和 429 准入治理保持不变。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，只展示 high、xhigh、max 三档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
+R23 基于 CC Switch 3.20.0，补齐 ModelHub / OpenAI Official 双向切换的历史会话兼容：旧 `modelhub` 会话和 Provider 模板会在启动时备份并一次性迁移到稳定的 `custom` 桶，安装器同时开启“统一 Codex 会话历史”并请求迁入既有官方会话，因此两个方向切换后都从同一个历史桶恢复。R23 保留 R22 的连续兼容恢复：当请求先因其他 Azure OpenAI 资源生成的 Responses item ID 失败、删除顶层 ID 后又暴露 `invalid_encrypted_content` 时，CC Switch 会继续删除失效的 reasoning 密文并进行最后一次重试，同时保留内容和 `call_id` 工具关系。每种兼容修复最多执行一次，普通 400 不会重试。R23 继续使用 `1,050,000` token 的 GPT-5.5 / Sol 模型窗口和 `600,000` token 自动压缩阈值；原生远程压缩、严格增量续接和 429 准入治理保持不变。Golden live 配置直接指向 CC Switch 本地代理，把 review model 固定为 `gpt-5.5-2026-04-24`，桌面菜单开放 low、medium、high、xhigh、max 五档推理强度，并打包批准的 Computer Use MCP 与 ChatGPT 内置 Node REPL 入口。数据库同时预置默认启用的 ModelHub 和非当前状态的 `OpenAI Official`；ChatGPT 登录态始终保留。数据库中的 ModelHub Provider 快照仍保存真实 ModelHub 上游；编辑器偏好、Marketplace 缓存、凭据和用户绝对路径不进入公共包。一键安装入口保持不变：
 
 ```zsh
 curl -fsSL https://github.com/lixinyao0722/cc-switch/releases/latest/download/install.sh | bash -s
 ```
 
-必须以当前登录用户运行，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器用中文步骤提示资源校验、备份、配置处理、确认或输入 AK、启动和健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。`~/.codex/config.toml` 默认合并 R25 管理字段并保留个性化配置，明确确认后才完整覆盖；`settings.json` 保留用户偏好并更新必要路由字段。注意，完整安装仍会用 Golden 替换 `~/.cc-switch/cc-switch.db`，包括其中原有的自定义供应商；安装前保留完整备份。R25 的系统 managed config 默认不变；手机远程开关在 App 中单独管理。资源使用清洗后的可移植 Provider、模型 catalog 和批准的 Codex/MCP 字段，不包含日志、会话、用量记录、备份和凭据。
+必须以当前登录用户运行，不要在 `curl` 或 `bash` 前添加 `sudo`。安装器用中文步骤提示资源校验、备份、配置处理、确认或输入 AK、启动和健康/黄金路由检查；如果 ChatGPT 缺失，则从 OpenAI 官方来源安装。`~/.codex/config.toml` 默认合并 R26 管理字段并保留个性化配置，明确确认后才完整覆盖；`settings.json` 保留用户偏好并更新必要路由字段。注意，完整安装仍会用 Golden 替换 `~/.cc-switch/cc-switch.db`，包括其中原有的自定义供应商；安装前保留完整备份。R26 的系统 managed config 默认不变；手机远程开关在 App 中单独管理。资源使用清洗后的可移植 Provider、模型 catalog 和批准的 Codex/MCP 字段，不包含日志、会话、用量记录、备份和凭据。
 
-检测到已有 `~/.codex/config.toml` 时，安装器会询问是否使用 R25 标准配置完整覆盖。回车或 `N` 默认采用合并模式：刷新 R25 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；顶层 `model_provider = "custom"` 必须写入且只能出现一次。输入 `Y` 才完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML，无法安全合并时默认 `N` 停止安装，明确输入 `Y` 才覆盖。新安装没有现有配置时直接写入 Golden。
+检测到已有 `~/.codex/config.toml` 时，安装器会询问是否使用 R26 标准配置完整覆盖。回车或 `N` 默认采用合并模式：刷新 R26 管理的模型、远程压缩、Desktop、Computer Use、Node REPL 和 ModelHub 字段，同时保留编辑器、Marketplace、项目授权及其他插件配置；顶层 `model_provider = "custom"` 必须写入且只能出现一次。输入 `Y` 才完整覆盖。若现有文件使用带引号键、点分键、多行字符串或多行数组等复杂 TOML，无法安全合并时默认 `N` 停止安装，明确输入 `Y` 才覆盖。新安装没有现有配置时直接写入 Golden。
 
 Golden Codex 配置固定以下安装后状态：
 
@@ -40,7 +40,7 @@ review_model = "gpt-5.5-2026-04-24"
 git-branch-prefix = "feat/"
 show-context-window-usage = true
 preventSleepWhileRunning = true
-enabled-reasoning-efforts = ["high", "xhigh", "max"]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [plugins."computer-use@openai-bundled"]
 enabled = true
@@ -114,14 +114,14 @@ model_provider = "custom"
 model_reasoning_effort = "high"
 model_auto_compact_token_limit = 600000
 model_context_window = 921_860
-model_catalog_json = "/Users/<current-user>/.codex/models-modelhub-1m.json"
+model_catalog_json = "/Users/<current-user>/.codex/cc-switch-model-catalog.json"
 
 [features]
 remote_compaction_v2 = true
 
 [desktop]
 git-branch-prefix = "feat/"
-enabled-reasoning-efforts = ["high", "xhigh", "max"]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [model_providers.custom]
 name = "modelhub"
@@ -294,6 +294,8 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 4. 活动摘要模式、去重与未分类 Luna 观测；
 5. Provider UI 与四语文案。
 
+从旧 ModelHub 安装器升级到包含 catalog 统一修复的版本后，打开当前 ModelHub Provider 并保存一次。CC Switch 会把历史 `models-modelhub-1m.json` 指针迁移为 `cc-switch-model-catalog.json`，保留内置默认模型并合并表格中的新增模型；其他自定义 catalog 文件不会被接管。随后完整退出并重开 Codex，使其重新加载目录。
+
 在重新验证完成前，不使用上游 updater 覆盖定制 App。
 
 ## 回滚
@@ -305,7 +307,7 @@ CC Switch 更新后，从新 tag 重放以下独立提交并重新跑完整验�
 - 原 `/Applications/CC Switch.app`；
 - `~/.cc-switch/cc-switch.db` 与 `settings.json`；
 - `~/.codex/config.toml`；`~/.codex/auth.json` 从不由安装器读取、修改、备份或恢复；
-- 系统 managed config：R25 默认安装不改变此文件，所以安装回滚不恢复未改变的对象。App 开启手机路由后，关闭开关只撤销其拥有的路由字段，不能删除用户其他配置；历史 R23 备份恢复须核对其独立清单；
+- 系统 managed config：R26 默认安装不改变此文件，所以安装回滚不恢复未改变的对象。App 开启手机路由后，关闭开关只撤销其拥有的路由字段，不能删除用户其他配置；历史 R23 备份恢复须核对其独立清单；
 - LaunchAgent 和 `launchctl CODEX_CLI_PATH`；
 - 迁移前 Provider、代理与 takeover 状态。
 

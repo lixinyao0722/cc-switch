@@ -22,6 +22,7 @@ pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// cleaned up without mistaking a user's own local provider for takeover.
 pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "cc-switch-official";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+const LEGACY_MODELHUB_MODEL_CATALOG_FILENAME: &str = "models-modelhub-1m.json";
 const CODEX_PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 #[cfg(target_os = "windows")]
@@ -2036,6 +2037,172 @@ fn load_codex_native_responses_template() -> Value {
     serde_json::from_str(text).expect("bundled codex native responses template must be valid JSON")
 }
 
+pub(crate) fn is_modelhub_native_responses_config(
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> bool {
+    if profile != CodexCatalogToolProfile::NativeResponses {
+        return false;
+    }
+    let Some(base_url) = extract_codex_base_url(config_text) else {
+        return false;
+    };
+    let Ok(parsed) = url::Url::parse(&base_url) else {
+        return false;
+    };
+    parsed.host_str() == Some("aidp.bytedance.net")
+        && (parsed.path() == "/api/modelhub/online"
+            || parsed.path().starts_with("/api/modelhub/online/"))
+}
+
+fn load_modelhub_bundled_catalog() -> Value {
+    let text = include_str!("../../scripts/modelhub-installer/assets/cc-switch-model-catalog.json");
+    serde_json::from_str(text).expect("bundled ModelHub catalog must be valid JSON")
+}
+
+fn modelhub_bundled_model_mappings() -> Vec<Value> {
+    let catalog = load_modelhub_bundled_catalog();
+    catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let model = entry.get("slug")?.as_str()?.trim();
+            if model.is_empty() {
+                return None;
+            }
+            let mut mapping = serde_json::Map::new();
+            mapping.insert("model".to_string(), json!(model));
+            if let Some(value) = entry.get("display_name") {
+                mapping.insert("displayName".to_string(), value.clone());
+            }
+            if let Some(value) = entry.get("context_window") {
+                mapping.insert("contextWindow".to_string(), value.clone());
+            }
+            if let Some(value) = entry.get("supports_parallel_tool_calls") {
+                mapping.insert("supportsParallelToolCalls".to_string(), value.clone());
+            }
+            if let Some(value) = entry.get("input_modalities") {
+                mapping.insert("inputModalities".to_string(), value.clone());
+            }
+            if let Some(levels) = entry
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+            {
+                mapping.insert(
+                    "reasoningLevels".to_string(),
+                    Value::Array(
+                        levels
+                            .iter()
+                            .filter_map(|level| level.get("effort").cloned())
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(value) = entry.get("default_reasoning_level") {
+                mapping.insert("defaultReasoningLevel".to_string(), value.clone());
+            }
+            Some(Value::Object(mapping))
+        })
+        .collect()
+}
+
+pub(crate) fn merge_modelhub_bundled_model_catalog(settings: &mut Value) {
+    let defaults = modelhub_bundled_model_mappings();
+    let user_models = settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut user_models = user_models;
+    let mut merged = Vec::with_capacity(defaults.len() + user_models.len());
+    for default in defaults {
+        let key = default
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let user_index = user_models.iter().position(|entry| {
+            entry
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| model.trim().eq_ignore_ascii_case(&key))
+        });
+        merged.push(
+            user_index
+                .map(|index| user_models.remove(index))
+                .unwrap_or(default),
+        );
+    }
+    merged.extend(user_models.into_iter().filter(|entry| {
+        entry
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.trim().is_empty())
+    }));
+    settings["modelCatalog"] = json!({ "models": merged });
+}
+
+fn apply_codex_catalog_spec_to_existing_entry(entry: &mut Value, spec: &CodexCatalogModelSpec) {
+    let template_default = entry
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(entry_obj) = entry.as_object_mut() else {
+        return;
+    };
+    if let Some(display_name) = spec.display_name.as_deref() {
+        entry_obj.insert("display_name".to_string(), json!(display_name));
+        entry_obj.insert("description".to_string(), json!(display_name));
+    }
+    if let Some(context_window) = spec.context_window {
+        entry_obj.insert("context_window".to_string(), json!(context_window));
+        entry_obj.insert("max_context_window".to_string(), json!(context_window));
+    }
+    if let Some(parallel) = spec.supports_parallel_tool_calls {
+        entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
+    }
+    if let Some(modalities) = spec.input_modalities.as_deref() {
+        entry_obj.insert("input_modalities".to_string(), json!(modalities));
+    }
+    if let Some(base_instructions) = spec.base_instructions.as_deref() {
+        entry_obj.insert("base_instructions".to_string(), json!(base_instructions));
+    }
+    apply_codex_reasoning_level_override(entry_obj, template_default.as_deref(), spec);
+}
+
+fn modelhub_catalog_from_specs(specs: &[CodexCatalogModelSpec]) -> Value {
+    let mut catalog = load_modelhub_bundled_catalog();
+    let models = catalog
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .expect("bundled ModelHub catalog must contain models");
+    let native_template = load_codex_native_responses_template();
+
+    for spec in specs {
+        if let Some(existing) = models.iter_mut().find(|entry| {
+            entry
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(&spec.model))
+        }) {
+            apply_codex_catalog_spec_to_existing_entry(existing, spec);
+        } else {
+            let priority = models.len();
+            models.push(codex_catalog_model_entry(
+                &native_template,
+                spec,
+                priority,
+                CodexCatalogToolProfile::NativeResponses,
+                128_000,
+            ));
+        }
+    }
+    catalog
+}
+
 /// Hosts whose native `/responses` gateway publishes an OFFICIAL Codex model
 /// catalog (models.json) that cc-switch mirrors verbatim. Matched against
 /// `base_url` ONLY — deliberately NOT by model brand, unlike
@@ -2274,14 +2441,19 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-fn codex_model_catalog_from_settings(
+fn codex_model_catalog_from_settings_with_identity(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
+    use_modelhub_catalog: bool,
 ) -> Result<Option<Value>, AppError> {
     let specs = codex_catalog_model_specs(settings);
     if specs.is_empty() {
         return Ok(None);
+    }
+
+    if use_modelhub_catalog || is_modelhub_native_responses_config(config_text, profile) {
+        return Ok(Some(modelhub_catalog_from_specs(&specs)));
     }
 
     // Vendors that publish an OFFICIAL Codex models.json for their native
@@ -2318,9 +2490,19 @@ fn codex_model_catalog_from_settings(
     )))
 }
 
-fn set_codex_model_catalog_json_field(
+#[cfg(test)]
+fn codex_model_catalog_from_settings(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<Option<Value>, AppError> {
+    codex_model_catalog_from_settings_with_identity(settings, config_text, profile, false)
+}
+
+fn set_codex_model_catalog_json_field_with_identity(
     config_text: &str,
     catalog_path: Option<&Path>,
+    owns_legacy_modelhub_catalog: bool,
 ) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
@@ -2336,8 +2518,14 @@ fn set_codex_model_catalog_json_field(
                 .get("model_catalog_json")
                 .and_then(|item| item.as_str())
                 .map(|path| {
-                    Path::new(path).file_name().and_then(|name| name.to_str())
-                        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+                    let file_name = Path::new(path).file_name().and_then(|name| name.to_str());
+                    file_name == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+                        || (file_name == Some(LEGACY_MODELHUB_MODEL_CATALOG_FILENAME)
+                            && (owns_legacy_modelhub_catalog
+                                || is_modelhub_native_responses_config(
+                                    config_text,
+                                    CodexCatalogToolProfile::NativeResponses,
+                                )))
                 })
                 .unwrap_or(true);
             if is_cc_switch_owned {
@@ -2361,6 +2549,14 @@ fn set_codex_model_catalog_json_field(
     }
 
     Ok(doc.to_string())
+}
+
+#[cfg(test)]
+fn set_codex_model_catalog_json_field(
+    config_text: &str,
+    catalog_path: Option<&Path>,
+) -> Result<String, AppError> {
+    set_codex_model_catalog_json_field_with_identity(config_text, catalog_path, false)
 }
 
 /// Pure toggle for the top-level `web_search` field that turns Codex's built-in
@@ -2396,15 +2592,41 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
 
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
+#[cfg(test)]
 pub fn prepare_codex_config_text_with_model_catalog(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
+    prepare_codex_config_text_with_model_catalog_for_provider(
+        settings,
+        config_text,
+        profile,
+        false,
+        false,
+    )
+}
+
+pub fn prepare_codex_config_text_with_model_catalog_for_provider(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    use_modelhub_catalog: bool,
+    owns_legacy_modelhub_catalog: bool,
+) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
 
-    if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
-        let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+    if let Some(catalog) = codex_model_catalog_from_settings_with_identity(
+        settings,
+        config_text,
+        profile,
+        use_modelhub_catalog,
+    )? {
+        let config_text = set_codex_model_catalog_json_field_with_identity(
+            config_text,
+            Some(&catalog_path),
+            owns_legacy_modelhub_catalog,
+        )?;
         // Disable web_search only for native gateways on the reject blacklist
         // (MiMo/LongCat/MiniMax by host or model brand; Qwen3-Coder by model).
         // Everything else — relays, DouBao, web-search-capable Qwen models,
@@ -2422,7 +2644,11 @@ pub fn prepare_codex_config_text_with_model_catalog(
         write_json_file(&catalog_path, &catalog)?;
         Ok(config_text)
     } else {
-        let config_text = set_codex_model_catalog_json_field(config_text, None)?;
+        let config_text = set_codex_model_catalog_json_field_with_identity(
+            config_text,
+            None,
+            owns_legacy_modelhub_catalog,
+        )?;
         // Even without a generated catalog, the Responses→Anthropic transform drops the
         // Codex web_search hosted tool, so keep the invariant that an Anthropic provider
         // never presents it as a dead tool.
@@ -2642,6 +2868,35 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             }
         }
 
+        if let Some(supported_levels) = entry
+            .get("supported_reasoning_levels")
+            .and_then(|value| value.as_array())
+        {
+            let declared_levels: Vec<String> = supported_levels
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .collect();
+            let reasoning_levels: Vec<String> = codex_canonical_efforts(&declared_levels)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+
+            if !reasoning_levels.is_empty() {
+                obj.insert("reasoningLevels".to_string(), json!(reasoning_levels));
+
+                if let Some(default_level) = entry
+                    .get("default_reasoning_level")
+                    .and_then(|value| value.as_str())
+                    .filter(|default_level| {
+                        reasoning_levels.iter().any(|level| level == *default_level)
+                    })
+                {
+                    obj.insert("defaultReasoningLevel".to_string(), json!(default_level));
+                }
+            }
+        }
+
         entries.push(Value::Object(obj));
     }
 
@@ -2681,8 +2936,30 @@ pub fn prepare_codex_live_config_text_with_optional_catalog(
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
+    prepare_codex_live_config_text_with_optional_catalog_for_provider(
+        settings,
+        config_text,
+        profile,
+        false,
+        false,
+    )
+}
+
+pub fn prepare_codex_live_config_text_with_optional_catalog_for_provider(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    use_modelhub_catalog: bool,
+    owns_legacy_modelhub_catalog: bool,
+) -> Result<String, AppError> {
     if settings.get("modelCatalog").is_some() {
-        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
+        prepare_codex_config_text_with_model_catalog_for_provider(
+            settings,
+            config_text,
+            profile,
+            use_modelhub_catalog,
+            owns_legacy_modelhub_catalog,
+        )
     } else {
         Ok(config_text.to_string())
     }
@@ -2695,8 +2972,36 @@ pub fn write_codex_provider_live_with_catalog(
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
 ) -> Result<(), AppError> {
+    write_codex_provider_live_with_catalog_for_provider(
+        settings,
+        category,
+        auth,
+        config_text,
+        profile,
+        false,
+        false,
+    )
+}
+
+pub fn write_codex_provider_live_with_catalog_for_provider(
+    settings: &Value,
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
+    use_modelhub_catalog: bool,
+    owns_legacy_modelhub_catalog: bool,
+) -> Result<(), AppError> {
     let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
+        .map(|text| {
+            prepare_codex_config_text_with_model_catalog_for_provider(
+                settings,
+                text,
+                profile,
+                use_modelhub_catalog,
+                owns_legacy_modelhub_catalog,
+            )
+        })
         .transpose()?;
 
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
@@ -7033,6 +7338,115 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn modelhub_catalog_keeps_bundled_defaults_when_user_adds_a_model() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "deepseek-v4.1-flash-t-20260918052446",
+                    "contextWindow": 100_000,
+                    "reasoningLevels": ["low", "medium", "high", "xhigh", "max"]
+                }]
+            }
+        });
+        let config = r#"model = "gpt-5.6-sol"
+model_provider = "custom"
+model_catalog_json = "/Users/test/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+base_url = "https://aidp.bytedance.net/api/modelhub/online"
+wire_api = "responses"
+"#;
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            config,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("ModelHub catalog generation should succeed")
+        .expect("ModelHub catalog should not be empty");
+        let models = catalog["models"].as_array().expect("models array");
+        let slugs = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5-2026-04-24",
+            "gpt-5.4",
+            "gpt-5.2",
+            "deepseek-v4.1-flash-t-20260918052446",
+        ] {
+            assert!(
+                slugs.contains(&expected),
+                "missing ModelHub model: {expected}"
+            );
+        }
+
+        let sol = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .expect("Sol default");
+        let efforts = sol["supported_reasoning_levels"]
+            .as_array()
+            .expect("Sol reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(efforts.contains(&"low"));
+        assert!(efforts.contains(&"medium"));
+    }
+
+    #[test]
+    fn modelhub_settings_merge_bundled_defaults_and_preserve_user_override() {
+        let mut settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "displayName": "My Sol",
+                        "reasoningLevels": ["low", "medium"]
+                    },
+                    {
+                        "model": "deepseek-v4.1-flash-t-20260918052446",
+                        "contextWindow": 100_000,
+                        "reasoningLevels": ["low", "medium", "high"]
+                    }
+                ]
+            }
+        });
+
+        merge_modelhub_bundled_model_catalog(&mut settings);
+
+        let models = settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("merged mappings");
+        assert_eq!(models.len(), 10);
+        assert_eq!(models[0]["model"], "gpt-6-astra");
+        let sol = models
+            .iter()
+            .find(|entry| entry["model"] == "gpt-5.6-sol")
+            .expect("Sol mapping");
+        assert_eq!(sol["displayName"], "My Sol");
+        assert_eq!(sol["reasoningLevels"], json!(["low", "medium"]));
+        let astra = models
+            .iter()
+            .find(|entry| entry["model"] == "gpt-6-astra")
+            .expect("Astra mapping");
+        assert_eq!(astra["defaultReasoningLevel"], "low");
+        assert_eq!(
+            astra["reasoningLevels"],
+            json!(["low", "medium", "high", "xhigh", "max", "ultra"])
+        );
+        assert!(models
+            .iter()
+            .any(|entry| { entry["model"] == "deepseek-v4.1-flash-t-20260918052446" }));
+    }
+
+    #[test]
     fn vendor_catalog_honors_per_model_reasoning_levels() {
         // The DeepSeek official catalog declares low/high/max; a per-model
         // override must win over the official entry.
@@ -7891,6 +8305,26 @@ web_search = "disabled"
     }
 
     #[test]
+    fn build_simplified_catalog_preserves_reasoning_levels_and_default() {
+        let catalog = r#"{
+            "models": [{
+                "slug": "gpt-6-astra",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "high", "description": "High"}
+                ],
+                "default_reasoning_level": "low"
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result["models"][0];
+        assert_eq!(entry["reasoningLevels"], json!(["low", "medium", "high"]));
+        assert_eq!(entry["defaultReasoningLevel"], "low");
+    }
+
+    #[test]
     fn build_simplified_catalog_squashes_default_context_window() {
         // Default fallback is 128_000 when config.toml has no model_context_window.
         let catalog = r#"{
@@ -8211,6 +8645,45 @@ model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
             Some("/Users/me/.codex/my-custom-catalog.json"),
             "Some arm should NOT clobber a user-owned catalog (full path)"
+        );
+    }
+
+    #[test]
+    fn set_catalog_json_some_migrates_legacy_modelhub_installer_catalog() {
+        let input = r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+model_catalog_json = "/Users/me/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+base_url = "https://aidp.bytedance.net/api/modelhub/online"
+wire_api = "responses"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|v| v.as_str()),
+            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        );
+    }
+
+    #[test]
+    fn set_catalog_json_some_preserves_same_named_catalog_for_non_modelhub_provider() {
+        let input = r#"model_provider = "custom"
+model = "other-model"
+model_catalog_json = "/Users/me/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|v| v.as_str()),
+            Some("/Users/me/.codex/models-modelhub-1m.json"),
+            "legacy filename is installer-owned only for the ModelHub endpoint"
         );
     }
 

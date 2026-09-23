@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260923-r25'
+readonly RELEASE_TAG='modelhub-installer-20260923-r26'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -980,7 +980,7 @@ expected_resource_archive_entries() {
   cat <<'EOF'
 modelhub-installer/
 modelhub-installer/assets/
-modelhub-installer/assets/models-modelhub-1m.json
+modelhub-installer/assets/cc-switch-model-catalog.json
 modelhub-installer/golden/
 modelhub-installer/golden/cc-switch.db
 modelhub-installer/golden/codex-config.toml
@@ -1031,7 +1031,7 @@ validate_model_catalog() {
     ) catch false
   ' "$file" 2>/dev/null)" || valid=false
   if [[ "$valid" != 'true' ]]; then
-    die 'ModelHub model catalog does not match the R25 context-window contract'
+    die 'ModelHub model catalog does not match the R26 context-window contract'
     return 1
   fi
 }
@@ -1122,7 +1122,7 @@ validate_golden_codex_template() {
     || ! grep -Fq -- 'git-branch-prefix = "feat/"' "$file" \
     || ! grep -Fq -- 'show-context-window-usage = true' "$file" \
     || ! grep -Fq -- 'preventSleepWhileRunning = true' "$file" \
-    || [[ "$(golden_config_exact_line_count "$file" 'enabled-reasoning-efforts = ["high", "xhigh", "max"]')" != '1' ]] \
+    || [[ "$(golden_config_exact_line_count "$file" 'enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max"]')" != '1' ]] \
     || ! golden_computer_use_plugin_is_enabled "$file" \
     || ! golden_computer_use_mcp_is_enabled "$file" \
     || [[ "$(golden_config_exact_line_count "$file" '[mcp_servers.computer-use]')" != '1' ]] \
@@ -1193,6 +1193,8 @@ validate_golden_database() {
     || { die 'golden CC Switch database is missing schema 18 session cursors'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexRemoteSessions')='false';")" == '1' ]] \
     || { die 'golden CC Switch remote sessions must default to false'; return 1; }
+  [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.apiFormat')='openai_responses';")" == '1' ]] \
+    || { die 'golden CC Switch ModelHub provider apiFormat is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_usage_dedup';")" == '1' ]] \
     || { die 'golden CC Switch database is missing session_usage_dedup'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE app_type='codex';")" == '2' ]] \
@@ -1208,7 +1210,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT instr(json_extract(settings_config, '$.config'), '127.0.0.1:15721') FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex';")" == '0' ]] \
     || { die 'golden CC Switch provider points to the local proxy'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND instr(json_extract(settings_config, '$.config'), 'model_auto_compact_token_limit = 600000') > 0 AND instr(json_extract(settings_config, '$.config'), 'git-branch-prefix = \"feat/\"') > 0;")" == '1' ]] \
-    || { die 'golden CC Switch provider omits R25 Codex defaults'; return 1; }
+    || { die 'golden CC Switch provider omits R26 Codex defaults'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.blockCodexActivitySummaries') IS NULL AND json_type(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexActivitySummaryMode')='map';")" == '1' ]] \
     || { die 'golden CC Switch provider activity summary mode is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_type(meta, '$.localProxyRequestOverrides.codexMetadataModel')='text' AND json_extract(meta, '$.localProxyRequestOverrides.codexMetadataModel')='gpt-5.6-sol';")" == '1' ]] \
@@ -1218,7 +1220,7 @@ validate_golden_database() {
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxRetries')=2 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.baseDelayMs')=2000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.maxDelayMs')=30000 AND json_extract(meta, '$.localProxyRequestOverrides.retry429.honorRetryAfter')=1;")" == '1' ]] \
     || { die 'golden CC Switch provider 429 retry policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT count(*) FROM providers WHERE id='bytedance-modelhub-official-cli' AND app_type='codex' AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.contextOptimization.checkpointTtlSeconds')=21600 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.enabled')=1 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.largeRequestTokens')=100000 AND json_extract(meta, '$.localProxyRequestOverrides.admissionControl.concurrency')=4;")" == '1' ]] \
-    || { die 'golden CC Switch provider R25 context policy is invalid'; return 1; }
+    || { die 'golden CC Switch provider R26 context policy is invalid'; return 1; }
   [[ "$(golden_sqlite_scalar "$database" "SELECT proxy_enabled || ':' || enabled || ':' || auto_failover_enabled || ':' || listen_address || ':' || listen_port FROM proxy_config WHERE app_type='codex';")" == '1:1:0:127.0.0.1:15721' ]] \
     || { die 'golden CC Switch proxy state is invalid'; return 1; }
   for table in \
@@ -1298,7 +1300,7 @@ validate_resource_archive() {
     "$extracted_dir/modelhub-installer/golden/codex-config.toml" \
     || { rm -rf "$work_dir"; return 1; }
   validate_model_catalog \
-    "$extracted_dir/modelhub-installer/assets/models-modelhub-1m.json" \
+    "$extracted_dir/modelhub-installer/assets/cc-switch-model-catalog.json" \
     || { rm -rf "$work_dir"; return 1; }
   validate_golden_settings \
     "$extracted_dir/modelhub-installer/golden/settings.json" \
@@ -2088,7 +2090,7 @@ validate_merged_codex_config() {
     die "unresolved __USER_HOME__ placeholder in merged Codex config"
     return 1
   fi
-  if ! grep -Fq -- "model_catalog_json = \"$escaped_home/.codex/models-modelhub-1m.json\"" "$file"; then
+  if ! grep -Fq -- "model_catalog_json = \"$escaped_home/.codex/cc-switch-model-catalog.json\"" "$file"; then
     die "merged Codex config does not reference the target user's model catalog"
     return 1
   fi
@@ -2454,7 +2456,7 @@ configure_install_paths() {
   CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   CODEX_MANAGED_CONFIG_PATH="$CODEX_MANAGED_CONFIG_DIR/managed_config.toml"
-  MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/models-modelhub-1m.json"
+  MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/cc-switch-model-catalog.json"
   CC_SWITCH_DATABASE_PATH="$INSTALL_USER_HOME/.cc-switch/cc-switch.db"
   CC_SWITCH_SETTINGS_PATH="$INSTALL_USER_HOME/.cc-switch/settings.json"
   LAUNCH_AGENT_PATH="$INSTALL_USER_HOME/Library/LaunchAgents/com.ccswitch.modelhub-env.plist"
@@ -2469,7 +2471,7 @@ managed_targets() {
   if [[ "${1:-all}" == all ]]; then
     printf '%s\t%s\n' "$CODEX_MANAGED_CONFIG_PATH" 'codex-managed-config.toml'
   fi
-  printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'models-modelhub-1m.json'
+  printf '%s\t%s\n' "$MODEL_CATALOG_PATH" 'cc-switch-model-catalog.json'
   printf '%s\t%s\n' "$CC_SWITCH_DATABASE_PATH" 'cc-switch.db'
   printf '%s\t%s\n' "$CC_SWITCH_SETTINGS_PATH" 'settings.json'
   printf '%s\t%s\n' "$LAUNCH_AGENT_PATH" 'com.ccswitch.modelhub-env.plist'
@@ -2619,7 +2621,7 @@ create_backup() {
     die "failed to create backup manifest: $manifest"
     return 1
   fi
-  # R25 never reads or snapshots system routing by default. The App owns opt-in.
+  # R26 never reads or snapshots system routing by default. The App owns opt-in.
   : >"$backup_dir/changed-targets.tsv" || return 1
 
   while IFS=$'\t' read -r target relative; do
@@ -3106,9 +3108,9 @@ choose_codex_config_install_mode() {
       fi
     else
       if [[ "$requires_explicit_overwrite" == "1" ]]; then
-        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R25 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 配置使用复杂 TOML 语法，无法安全合并。是否使用 R26 标准配置完整覆盖？[y/N] ' >/dev/tty
       else
-        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R25 标准配置完整覆盖？[y/N] ' >/dev/tty
+        printf '%s' '检测到本地 Codex 个性化配置，是否使用 R26 标准配置完整覆盖？[y/N] ' >/dev/tty
       fi
       if ! IFS= read -r overwrite_choice </dev/tty; then
         die '读取 Codex 个性化配置覆盖选择失败'
@@ -3368,7 +3370,7 @@ install_runtime_files() {
 
   record_changed_target "$MODEL_CATALOG_PATH" || return 1
   if ! /usr/bin/install -m 600 \
-    "$resources_dir/assets/models-modelhub-1m.json" \
+    "$resources_dir/assets/cc-switch-model-catalog.json" \
     "$MODEL_CATALOG_PATH"; then
     die "failed to install the ModelHub model catalog"
     return 1
@@ -4242,7 +4244,7 @@ explain_administrator_password() {
   printf '%s\n' \
     '接下来 macOS 会请求管理员权限。' \
     '请输入当前 Mac 登录用户的管理员密码（不是 MODELHUB_AK）。输入时终端不会显示字符，输完按回车。' \
-    '该权限用于检查或写入 /Applications。R25 安装不访问系统 Codex 远程路由配置。' \
+    '该权限用于检查或写入 /Applications。R26 安装不访问系统 Codex 远程路由配置。' \
     >&2
 }
 
@@ -4271,7 +4273,7 @@ prepare_backup_restore_permissions() {
   validate_backup_manifest "$backup_dir" || return 1
   prepare_application_permissions || return 1
   # Only an explicit legacy/journalled system restore may inspect /etc/codex.
-  # Default R25 installation and its backups never enter this branch.
+  # Default R26 installation and its backups never enter this branch.
   if ! /usr/bin/awk -F '\t' -v target="$CODEX_MANAGED_CONFIG_PATH" \
     '$1 == target { found=1 } END { exit(found ? 0 : 1) }' "$backup_dir/manifest.tsv" \
     || ! backup_target_was_changed "$backup_dir" "$CODEX_MANAGED_CONFIG_PATH"; then
@@ -4461,7 +4463,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R25 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R26 安装器、CC Switch 和配置资源'
   if [[ -n "$LOCAL_ASSETS_DIR" ]]; then
     if [[ ! -d "$LOCAL_ASSETS_DIR" || -L "$LOCAL_ASSETS_DIR" ]]; then
       cleanup_transaction_stage || true
@@ -4599,7 +4601,7 @@ perform_install() {
   clear_modelhub_credential_transaction_state
   cleanup_launcher_failure_snapshot "$ACTIVE_BACKUP_DIR" || true
   cleanup_transaction_stage || return 1
-  printf '\nR25 默认关闭移动端远程会话，不读取或修改 /etc/codex/managed_config.toml。若升级前 R23 或其他工具曾写入系统路由，该旧策略可能仍然生效；请在 CC Switch 中检查远程会话开关，旧策略不会被安装器自动移除。\n' >&2
+  printf '\nR26 默认关闭移动端远程会话，不读取或修改 /etc/codex/managed_config.toml。若升级前 R23 或其他工具曾写入系统路由，该旧策略可能仍然生效；请在 CC Switch 中检查远程会话开关，旧策略不会被安装器自动移除。\n' >&2
   printf '\n安装完成：默认使用 ModelHub；可在 CC Switch 的 Codex 供应商列表中一键切换到 OpenAI Official，再切回 ModelHub。ModelHub 模式需要 CC Switch 保持运行；Official 模式恢复直连。切换后请重启 Codex；历史迁移完成后可继续旧任务，若个别任务包含新模型无法解密的推理内容，再新建任务。\n' >&2
 }
 

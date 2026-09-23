@@ -3435,12 +3435,21 @@ impl ProxyService {
                     .map_err(|error| error.to_string())?;
                 }
 
-                crate::codex_config::write_codex_provider_live_with_catalog(
+                crate::codex_config::write_codex_provider_live_with_catalog_for_provider(
                     effective_settings,
                     effective_provider.category.as_deref(),
                     auth,
                     config_str,
                     profile,
+                    crate::codex_managed_route::is_modelhub_provider(&effective_provider),
+                    crate::codex_config::is_modelhub_native_responses_config(
+                        effective_provider
+                            .settings_config
+                            .get("config")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        profile,
+                    ),
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                 if let Some(account_id) = target_managed_codex_account_id.as_deref() {
@@ -3920,12 +3929,21 @@ impl ProxyService {
         let config_str = config.get("config").and_then(|v| v.as_str());
         let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        crate::codex_config::write_codex_provider_live_with_catalog_for_provider(
             config,
             provider.category.as_deref(),
             auth,
             config_str,
             profile,
+            crate::codex_managed_route::is_modelhub_provider(provider),
+            crate::codex_config::is_modelhub_native_responses_config(
+                provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                profile,
+            ),
         )
         .map_err(|e| format!("写入 Codex 配置失败: {e}"))
     }
@@ -4006,9 +4024,25 @@ impl ProxyService {
             let profile = provider
                 .map(crate::proxy::providers::resolve_codex_catalog_tool_profile)
                 .unwrap_or(crate::codex_config::CodexCatalogToolProfile::ProxyChat);
+            let is_modelhub_provider =
+                provider.is_some_and(crate::codex_managed_route::is_modelhub_provider);
+            let owns_legacy_modelhub_catalog = provider.is_some_and(|provider| {
+                crate::codex_config::is_modelhub_native_responses_config(
+                    provider
+                        .settings_config
+                        .get("config")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    profile,
+                )
+            });
             let prepared_config =
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-                    config, config_str, profile,
+                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog_for_provider(
+                    config,
+                    config_str,
+                    profile,
+                    is_modelhub_provider,
+                    owns_legacy_modelhub_catalog,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             if managed_official {
@@ -6804,6 +6838,170 @@ env_key = "MODELHUB_AK"
             .expect("disable Codex takeover");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_modelhub_takeover_projects_full_catalog_and_migrates_legacy_pointer() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let mut provider = Provider::with_id(
+            "bytedance-modelhub-official-cli".to_string(),
+            "Bytedance ModelHub - 官方CLI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "modelhub-key" },
+                "config": r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+model_catalog_json = "/Users/test/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+name = "modelhub"
+base_url = "https://aidp.bytedance.net/api/modelhub/online"
+wire_api = "responses"
+"#,
+                "modelCatalog": {
+                    "models": [{
+                        "model": "deepseek-v4.1-flash-t-20260918052446",
+                        "displayName": "DeepSeek V4.1 Flash",
+                        "contextWindow": 100_000,
+                        "reasoningLevels": ["low", "medium", "high"]
+                    }]
+                }
+            }),
+            None,
+        );
+        provider.category = Some("third_party".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let mut takeover_settings = provider.settings_config.clone();
+        ProxyService::apply_codex_takeover_fields_for_provider(
+            &mut takeover_settings,
+            "http://127.0.0.1:15721/v1",
+            &provider,
+        )
+        .expect("apply takeover fields");
+        assert!(
+            takeover_settings
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(|config| config.contains("127.0.0.1:15721")),
+            "fixture must reproduce catalog projection after the upstream URL is hidden"
+        );
+
+        service
+            .write_codex_takeover_live_for_provider(&takeover_settings, Some(&provider))
+            .expect("write ModelHub takeover live config");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read projected ModelHub live config");
+        let parsed: toml::Value = toml::from_str(&live_config).expect("parse live config");
+        assert_eq!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            "takeover must migrate the installer legacy catalog pointer"
+        );
+
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read projected ModelHub catalog"),
+        )
+        .expect("parse projected ModelHub catalog");
+        let models = catalog["models"].as_array().expect("catalog models");
+        for expected in [
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5-2026-04-24",
+            "gpt-5.4",
+            "gpt-5.2",
+            "deepseek-v4.1-flash-t-20260918052446",
+        ] {
+            assert!(
+                models.iter().any(|entry| entry["slug"] == expected),
+                "takeover catalog is missing {expected}"
+            );
+        }
+        let gpt_54 = models
+            .iter()
+            .find(|entry| entry["slug"] == "gpt-5.4")
+            .expect("gpt-5.4 entry");
+        assert_eq!(gpt_54["visibility"], "hide");
+        assert_eq!(gpt_54["priority"], 16);
+    }
+
+    #[test]
+    #[serial]
+    fn codex_modelhub_adapter_on_nonofficial_endpoint_preserves_legacy_pointer() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let mut provider = Provider::with_id(
+            "third-party-with-modelhub-adapter".to_string(),
+            "Third Party".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "third-party-key" },
+                "config": r#"model_provider = "custom"
+model = "other-model"
+model_catalog_json = "/Users/test/.codex/models-modelhub-1m.json"
+
+[model_providers.custom]
+name = "third-party"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+"#,
+                "modelCatalog": { "models": [{ "model": "other-model" }] }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                codex_session_header_adapter: Some(
+                    crate::provider::CodexSessionHeaderAdapter::Modelhub,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let mut takeover_settings = provider.settings_config.clone();
+        ProxyService::apply_codex_takeover_fields_for_provider(
+            &mut takeover_settings,
+            "http://127.0.0.1:15721/v1",
+            &provider,
+        )
+        .expect("apply takeover fields");
+        service
+            .write_codex_takeover_live_for_provider(&takeover_settings, Some(&provider))
+            .expect("write takeover live config");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read projected live config");
+        let parsed: toml::Value = toml::from_str(&live_config).expect("parse live config");
+        assert_eq!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
+            Some("/Users/test/.codex/models-modelhub-1m.json"),
+            "the legacy installer filename is owned only when the original Provider uses the official ModelHub endpoint"
+        );
     }
 
     #[tokio::test]
