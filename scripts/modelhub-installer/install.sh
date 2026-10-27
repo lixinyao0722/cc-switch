@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20261027-r27'
+readonly RELEASE_TAG='modelhub-installer-20261027-r28'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -4499,7 +4499,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R27 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R28 安装器、CC Switch 和配置资源'
   if [[ -n "$LOCAL_ASSETS_DIR" ]]; then
     if [[ ! -d "$LOCAL_ASSETS_DIR" || -L "$LOCAL_ASSETS_DIR" ]]; then
       cleanup_transaction_stage || true

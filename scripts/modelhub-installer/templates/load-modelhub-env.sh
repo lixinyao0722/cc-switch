@@ -18,8 +18,9 @@ resolve_codex_path() {
   [[ -d "$app_path" && ! -L "$app_path" && ! -L "$app_path/Contents/Info.plist" ]] || return 1
   [[ "$("$plutil_bin" -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" == 'com.openai.codex' ]] || return 1
   "$codesign_bin" --verify --deep --strict "$app_path" >/dev/null 2>&1 || return 1
+  # Consume all diagnostics: grep -q can SIGPIPE codesign after a valid match.
   "$codesign_bin" -dv --verbose=4 "$app_path" 2>&1 \
-    | /usr/bin/grep -qx 'TeamIdentifier=2DC432GLL2' || return 1
+    | /usr/bin/grep -x 'TeamIdentifier=2DC432GLL2' >/dev/null || return 1
   for candidate in \
     "$app_path/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" \
     "$app_path/Contents/Resources/codex"; do
@@ -32,7 +33,7 @@ resolve_codex_path() {
       done
       [[ ! -L "$app_path" && -f "$candidate" && -x "$candidate" ]] || return 1
       "$codesign_bin" -dv --verbose=4 "$candidate" 2>&1 \
-        | /usr/bin/grep -qx 'TeamIdentifier=2DC432GLL2' || return 1
+        | /usr/bin/grep -x 'TeamIdentifier=2DC432GLL2' >/dev/null || return 1
       printf '%s\n' "$candidate"
       return 0
     fi
