@@ -10,7 +10,7 @@ prepare_r24_loaded_job() {
   chmod 700 "$ENV_HELPER_PATH"
   printf '%s' 'r24-fixture-old-key' >"$FAKE_KEYCHAIN_STATE"
   printf '%s' 'r24-fixture-old-key' >"$FAKE_LAUNCHCTL_STATE_DIR/env-MODELHUB_AK"
-  printf '%s' '/Applications/ChatGPT.app/Contents/Resources/codex' >"$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH"
+  printf '%s' "$CHATGPT_APP_PATH/Contents/Resources/codex" >"$FAKE_LAUNCHCTL_STATE_DIR/env-CODEX_CLI_PATH"
   : >"$FAKE_LAUNCHCTL_STATE_DIR/job"
 }
 

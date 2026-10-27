@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20260923-r26'
+readonly RELEASE_TAG='modelhub-installer-20261027-r27'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -216,6 +216,38 @@ path_exists() {
   fi
 }
 
+resolve_chatgpt_codex_path() {
+  local app_path="$1"
+  local candidate parent
+  # Select the signed payload, never the codex-cli/bin/codex shell launcher.
+  for candidate in \
+    "$app_path/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" \
+    "$app_path/Contents/Resources/codex"; do
+    if path_exists "$candidate" || path_is_symlink "$candidate"; then
+      parent="$candidate"
+      while [[ "$parent" != "$app_path" ]]; do
+        if [[ "$parent" == '/' || "$parent" == '.' ]]; then
+          die 'ChatGPT Codex path escapes the app bundle'
+          return 1
+        fi
+        if path_is_symlink "$parent"; then
+          die "ChatGPT Codex path contains a symlink: $parent"
+          return 1
+        fi
+        parent="$(dirname "$parent")"
+      done
+      if path_is_symlink "$app_path" || ! path_is_regular_file "$candidate" \
+        || ! path_is_executable "$candidate"; then
+        die "ChatGPT Codex executable is missing or unsafe: $candidate"
+        return 1
+      fi
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  die "ChatGPT Codex executable not found in supported layouts: $app_path"
+}
+
 validate_chatgpt_codex() {
   local codex_path="$1"
   local expected_team_id="$2"
@@ -256,6 +288,7 @@ validate_chatgpt_app() {
   local details
   local team_id
   local file_details
+  local codex_path
 
   if path_is_symlink "$app_path" \
     || ! path_is_directory "$app_path" \
@@ -322,7 +355,8 @@ validate_chatgpt_app() {
     return 1
   fi
 
-  validate_chatgpt_codex "$app_path/Contents/Resources/codex" "$expected_team_id"
+  codex_path="$(resolve_chatgpt_codex_path "$app_path")" || return 1
+  validate_chatgpt_codex "$codex_path" "$expected_team_id"
 }
 
 download_chatgpt_dmg() {
@@ -2453,7 +2487,7 @@ configure_install_paths() {
 
   CC_SWITCH_APP_PATH="$INSTALL_APPLICATIONS_DIR/CC Switch.app"
   CHATGPT_APP_PATH="$INSTALL_APPLICATIONS_DIR/ChatGPT.app"
-  CHATGPT_CODEX_PATH="$CHATGPT_APP_PATH/Contents/Resources/codex"
+  CHATGPT_CODEX_PATH=''
   CODEX_CONFIG_PATH="$INSTALL_USER_HOME/.codex/config.toml"
   CODEX_MANAGED_CONFIG_PATH="$CODEX_MANAGED_CONFIG_DIR/managed_config.toml"
   MODEL_CATALOG_PATH="$INSTALL_USER_HOME/.codex/cc-switch-model-catalog.json"
@@ -4057,11 +4091,13 @@ install_launch_agent() {
 verify_launch_agent_environment() {
   local security_bin="$(installer_tool_path CC_SWITCH_SECURITY_BIN /usr/bin/security)"
   local launchctl_bin="$(installer_tool_path CC_SWITCH_LAUNCHCTL_BIN /bin/launchctl)"
-  local keychain_ak='' launchd_ak='' codex_cli=''
-  if ! keychain_ak="$("$security_bin" find-generic-password -a "$(keychain_account_name)" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)" \
+  local keychain_ak='' launchd_ak='' codex_cli='' expected_cli=''
+  if ! expected_cli="$(resolve_chatgpt_codex_path "$CHATGPT_APP_PATH")" \
+    || ! keychain_ak="$("$security_bin" find-generic-password -a "$(keychain_account_name)" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)" \
     || ! launchd_ak="$("$launchctl_bin" getenv MODELHUB_AK 2>/dev/null)" \
     || ! codex_cli="$("$launchctl_bin" getenv CODEX_CLI_PATH 2>/dev/null)" \
-    || [[ -z "$keychain_ak" || "$keychain_ak" != "$launchd_ak" || "$codex_cli" != '/Applications/ChatGPT.app/Contents/Resources/codex' ]]; then
+    || [[ -z "$keychain_ak" || "$keychain_ak" != "$launchd_ak" ]] \
+    || [[ "$codex_cli" != "$expected_cli" ]]; then
     keychain_ak='' launchd_ak='' codex_cli=''
     die 'ModelHub LaunchAgent environment readback failed'
     return 1
@@ -4463,7 +4499,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R26 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R27 安装器、CC Switch 和配置资源'
   if [[ -n "$LOCAL_ASSETS_DIR" ]]; then
     if [[ ! -d "$LOCAL_ASSETS_DIR" || -L "$LOCAL_ASSETS_DIR" ]]; then
       cleanup_transaction_stage || true
@@ -4520,6 +4556,10 @@ perform_install() {
 
   progress 4 8 '验证 ChatGPT；缺失时从 OpenAI 官方来源安装'
   ensure_chatgpt_app "$stage_dir" "$resources_dir" || {
+    cleanup_transaction_stage || true
+    return 1
+  }
+  CHATGPT_CODEX_PATH="$(resolve_chatgpt_codex_path "$CHATGPT_APP_PATH")" || {
     cleanup_transaction_stage || true
     return 1
   }

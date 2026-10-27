@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.0-ModelHub-R27] - 2026-10-27
+
+- **新版 ChatGPT 安装兼容**：支持内置 Codex CLI 的新版 `codex-cli/CodexCLI.app` 目录，同时兼容旧版目录，不再误报 CLI 缺失并要求重装。继续校验 OpenAI 签名，拒绝 shell 启动入口和越出应用目录的符号链接。
+- **升级后路径刷新**：登录时重新识别真实 CLI 路径；安装器、配置验证和 LaunchAgent 读回使用匹配的路径。
+- **安装包**：固定标签 `modelhub-installer-20261027-r27`，更新安装器及资源包，复用 R26 的 3.24.0 arm64 签名应用；模型、代理、登录态与远程会话默认策略不变。
+
 ## [3.24.0-ModelHub-R26] - 2026-09-23
 
 - **ModelHub Catalog 统一**：安装器和 CC Switch 运行时统一使用 `~/.codex/cc-switch-model-catalog.json`。ModelHub 用户新增模型时，会在 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.2 等内置目录基础上合并，不再生成新文件却让 Codex 继续读取旧 `models-modelhub-1m.json`。旧安装器目录只在确认是 ModelHub Provider 时迁移，其他用户自定义目录保持不变。

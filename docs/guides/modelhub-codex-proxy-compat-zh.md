@@ -17,7 +17,7 @@ ChatGPT App
 
 R26 在 R25 的 ModelHub 治理目录和 GPT-6 Astra 基础上，统一安装器与 CC Switch 运行时使用的 Codex 模型目录。保存 ModelHub 供应商时，会把用户新增映射合并进 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.2 等默认模型，并恢复 `low`、`medium` 推理等级。默认模型仍为 `gpt-5.6-sol`，应用版本继续为 `3.24.0`；历史基线和安装边界见 [R24 发布与验收说明](modelhub-r24-local-delivery-zh.md)。
 
-正式发布标签为 `modelhub-installer-20260923-r26`，资源由本 fork 的 GitHub Release 提供。R26 默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
+正式发布标签为 `modelhub-installer-20261027-r27`，资源由本 fork 的 GitHub Release 提供。R27 支持新版 ChatGPT 的 `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`，并兼容旧版 `Contents/Resources/codex`；签名校验使用真实 CLI，不使用 shell 启动入口。登录时会刷新 CLI 路径。R27 沿用 R26 的 3.24.0 签名应用和配置策略，默认关闭“支持手机远程会话”：安装器不创建或写入系统 managed config，桌面 Codex 仍可使用本地代理。手机远程路由需在供应商编辑页明确开启后保存。应用内仍保留官方更新渠道，将来官方版本超过 3.24.0 时，先核对定制能力兼容性再升级。
 
 安装器支持 macOS 12 及以上版本的 Apple Silicon Mac。开始前只需从管理员处获取 `MODELHUB_AK`；如果 `/Applications/ChatGPT.app` 不存在，安装器会从 OpenAI 官方固定 HTTPS 地址下载新版 ChatGPT DMG，挂载、验签并安装。安装完成后，用户仍需自行打开 ChatGPT 并登录。
 
