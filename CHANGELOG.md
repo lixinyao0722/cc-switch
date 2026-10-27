@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.0-ModelHub-R28] - 2026-10-27
+
+- **登录环境加载修复**：签名检查完整消费 `codesign` 的多行输出，避免匹配 Team ID 后提前关闭管道、触发 SIGPIPE，导致 R27 在第 8 步误报环境加载失败。继续严格校验 OpenAI 应用身份和完整签名，真实验证错误仍拒绝加载。
+- **回归覆盖**：分别覆盖应用和嵌套 CLI 在匹配行后仍有大量输出、签名读取命令真实失败；保留新旧 CLI 路径、签名异常、环境刷新与安装回滚测试。
+- **安装包**：固定标签 `modelhub-installer-20261027-r28`，仅更新安装器和资源，复用 R27/R26 的 3.24.0 arm64 签名应用；配置、凭据和路由默认策略不变。
+
 ## [3.24.0-ModelHub-R27] - 2026-10-27
 
 - **新版 ChatGPT 安装兼容**：支持内置 Codex CLI 的新版 `codex-cli/CodexCLI.app` 目录，同时兼容旧版目录，不再误报 CLI 缺失并要求重装。继续校验 OpenAI 签名，拒绝 shell 启动入口和越出应用目录的符号链接。
