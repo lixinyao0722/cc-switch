@@ -1752,7 +1752,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r28'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r29'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1765,7 +1765,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20261027-r28/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20261027-r29/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2547,7 +2547,7 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
 }
 
 test_r26_release_contract() {
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r28'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r29'
   assert_equals "$APP_ASSET" 'CC-Switch-ModelHub-3.24.0-arm64.app.zip'
   assert_contains "$GOLDEN_CODEX_CONFIG" 'model_provider = "custom"'
   assert_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.custom]'
@@ -3533,7 +3533,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20261027-r28'"
+    "readonly RELEASE_TAG='modelhub-installer-20261027-r29'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.24.0-arm64.app.zip' \
@@ -4182,6 +4182,7 @@ run_test "release-smoke installs repeats and rolls back packaged assets" test_re
 
 source "$REPO_ROOT/tests/scripts/modelhub-installer-r27-cases.sh"
 source "$REPO_ROOT/tests/scripts/modelhub-installer-r28-cases.sh"
+source "$REPO_ROOT/tests/scripts/modelhub-installer-r29-cases.sh"
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.0-ModelHub-R29] - 2026-10-27
+
+- **按需启动兼容**：修复 GUI 会话处于 on-demand-only 模式时，LaunchAgent 已注册但未运行，安装第 8 步等待 30 秒后超时的问题。在轮询前显式请求 kickstart，不使用 -k，避免终止已运行的辅助脚本。
+- **验证与回滚**：保留严格签名校验、辅助脚本完成状态和凭据/环境读回；启动请求失败仍执行自动回滚。新增按需等待、启动失败恢复和已运行任务保护用例。
+- **安装包**：固定标签 modelhub-installer-20261027-r29，复用 R28/R26 的 3.24.0 arm64 签名应用；配置与路由默认策略不变。
+
 ## [3.24.0-ModelHub-R28] - 2026-10-27
 
 - **登录环境加载修复**：签名检查完整消费 `codesign` 的多行输出，避免匹配 Team ID 后提前关闭管道、触发 SIGPIPE，导致 R27 在第 8 步误报环境加载失败。继续严格校验 OpenAI 应用身份和完整签名，真实验证错误仍拒绝加载。

@@ -17,6 +17,10 @@ case "${1:-}" in
       fi
     fi
     [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] || exit 113
+    if [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/demand-pending" ]]; then
+      printf 'state = spawn scheduled\nlast exit code = (never exited)\nprivate environment = fixture-do-not-print\n'
+      exit 0
+    fi
     if [[ -f "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending" ]]; then
       remaining="$(/bin/cat "$FAKE_LAUNCHCTL_STATE_DIR/helper-pending")"
       if [[ "$remaining" -gt 0 ]]; then
@@ -36,7 +40,7 @@ case "${1:-}" in
     if [[ "${FAKE_LAUNCHCTL_BOOTOUT_MODE:-immediate}" == delayed ]]; then
       printf '%s' "${FAKE_LAUNCHCTL_DELAY_POLLS:-2}" >"$FAKE_LAUNCHCTL_STATE_DIR/pending"
     else
-      rm -f "$FAKE_LAUNCHCTL_STATE_DIR/job"
+      rm -f "$FAKE_LAUNCHCTL_STATE_DIR/job" "$FAKE_LAUNCHCTL_STATE_DIR/demand-pending"
     fi
     exit "${FAKE_LAUNCHCTL_BOOTOUT_STATUS:-0}"
     ;;
@@ -50,10 +54,20 @@ case "${1:-}" in
     fi
     if [[ "${FAKE_LAUNCHCTL_BOOTSTRAP_MODE:-success}" != missing ]]; then
       : >"$FAKE_LAUNCHCTL_STATE_DIR/job"
+      if [[ "${FAKE_LAUNCHCTL_ON_DEMAND_ONLY:-0}" == 1 ]]; then
+        : >"$FAKE_LAUNCHCTL_STATE_DIR/demand-pending"
+      fi
       printf '%s' "${FAKE_LAUNCHCTL_HELPER_DELAY_POLLS:-0}" >"$FAKE_LAUNCHCTL_STATE_DIR/helper-pending"
       /usr/bin/shasum -a 256 "$3" >"$FAKE_LAUNCHCTL_STATE_DIR/loaded-plist"
     fi
     if [[ "${FAKE_LAUNCHCTL_SIGNAL_TERM:-0}" == 1 ]]; then kill -TERM "$PPID"; fi
+    ;;
+  kickstart)
+    [[ "$#" == 2 && "$2" == "gui/$(/usr/bin/id -u)/com.ccswitch.modelhub-env" ]] || exit 64
+    [[ -e "$FAKE_LAUNCHCTL_STATE_DIR/job" ]] || exit 113
+    if [[ "${FAKE_LAUNCHCTL_KICKSTART_STATUS:-0}" != 0 ]]; then exit "$FAKE_LAUNCHCTL_KICKSTART_STATUS"; fi
+    # A start request must not reset delay/exit state of an existing run.
+    rm -f "$FAKE_LAUNCHCTL_STATE_DIR/demand-pending"
     ;;
   setenv)
     [[ "${FAKE_LAUNCHCTL_SETENV_FAIL:-}" != "$2" ]] || exit 5

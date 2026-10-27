@@ -7,7 +7,7 @@ export PATH
 
 readonly MODELHUB_SECTION='[model_providers.custom]'
 readonly RELEASE_REPOSITORY='lixinyao0722/cc-switch'
-readonly RELEASE_TAG='modelhub-installer-20261027-r28'
+readonly RELEASE_TAG='modelhub-installer-20261027-r29'
 readonly INSTALLER_ASSET='install.sh'
 readonly APP_ASSET='CC-Switch-ModelHub-3.24.0-arm64.app.zip'
 readonly RESOURCES_ASSET='modelhub-installer-resources.tar.gz'
@@ -4050,6 +4050,12 @@ install_launch_agent() {
     die "failed to load ModelHub environment for the current login session"
     return 1
   fi
+  # RunAtLoad can remain pending in an on-demand-only GUI domain.
+  # Explicitly request a run without terminating an already-running helper.
+  if ! "$launchctl_bin" kickstart "$domain/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+    die "failed to start ModelHub environment LaunchAgent"
+    return 1
+  fi
   attempts="$(launch_agent_poll_attempts)" || return 1
   while [[ "$attempt" -le "$attempts" ]]; do
     if ! job_output="$("$launchctl_bin" print "$domain/$LAUNCH_AGENT_LABEL" 2>/dev/null)"; then
@@ -4499,7 +4505,7 @@ perform_install() {
       return 1
     }
   fi
-  progress 3 8 '下载并校验 R28 安装器、CC Switch 和配置资源'
+  progress 3 8 '下载并校验 R29 安装器、CC Switch 和配置资源'
   if [[ -n "$LOCAL_ASSETS_DIR" ]]; then
     if [[ ! -d "$LOCAL_ASSETS_DIR" || -L "$LOCAL_ASSETS_DIR" ]]; then
       cleanup_transaction_stage || true
