@@ -388,7 +388,8 @@ test_managed_config_merge_creates_missing_and_normalizes_duplicates() {
 
 test_managed_config_merge_rejects_builtin_openai_provider_and_invalid_toml() {
   local case_dir="$TEST_TMP/managed-config-merge-reject"
-  local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
+  local codex_bin
+  codex_bin="$(resolve_chatgpt_codex_path '/Applications/ChatGPT.app')" || return 1
   mkdir -p "$case_dir"
   [[ -x "$codex_bin" ]] || fail "Codex parser is unavailable: $codex_bin"
   printf '%s\n' \
@@ -545,7 +546,8 @@ test_merge_replaces_equivalent_modelhub_headers() {
   local case_dir="$TEST_TMP/merge-equivalent-headers"
   local parser_home="$case_dir/parser-home"
   local user_home="$case_dir/user home"
-  local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
+  local codex_bin
+  codex_bin="$(resolve_chatgpt_codex_path '/Applications/ChatGPT.app')" || return 1
   mkdir -p "$case_dir" "$parser_home" "$user_home/.codex"
   cp "$MODEL_CATALOG" \
     "$user_home/.codex/cc-switch-model-catalog.json"
@@ -581,7 +583,8 @@ test_merge_replaces_equivalent_modelhub_headers() {
 
 test_merge_validation_uses_real_toml_parser() {
   local case_dir="$TEST_TMP/merge-parser-validation"
-  local codex_bin='/Applications/ChatGPT.app/Contents/Resources/codex'
+  local codex_bin
+  codex_bin="$(resolve_chatgpt_codex_path '/Applications/ChatGPT.app')" || return 1
   mkdir -p "$case_dir"
   [[ -x "$codex_bin" ]] || fail "Codex parser is unavailable: $codex_bin"
   create_merged_config_fixture "$case_dir/invalid.toml" '/Users/Test User'
@@ -665,7 +668,7 @@ create_chatgpt_validation_stubs() {
     '  if [[ -n "${FAKE_FINAL_TARGET:-}" && "$target" == "$FAKE_FINAL_TARGET" && "${FAKE_FINAL_APP_STRICT:-pass}" != "pass" ]]; then exit 1; fi' \
     '  [[ "${FAKE_APP_STRICT:-pass}" == "pass" ]]' \
     'elif [[ "$1" == "-dv" ]]; then' \
-    '  if [[ "$target" == */Contents/Resources/codex ]]; then' \
+    '  if [[ "$target" == */Contents/Resources/codex || "$target" == */CodexCLI.app/Contents/MacOS/codex ]]; then' \
     '    echo "TeamIdentifier=${FAKE_CODEX_TEAM_ID:-2DC432GLL2}" >&2' \
     '  else' \
     '    echo "TeamIdentifier=${FAKE_APP_TEAM_ID:-2DC432GLL2}" >&2' \
@@ -1749,7 +1752,7 @@ test_preflight_downloads_from_immutable_release_tag() {
   printf 'app\n' >"$remote_dir/CC-Switch-ModelHub-3.24.0-arm64.app.zip"
   printf 'resources\n' >"$remote_dir/modelhub-installer-resources.tar.gz"
   printf 'checksums\n' >"$remote_dir/SHA256SUMS.txt"
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r26'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r27'
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1762,7 +1765,7 @@ test_preflight_downloads_from_immutable_release_tag() {
     '    *) shift ;;' \
     '  esac' \
     'done' \
-    '[[ "$url" == *"/releases/download/modelhub-installer-20260923-r26/"* ]]' \
+    '[[ "$url" == *"/releases/download/modelhub-installer-20261027-r27/"* ]]' \
     'cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"' \
     >"$curl_stub"
   chmod +x "$curl_stub"
@@ -2523,7 +2526,8 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
   export CC_SWITCH_INSTALLER_TEST_APPLICATIONS_DIR="$case_dir/Applications"
   export CC_SWITCH_INSTALLER_TEST_ETC_ROOT="$case_dir/etc"
   export CC_SWITCH_INSTALLER_TEST_PRIVATE_VAR_TMP="$case_dir/private-var-tmp"
-  export CC_SWITCH_CODEX_CONFIG_VALIDATOR='/Applications/ChatGPT.app/Contents/Resources/codex'
+  CC_SWITCH_CODEX_CONFIG_VALIDATOR="$(resolve_chatgpt_codex_path '/Applications/ChatGPT.app')" || return 1
+  export CC_SWITCH_CODEX_CONFIG_VALIDATOR
   export FAKE_SUDO_LOG="$sudo_log"
   configure_install_paths
   write_executable_stub "$sudo_bin" \
@@ -2543,7 +2547,7 @@ test_managed_config_install_uses_private_var_staging_for_privileged_copy() {
 }
 
 test_r26_release_contract() {
-  assert_equals "$RELEASE_TAG" 'modelhub-installer-20260923-r26'
+  assert_equals "$RELEASE_TAG" 'modelhub-installer-20261027-r27'
   assert_equals "$APP_ASSET" 'CC-Switch-ModelHub-3.24.0-arm64.app.zip'
   assert_contains "$GOLDEN_CODEX_CONFIG" 'model_provider = "custom"'
   assert_contains "$GOLDEN_CODEX_CONFIG" '[model_providers.custom]'
@@ -3529,7 +3533,7 @@ test_package_builds_exact_allowlisted_release_assets() {
 
   assert_contains \
     "$output_dir/install.sh" \
-    "readonly RELEASE_TAG='modelhub-installer-20260923-r26'"
+    "readonly RELEASE_TAG='modelhub-installer-20261027-r27'"
   actual_files="$(find "$output_dir" -maxdepth 1 -type f -exec basename '{}' \; | LC_ALL=C sort)"
   expected_files="$(printf '%s\n' \
     'CC-Switch-ModelHub-3.24.0-arm64.app.zip' \
@@ -4175,6 +4179,8 @@ run_test "package rejects custom golden snapshot input" test_package_rejects_cus
 run_test "local golden snapshot keeps live proxy and database upstream" test_local_golden_snapshot_keeps_live_proxy_and_database_upstream
 run_test "golden DB builder creates minimal public snapshot" test_golden_db_builder_creates_minimal_public_snapshot
 run_test "release-smoke installs repeats and rolls back packaged assets" test_release_smoke_installs_repeats_and_rolls_back_packaged_assets
+
+source "$REPO_ROOT/tests/scripts/modelhub-installer-r27-cases.sh"
 
 if [[ "$TESTS_RUN" -eq 0 ]]; then
   echo "No tests matched filter: $TEST_FILTER" >&2
